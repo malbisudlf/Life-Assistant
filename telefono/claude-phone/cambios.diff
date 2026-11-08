@@ -1,0 +1,3536 @@
+diff --git a/claude-api-server/server.js b/claude-api-server/server.js
+index c895444..1491d02 100644
+--- a/claude-api-server/server.js
++++ b/claude-api-server/server.js
+@@ -24,6 +24,12 @@ const {
+   validateRequiredFields,
+   buildRepairPrompt,
+ } = require('./structured');
++const bitacora = require('./bitacora');
++// Parche 19: un proceso de Claude por llamada y el contexto ya mirado al descolgar.
++const sesionViva = require('./sesion-viva');
++const contexto = require('./contexto');
++const SESION_VIVA = process.env.SESION_VIVA !== '0';
++const SESION_VIVA_MAX = parseInt(process.env.SESION_VIVA_MAX) || 3;
+ 
+ const app = express();
+ const PORT = process.env.PORT || 3333;
+@@ -88,6 +94,9 @@ function buildClaudeEnvironment() {
+     PYENV_ROOT: path.join(HOME, '.pyenv'),
+     BUN_INSTALL: path.join(HOME, '.bun'),
+     // CRITICAL: These tell Claude Code it's running in the proper environment
++    // Parche 34: sin pensamiento extendido. Por teléfono no aporta y un turno con él
++    // llegó a 9,6 s, frente a 4,4 sin él (medido el 2026-11-04).
++    MAX_THINKING_TOKENS: '0',
+     CLAUDECODE: '1',
+     CLAUDE_CODE_ENTRYPOINT: 'cli',
+   };
+@@ -114,7 +123,59 @@ console.log('[STARTUP] API keys loaded:', apiKeys.join(', '));
+ const sessions = new Map();
+ 
+ // Model selection - Sonnet for balanced speed/quality
+-const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514';
++// Parche 34 (2026-11-04): Sonnet en la sesión adelgazada y sin pensamiento extendido: un
++// turno sin herramientas 2-2,4 s, con una herramienta ~5 s. Se probó Haiku (1,3-2,1 y
++// 2,9 s), pero Mikel lo notó enseguida: contestaba peor y se liaba. «Piénsalo bien» pasa
++// ese turno a Opus (CLAUDE_MODEL_PESADO).
++const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-5-5';
++const CLAUDE_MODEL_PESADO = process.env.CLAUDE_MODEL_PESADO || 'claude-opus-5-5';
++const PIDE_PENSAR = /\b(?:pi[eé]ns(?:a|alo|atelo|átelo)|razona(?:lo)?|m[ií]ralo|analiza(?:lo)?)\b.*\b(?:bien|a fondo|con calma|despacio|detenidamente)\b|\bmodo potente\b|\bcon sonnet\b/i;
++
++// Parche 34: la sesión adelgazada. Sin las herramientas integradas que no se usan por
++// teléfono (solo Bash), sin el prompt de sistema de Claude Code ni los ajustes, plugins
++// y conectores de la cuenta: de 55.000 tokens por turno a 28.000. El formato de voz y el
++// RUNBOOK van en el prompt de sistema, una vez, en vez de repetirse en cada turno.
++const SESION_FLACA = process.env.SESION_FLACA !== '0';
++const FICHERO_SISTEMA = path.join(process.cwd(), '.sistema-llamada.md');
++
++// El MCP del teléfono, sin salir de la máquina: por el túnel son 175 ms cada petición, y en
++// local 14 (medido el 2026-11-04). El backend está en este mismo `caja`.
++function ficheroMcpLocal() {
++  const original = path.join(process.cwd(), '.mcp.json');
++  try {
++    const mcp = JSON.parse(fs.readFileSync(original, 'utf8'));
++    for (const s of Object.values(mcp.mcpServers || {})) {
++      if (/\/mcp\/telefono/.test(s.url || '')) s.url = (process.env.CONTEXTO_URL || 'http://127.0.0.1:8080') + '/mcp/telefono';
++    }
++    const local = path.join(process.cwd(), '.mcp-llamada.json');
++    fs.writeFileSync(local, JSON.stringify(mcp), { mode: 0o600 });
++    return local;
++  } catch {
++    return original;
++  }
++}
++
++function argsFlacos() {
++  if (!SESION_FLACA) return [];
++  let runbook = '';
++  try { runbook = fs.readFileSync(path.join(process.cwd(), 'CLAUDE.md'), 'utf8'); } catch { /* sin él, el formato */ }
++  fs.writeFileSync(FICHERO_SISTEMA, FORMATO_VOZ + '\n\n' + runbook);
++  return [
++    '--setting-sources', '',
++    '--strict-mcp-config', '--mcp-config', ficheroMcpLocal(),
++    '--tools', 'Bash',
++    '--system-prompt-file', FICHERO_SISTEMA,
++  ];
++}
++
++// La hora en cada turno: sin el prompt de sistema de Claude Code no la sabe, y mirarla
++// con `date` sería un viaje más al modelo.
++function horaAhora() {
++  const f = new Intl.DateTimeFormat('es-ES', {
++    timeZone: 'Europe/Madrid', weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit',
++  });
++  return '[Ahora: ' + f.format(new Date()) + '] ';
++}
+ 
+ function parseClaudeStdout(stdout) {
+   // Claude Code CLI may output JSONL; when it does, extract the `result` message.
+@@ -144,13 +205,14 @@ function parseClaudeStdout(stdout) {
+   return { response, sessionId };
+ }
+ 
+-function runClaudeOnce({ fullPrompt, callId, timestamp }) {
++function runClaudeOnce({ fullPrompt, callId, timestamp, modelo, flaca = false }) {
+   const startTime = Date.now();
+ 
+   const args = [
+     '--dangerously-skip-permissions',
+     '-p', fullPrompt,
+-    '--model', CLAUDE_MODEL
++    '--model', modelo || CLAUDE_MODEL,
++    ...(flaca ? argsFlacos() : [])
+   ];
+ 
+   if (callId) {
+@@ -189,6 +251,44 @@ function runClaudeOnce({ fullPrompt, callId, timestamp }) {
+   });
+ }
+ 
++// Parche 19: los procesos vivos, uno por llamada (callId -> sesión de sesion-viva.js).
++const vivas = new Map();
++
++/**
++ * La sesión viva de esta llamada, creándola si no la hay. Lanza si no se puede (hay
++ * demasiadas abiertas): quien llama cae entonces al camino de un proceso por turno.
++ * Se crea ANTES de pedir el contexto al backend para que los dos arranques —el de
++ * Claude Code y la consulta— vayan a la vez.
++ */
++function obtenerViva(callId, timestamp) {
++  const actual = vivas.get(callId);
++  if (actual && actual.viva) return actual;
++  if (vivas.size >= SESION_VIVA_MAX) {
++    throw new Error(`ya hay ${vivas.size} sesiones vivas abiertas`);
++  }
++  const args = [
++    '--dangerously-skip-permissions',
++    '-p',
++    '--input-format', 'stream-json',
++    '--output-format', 'stream-json',
++    '--verbose',
++    '--model', CLAUDE_MODEL,
++    ...argsFlacos(),
++  ];
++  if (sessions.has(callId)) {
++    args.push('--resume', callId);
++    console.log(`[${timestamp}] SESION-VIVA: reabre ${callId}`);
++  } else {
++    args.push('--session-id', callId);
++    sessions.set(callId, true);
++    console.log(`[${timestamp}] SESION-VIVA: nueva ${callId}`);
++  }
++  const s = sesionViva.crear({ args, env: claudeEnv });
++  s.alMorir(function () { if (vivas.get(callId) === s) vivas.delete(callId); });
++  vivas.set(callId, s);
++  return s;
++}
++
+ /**
+  * Voice Context - Prepended to all voice queries
+  *
+@@ -197,6 +297,18 @@ function runClaudeOnce({ fullPrompt, callId, timestamp }) {
+  * - Output COMPLETED for status logging (12 words max)
+  * - For Slack delivery requests: do the work, send to Slack, then acknowledge
+  */
++const FORMATO_VOZ = `# El formato de cada respuesta
++
++Te están oyendo por teléfono. CADA respuesta, sin excepción, lleva esta línea, y es lo
++único que se oye:
++
++🗣️ VOICE_RESPONSE: lo que quieres decir, en una sola línea y menos de 40 palabras, como lo
++dirías hablando. Contesta de verdad a lo que te ha dicho: no vale un «hecho» sin más.
++
++Fuera de esa línea no escribas nada más que las líneas especiales que explica este
++documento (📖 LEER, ✅ CONFIRMAR). Sin explicar lo que vas a hacer: haz y contesta.
++Cuantos menos pasos, mejor: si ya lo sabes por el contexto, contesta sin herramientas.`;
++
+ const VOICE_CONTEXT = `[VOICE CALL CONTEXT]
+ This query comes via voice call. You MUST include BOTH of these lines in your response:
+ 
+@@ -221,6 +333,24 @@ Example response:
+ 
+ `;
+ 
++function cabecera(devicePrompt) {
++  let texto = '';
++  if (devicePrompt) {
++    texto += `[DEVICE IDENTITY]\n${devicePrompt}\n[END DEVICE IDENTITY]\n\n`;
++  }
++  // Parche 34: el formato ya va en el prompt de sistema.
++  return SESION_FLACA ? texto : texto + VOICE_CONTEXT;
++}
++
++// Parche 27: el turno con el que se precalienta. Claude lo contesta (no hay forma de
++// mandarle algo sin que conteste), así que se le pide lo más corto posible. Lo de
++// después evita que el primer turno de verdad empiece comentando el contexto («ya lo
++// tengo en el contexto…»): no se dice, pero se escribe antes del VOICE_RESPONSE.
++const AVISO_PRECALENTAR = '[Acaba de descolgar y todavía no ha dicho nada. Este mensaje solo prepara la llamada: responde únicamente «listo». A lo que diga después contesta directamente con el formato de voz, sin mencionar este mensaje ni el contexto.]';
++
++// callId -> promesa que se cumple cuando el turno de precalentar ya está mandado.
++const precalentando = new Map();
++
+ // Middleware
+ app.use(express.json());
+ 
+@@ -280,26 +410,76 @@ app.post('/ask', async (req, res) => {
+      * 2. VOICE_CONTEXT - general voice call instructions
+      * 3. User's prompt - what they actually said
+      */
++    // Parche 34: la cabecera, solo al abrir sesión; luego ya la lleva dentro.
+     let fullPrompt = '';
+-
+-    if (devicePrompt) {
+-      fullPrompt += `[DEVICE IDENTITY]\n${devicePrompt}\n[END DEVICE IDENTITY]\n\n`;
++    // Parche 27: si se está precalentando, que su turno (con el contexto) vaya delante.
++    // Parche 28: y si ese turno sigue en marcha, se corta: el contexto ya está dentro
++    // y la pregunta no espera a un «listo» que nadie va a oír (llegó a tardar 12,7 s).
++    const pre = callId ? precalentando.get(callId) : null;
++    if (pre) {
++      await pre.enviado.catch(() => {});
++      const v = vivas.get(callId);
++      if (!pre.hecho && v && v.interrumpir()) {
++        pre.cortado = true;
++        console.log(`[${timestamp}] PRECALENTAR: la pregunta llega antes de acabar; se corta`);
++      }
+     }
+-
+-    fullPrompt += VOICE_CONTEXT;
+-    fullPrompt += prompt;
+-
+-    const { code, stdout, stderr, duration_ms } = await runClaudeOnce({ fullPrompt, callId, timestamp });
+-
+-    if (code !== 0) {
+-      console.error(`[${new Date().toISOString()}] ERROR: Claude CLI exited with code ${code}`);
+-      console.error(`STDERR: ${stderr}`);
+-      console.error(`STDOUT: ${stdout.substring(0, 500)}`);
+-      const errorMsg = stderr || stdout || `Exit code ${code}`;
+-      return res.json({ success: false, error: `Claude CLI failed: ${errorMsg}`, duration_ms });
++    // Memoria entre llamadas y lo ya mirado (parche 19): solo al abrir sesión, las
++    // siguientes ya lo llevan dentro.
++    const nueva = Boolean(callId) && !sessions.has(callId);
++    if (nueva || !callId) fullPrompt += cabecera(devicePrompt);
++    if (nueva) fullPrompt += bitacora.contexto(callId);
++
++    // Parche 19: el proceso se lanza ya, y el contexto se pide mientras arranca.
++    let viva = null;
++    if (SESION_VIVA && callId) {
++      try {
++        viva = obtenerViva(callId, timestamp);
++      } catch (e) {
++        console.warn(`[${timestamp}] SESION-VIVA: no (${e.message}); un proceso por turno`);
++      }
++    }
++    if (nueva) fullPrompt += await contexto.pedir();
++    fullPrompt += horaAhora() + prompt;
++    // Parche 34: «piénsalo bien» va con Sonnet solo ese turno.
++    const pesado = PIDE_PENSAR.test(prompt);
++    const esAvisoSaliente = bitacora.apuntarConsulta(callId, prompt);
++
++    let response, sessionId, duration_ms;
++    let respondida = false;
++    if (viva) {
++      try {
++        if (pesado) {
++          console.log(`[${timestamp}] MODELO: este turno, ${CLAUDE_MODEL_PESADO}`);
++          viva.fijarModelo(CLAUDE_MODEL_PESADO);
++        }
++        const r = await viva.preguntar(fullPrompt);
++        if (pesado) viva.fijarModelo(CLAUDE_MODEL);
++        duration_ms = r.duration_ms;
++        if (r.isError) {
++          console.error(`[${new Date().toISOString()}] ERROR (sesión viva): ${r.response.substring(0, 500)}`);
++          return res.json({ success: false, error: `Claude CLI failed: ${r.response}`, duration_ms });
++        }
++        ({ response, sessionId } = r);
++        respondida = true;
++      } catch (e) {
++        // La sesión está en disco: el camino viejo la retoma con --resume.
++        console.warn(`[${new Date().toISOString()}] SESION-VIVA: falló (${e.message}); vuelvo a un proceso por turno`);
++      }
+     }
+ 
+-    const { response, sessionId } = parseClaudeStdout(stdout);
++    if (!respondida) {
++      const r = await runClaudeOnce({ fullPrompt, callId, timestamp, modelo: pesado ? CLAUDE_MODEL_PESADO : CLAUDE_MODEL, flaca: true });
++      duration_ms = r.duration_ms;
++      if (r.code !== 0) {
++        console.error(`[${new Date().toISOString()}] ERROR: Claude CLI exited with code ${r.code}`);
++        console.error(`STDERR: ${r.stderr}`);
++        console.error(`STDOUT: ${r.stdout.substring(0, 500)}`);
++        const errorMsg = r.stderr || r.stdout || `Exit code ${r.code}`;
++        return res.json({ success: false, error: `Claude CLI failed: ${errorMsg}`, duration_ms });
++      }
++      ({ response, sessionId } = parseClaudeStdout(r.stdout));
++    }
+ 
+     if (sessionId && callId) {
+       sessions.set(callId, sessionId);
+@@ -307,6 +487,7 @@ app.post('/ask', async (req, res) => {
+     }
+ 
+     console.log(`[${new Date().toISOString()}] RESPONSE (${duration_ms}ms): "${response.substring(0, 100)}..."`);
++    if (callId && !esAvisoSaliente) bitacora.apuntarTurno(callId, prompt, response);
+ 
+     res.json({ success: true, response, sessionId, duration_ms });
+ 
+@@ -476,7 +657,77 @@ app.post('/end-session', (req, res) => {
+     sessions.delete(callId);
+     console.log(`[${timestamp}] SESSION ENDED: ${callId}`);
+   }
++  // Parche 19: nada vivo después de colgar.
++  const viva = callId ? vivas.get(callId) : null;
++  if (viva) {
++    viva.cerrar();
++    console.log(`[${timestamp}] SESION-VIVA cerrada: ${callId}`);
++  }
++
++  res.json({ success: true });
++});
+ 
++/**
++ * POST /precalentar (parche 27)
++ *
++ * La voice-app lo llama al descolgar, mientras suena el saludo. Arranca la sesión viva
++ * de la llamada y le manda ya el turno largo (identidad, bitácora, contexto) con
++ * AVISO_PRECALENTAR. Sin esto, la primera pregunta pagaba todo eso: arrancar Claude
++ * Code, conectar su MCP y leer en frío su prompt de sistema, el CLAUDE.md y el
++ * contexto. Contesta al momento; lo demás sigue solo.
++ *
++ * Request body: { "callId": "...", "devicePrompt": "..." }
++ */
++app.post('/precalentar', (req, res) => {
++  const { callId, devicePrompt } = req.body || {};
++  const timestamp = new Date().toISOString();
++  if (!callId || !SESION_VIVA) {
++    return res.json({ success: false, error: callId ? 'sin sesión viva' : 'falta callId' });
++  }
++  if (sessions.has(callId)) return res.json({ success: true, yaEstaba: true });
++
++  let viva;
++  try {
++    viva = obtenerViva(callId, timestamp);
++  } catch (e) {
++    console.warn(`[${timestamp}] PRECALENTAR: no (${e.message})`);
++    return res.json({ success: false, error: e.message });
++  }
++  res.json({ success: true });
++
++  const t0 = Date.now();
++  let turno = null;
++  const enviado = (async () => {
++    const fullPrompt = cabecera(devicePrompt) + bitacora.contexto(callId) + (await contexto.pedir()) + AVISO_PRECALENTAR;
++    turno = viva.preguntar(fullPrompt);
++  })();
++  const estado = { enviado, hecho: false, cortado: false };
++  precalentando.set(callId, estado);
++  enviado.then(() => turno).then((r) => {
++    if (estado.cortado) {
++      console.log(`[${new Date().toISOString()}] PRECALENTAR cortado por la pregunta a los ${Date.now() - t0} ms`);
++      return;
++    }
++    if (r.isError) throw new Error(r.response.substring(0, 200));
++    console.log(`[${new Date().toISOString()}] PRECALENTADA ${callId} en ${Date.now() - t0} ms`);
++  }).catch((e) => {
++    console.warn(`[${new Date().toISOString()}] PRECALENTAR falló (${e.message}): la primera pregunta empieza de cero`);
++    // Que la primera pregunta lleve su contexto y no intente un --resume de una sesión
++    // que quizá no llegó a guardarse.
++    sessions.delete(callId);
++  }).finally(() => {
++    estado.hecho = true;
++    if (precalentando.get(callId) === estado) precalentando.delete(callId);
++  });
++});
++
++/**
++ * POST /bitacora
++ * voice-app avisa al acabar cada llamada saliente, contestada o no. Las no cogidas y
++ * las del buzón no pasan por /ask, y sin esto Jarvis no sabría que te llamó.
++ */
++app.post('/bitacora', (req, res) => {
++  bitacora.apuntarSaliente(req.body);
+   res.json({ success: true });
+ });
+ 
+@@ -503,17 +754,22 @@ app.get('/', (req, res) => {
+     endpoints: {
+       'POST /ask': 'Send a prompt to Claude',
+       'POST /ask-structured': 'Send a prompt and return validated JSON (n8n)',
++      'POST /precalentar': 'Arranca la sesión de una llamada al descolgar (parche 27)',
+       'GET /health': 'Health check'
+     }
+   });
+ });
+ 
+ // Start server
+-app.listen(PORT, '0.0.0.0', () => {
++// Parche 21 (Life Assistant, telefono/PARCHES.md): solo en local. /ask lanza Claude Code con
++// --dangerously-skip-permissions y no pide credencial: en 0.0.0.0 cualquiera de la LAN o del
++// tailnet mandaba en caja. La voice-app (red del host) llega por localhost:3333.
++const HOST = process.env.HOST || '127.0.0.1';
++app.listen(PORT, HOST, () => {
+   console.log('='.repeat(64));
+   console.log('Claude HTTP API Server');
+   console.log('='.repeat(64));
+-  console.log(`\nListening on: http://0.0.0.0:${PORT}`);
++  console.log(`\nListening on: http://${HOST}:${PORT}`);
+   console.log(`Health check: http://localhost:${PORT}/health`);
+   console.log('\nReady to receive Claude queries from voice interface.\n');
+ });
+diff --git a/cli/lib/docker.js b/cli/lib/docker.js
+index b2f02ad..6e9dea7 100644
+--- a/cli/lib/docker.js
++++ b/cli/lib/docker.js
+@@ -216,6 +216,13 @@ export function generateEnvFile(config) {
+     `SIP_EXTENSION=${config.devices[0].extension}`,
+     `SIP_AUTH_ID=${config.devices[0].authId}`,
+     `SIP_PASSWORD=${config.devices[0].password}`,
++    // La voice-app lee SIP_AUTH_PASSWORD/SIP_AUTH_USERNAME, no SIP_PASSWORD: sin estas
++    // lineas se registraria con las credenciales de ejemplo del repositorio original.
++    `SIP_AUTH_PASSWORD=${config.devices[0].password}`,
++    `SIP_AUTH_USERNAME=${config.devices[0].extension}`,
++    `SIP_REGISTRAR_PORT=5060`,
++    `SIP_TRUNK_HOST=${config.sip.domain}`,
++    `SIP_PROXY=${config.sip.registrar}:5060`,
+     '',
+     '# Claude API Server',
+     `CLAUDE_API_URL=${claudeApiUrl}`,
+diff --git a/voice-app/index.js b/voice-app/index.js
+index 5e58907..c0106fd 100644
+--- a/voice-app/index.js
++++ b/voice-app/index.js
+@@ -31,6 +31,9 @@ var connectWithRetry = connectionRetry.connectWithRetry;
+ var outboundModule = require("./lib/outbound-routes");
+ var outboundRouter = outboundModule.router;
+ var setupOutboundRoutes = outboundModule.setupRoutes;
++// Parche 32: la línea fija de O2, para llamar a otras personas.
++var LineaO2 = require("./lib/linea-o2").LineaO2;
++var lineaO2 = null;
+ 
+ // Import query routes
+ var queryModule = require("./lib/query-routes");
+@@ -113,6 +116,18 @@ srf.on("connect", function(err, hostport) {
+   }
+   console.log("[DRACHTIO] Local SIP address: " + localAddress);
+ 
++  if (!lineaO2 && process.env.O2_SIP_USUARIO) {
++    lineaO2 = new LineaO2(srf, {
++      usuario: process.env.O2_SIP_USUARIO,
++      proxy: process.env.O2_PROXY,
++      dominio: process.env.O2_DOMINIO || undefined,
++      ipLocal: localAddress,
++      puertoLocal: parseInt(process.env.DRACHTIO_SIP_PORT) || 5070,
++      log: function(m) { console.log("[" + new Date().toISOString() + "] " + m); }
++    });
++    console.log("[O2] Línea fija " + (lineaO2.configurada() ? "lista (se registra solo para llamar)" : "MAL configurada: falta O2_PROXY"));
++  }
++
+   // Start Multi-Registration for all devices
+   if (!registrar) {
+     registrar = new MultiRegistrar(srf, {
+@@ -204,7 +219,8 @@ function initializeServers() {
+     whisperClient: whisperClient,
+     claudeBridge: claudeBridge,
+     ttsService: ttsService,
+-    wsPort: config.ws_port
++    wsPort: config.ws_port,
++    lineaO2: lineaO2
+   });
+ 
+   httpServer.app.use("/api", outboundRouter);
+@@ -218,6 +234,36 @@ function initializeServers() {
+   httpServer.app.use("/api", queryRouter);
+   console.log("[" + new Date().toISOString() + "] QUERY API enabled (/api/query, /api/devices)");
+ 
++  // Parche 34: la tele, para el backend (la herramienta `tele`). Con la misma llave que
++  // las llamadas a terceros.
++  httpServer.app.post("/api/tele", async function (req, res) {
++    const llave = process.env.TELEFONO_TERCEROS_TOKEN || "";
++    if (!llave || req.get("X-Auth-Token") !== llave) return res.status(403).json({ ok: false, frase: "Sin permiso" });
++    res.json(await require("./lib/tele").orden(req.body || {}));
++  });
++
++  // Parche 34: cómo está lo que sostiene la llamada, para el vigilante del backend.
++  httpServer.app.get("/api/salud", function (req, res) {
++    const llave = process.env.TELEFONO_TERCEROS_TOKEN || "";
++    if (!llave || req.get("X-Auth-Token") !== llave) return res.status(403).json({ ok: false });
++    res.json({ ok: true, oido: { configurado: !!process.env.OIDO_URL, disponible: whisperClient.oidoDisponible() } });
++  });
++
++  // Parche 34: lo que se dice siempre igual, ya sintetizado (en segundo plano).
++  setTimeout(function () {
++    ttsService.prepararFrasesFijas([
++      "¿Señor?", "Un momento, señor.", "Enseguida, señor.", "Déjeme ver.", "Ahora mismo.", "Lo miro.",
++      "Hecho, señor.", "Apagada, señor.", "Encendida, señor.", "Silenciada, señor.", "Con sonido, señor.",
++      "Encendiendo la tele, señor.", "Ya está encendida, señor.", "Ya está apagada, señor.",
++      "La tele no responde, señor.", "La tele me pide permiso, señor. Acéptelo en la pantalla con el mando.",
++      "Abriendo Netflix, señor.", "Abriendo YouTube, señor.",
++      "No te he oído. ¿Sigues ahí?", "Perdona, no te he entendido. ¿Puedes repetir?", "Hasta luego. Llámame cuando quieras."
++    ]).catch(function (e) { console.warn("[TTS] Frases fijas: " + e.message); });
++  }, 3000);
++
++  // Parche 31: el audio en directo (Fish, Azure) que FreeSWITCH pide por shout://
++  httpServer.app.get("/tts-stream/:id", ttsService.servirEnDirecto);
++
+   // Finalize HTTP server
+   httpServer.finalize();
+ 
+@@ -238,6 +284,14 @@ function checkReadyState() {
+ 
+     // Register SIP INVITE handler
+     srf.invite(function(req, res) {
++      // Parche 32: una llamada AL FIJO llega aquí mientras caja está registrada en O2.
++      // Se rechaza con 480 (y no con 6xx, que cortaría también el timbre del Gigaset):
++      // quien llame a casa no habla con un Claude que tiene shell.
++      if (lineaO2 && lineaO2.esSuya(req)) {
++        console.log("[" + new Date().toISOString() + "] O2: llamada entrante al fijo, rechazada (480)");
++        try { res.send(480); } catch (e) {}
++        return;
++      }
+       handleInvite(req, res, {
+         audioForkServer: audioForkServer,
+         mediaServer: mediaServer,
+diff --git a/voice-app/lib/audio-fork.js b/voice-app/lib/audio-fork.js
+index 503e831..c70f4f8 100644
+--- a/voice-app/lib/audio-fork.js
++++ b/voice-app/lib/audio-fork.js
+@@ -29,9 +29,14 @@ class AudioForkSession extends EventEmitter {
+     ws,
+     callUuid,
+     sampleRate = 16000,
+-    endSilenceMs = 1500,
++    // Parche 34: era 1500. Si la frase ya parece acabada se cierra antes aún, a los
++    // VAD_CIERRE_RAPIDO_MS (ver cerrarPausa y anticipo.js).
++    endSilenceMs = parseInt(process.env.VAD_END_SILENCE_MS) || 1200,
+     minSpeechMs = 350,
+-    maxUtteranceMs = 60000
++    // Tope de un turno. Era 60 s: con ruido de fondo que el detector confunde con
++    // voz, era lo que tardaba en contestar. Si hablas más, lo que sobra entra en el
++    // turno siguiente.
++    maxUtteranceMs = parseInt(process.env.VAD_MAX_UTTERANCE_MS) || 25000
+   }) {
+     super();
+     this.ws = ws;
+@@ -44,6 +49,8 @@ class AudioForkSession extends EventEmitter {
+ 
+     this.captureEnabled = true;
+     this._pcmEndian = null;
++    // Parche 35: contestando a «¿lo hago?» vale un «sí» suelto. Ver esperarRespuestaCorta.
++    this._respuestaCorta = false;
+ 
+     this._preRollChunks = [];
+     this._preRollBytes = 0;
+@@ -55,6 +62,22 @@ class AudioForkSession extends EventEmitter {
+     this._speechBytes = 0;
+     this._silenceMs = 0;
+ 
++    // Barge-in (parche 16): mientras Jarvis habla, el oído sigue abierto y avisa
++    // ('barge') cuando llevas BARGE_IN_MS de voz. Una frase que acaba sin nadie
++    // esperándola se guarda para el waitForUtterance siguiente: si no, la que
++    // empezaste encima de Jarvis se perdería entre su respuesta y el turno nuevo.
++    this._bargeArmado = false;
++    this._bargeMs = parseInt(process.env.BARGE_IN_MS) || 500;
++    this._sinRecoger = null;
++
++    // Parche 26: a los STT_ANTICIPO_MS de silencio se avisa ('pausa') con lo dicho
++    // hasta ahí, para transcribirlo mientras se esperan los endSilenceMs que cierran
++    // la frase. Si vuelves a hablar, esa pausa deja de valer. 0 lo apaga.
++    this._anticipoMs = parseInt(process.env.STT_ANTICIPO_MS || '300', 10);
++    this._cierreRapidoMs = parseInt(process.env.VAD_CIERRE_RAPIDO_MS || '700', 10);
++    this._pausa = null;
++    this._pausaEmitida = false;
++
+     // DEBUG: Track message counts
+     this._messageCount = 0;
+     this._binaryCount = 0;
+@@ -77,7 +100,34 @@ class AudioForkSession extends EventEmitter {
+     const was = this.captureEnabled;
+     this.captureEnabled = Boolean(enabled);
+     console.log('[AUDIO-DEBUG] setCaptureEnabled: ' + was + ' -> ' + this.captureEnabled + ' for ' + this.callUuid);
+-    if (!this.captureEnabled) this._resetUtterance();
++    if (!this.captureEnabled) {
++      this._resetUtterance();
++      this._bargeArmado = false;
++      this._sinRecoger = null;
++      this._respuestaCorta = false;
++    }
++  }
++
++  /**
++   * Parche 35: el turno de contestar a una pregunta de sí o no, hasta que se cierre el oído.
++   * Un «sí» dura ~300 ms y en el coche va rodeado de ruido: con los 350 ms y el 12 % de voz
++   * de siempre se tiraba (340 ms, y 520 ms al 11 %, en llamadas reales del 2026-11-04 y 05).
++   */
++  esperarRespuestaCorta() {
++    this._respuestaCorta = true;
++  }
++
++  _vozMinimaMs() {
++    return this._respuestaCorta ? Math.min(this.minSpeechMs, 200) : this.minSpeechMs;
++  }
++
++  /** Abre el oído mientras Jarvis habla (parche 16). Ver lib/turno-rapido.js. */
++  armarBargeIn() {
++    this._resetUtterance();
++    this._sinRecoger = null;
++    this._bargeArmado = true;
++    this.captureEnabled = true;
++    console.log('[AUDIO-DEBUG] barge-in armado (' + this._bargeMs + ' ms de voz) for ' + this.callUuid);
+   }
+ 
+   _chunkDurationMs(byteLen) {
+@@ -101,6 +151,9 @@ class AudioForkSession extends EventEmitter {
+     this._utteranceBytes = 0;
+     this._speechBytes = 0;
+     this._silenceMs = 0;
++    this._rmsVoz = [];
++    this._pausa = null;
++    this._pausaEmitida = false;
+ 
+     if (this._preRollChunks.length) {
+       for (const chunk of this._preRollChunks) this._appendUtterance(chunk, false);
+@@ -122,9 +175,13 @@ class AudioForkSession extends EventEmitter {
+     this._utteranceBytes = 0;
+     this._speechBytes = 0;
+     this._silenceMs = 0;
++    this._pausa = null;
++    this._pausaEmitida = false;
+   }
+ 
+   _finalizeUtterance(reason) {
++    // Parche 26: la pausa solo vale si la frase la cerró ese mismo silencio.
++    const pausa = reason === 'end_silence' ? this._pausa : null;
+     const durationMs = this._chunkDurationMs(this._utteranceBytes);
+     const speechMs = this._chunkDurationMs(this._speechBytes);
+     const speechRatio = this._utteranceBytes > 0 ? this._speechBytes / this._utteranceBytes : 0;
+@@ -136,15 +193,17 @@ class AudioForkSession extends EventEmitter {
+ 
+     // For DTMF-triggered finalization, be more lenient with requirements
+     const isDtmfTriggered = reason === 'dtmf_trigger';
+-    const minSpeechRequired = isDtmfTriggered ? 100 : this.minSpeechMs;
+-    const minRatioRequired = isDtmfTriggered ? 0.05 : 0.12;
++    const minSpeechRequired = isDtmfTriggered ? 100 : this._vozMinimaMs();
++    const minRatioRequired = (isDtmfTriggered || this._respuestaCorta) ? 0.05 : 0.12;
+ 
+     if (speechMs < minSpeechRequired || speechRatio < minRatioRequired) {
+       console.log('[AUDIO-DEBUG] Utterance REJECTED: speechMs=' + Math.round(speechMs) + ' < ' + minSpeechRequired + ' OR speechRatio=' + speechRatio.toFixed(2) + ' < ' + minRatioRequired);
+       return false;
+     }
+     console.log('[AUDIO-DEBUG] Utterance ACCEPTED, emitting event');
+-    this.emit('utterance', { callUuid: this.callUuid, audio, durationMs, speechMs, reason });
++    const u = { callUuid: this.callUuid, audio, durationMs, speechMs, reason, pausa };
++    if (this.listenerCount('utterance') === 0) this._sinRecoger = u;
++    this.emit('utterance', u);
+     return true;
+   }
+ 
+@@ -163,26 +222,67 @@ class AudioForkSession extends EventEmitter {
+     return this._finalizeUtterance('dtmf_trigger');
+   }
+ 
++  // Parche 17: el orden de los bytes NO se adivina. El original se quedaba con la
++  // lectura que daba más volumen, y leído al revés el audio siempre "suena" más
++  // fuerte: en cuanto el primer trozo no era silencio digital exacto (el Bluetooth
++  // del coche, una línea con algo de ruido), elegía BE y toda la llamada se leía
++  // como ruido a tope (RMS ~19.000, picos de 32.767): el detector no sabía cuándo
++  // hablabas ni cuándo callabas. FreeSWITCH manda L16 en el orden de la máquina, y
++  // whisper-client ya lo lee como LE (Int16Array en x86) y transcribe bien.
++  // AUDIO_FORK_ENDIAN=BE lo fuerza al revés; =auto adivina, pero por suavidad: el
++  // audio de verdad cambia poco de una muestra a la siguiente, el leído al revés no.
+   _detectEndian(buf) {
+-    const le = pcmStats(buf, 'LE');
+-    const be = pcmStats(buf, 'BE');
+-    const leScore = le.maxAbs + le.rms;
+-    const beScore = be.maxAbs + be.rms;
+-    const result = leScore >= beScore ? 'LE' : 'BE';
+-    console.log('[AUDIO-DEBUG] Detected endian: ' + result + ' (LE score=' + Math.round(leScore) + ', BE score=' + Math.round(beScore) + ')');
++    const pedido = String(process.env.AUDIO_FORK_ENDIAN || 'LE').toUpperCase();
++    if (pedido !== 'AUTO') {
++      const result = pedido === 'BE' ? 'BE' : 'LE';
++      console.log('[AUDIO-DEBUG] Endian: ' + result + ' (fijo, AUDIO_FORK_ENDIAN)');
++      return result;
++    }
++    const salto = function (leer) {
++      const n = Math.floor(buf.length / 2);
++      let suma = 0;
++      let previa = n > 0 ? leer.call(buf, 0) : 0;
++      for (let i = 1; i < n; i++) {
++        const m = leer.call(buf, i * 2);
++        suma += Math.abs(m - previa);
++        previa = m;
++      }
++      return n > 1 ? suma / (n - 1) : 0;
++    };
++    const le = salto(Buffer.prototype.readInt16LE);
++    const be = salto(Buffer.prototype.readInt16BE);
++    const result = le <= be ? 'LE' : 'BE';
++    console.log('[AUDIO-DEBUG] Endian: ' + result + ' (auto: salto LE=' + Math.round(le) + ', BE=' + Math.round(be) + ')');
+     return result;
+   }
+ 
+   _isSpeech(buf) {
+     if (!this._pcmEndian) this._pcmEndian = this._detectEndian(buf);
+     const stats = pcmStats(buf, this._pcmEndian);
+-
+-    const rmsThreshold = 650;
+-    const maxThreshold = 2200;
+-
+-    const looksSilent = stats.nearZeroRatio > 0.94 && stats.rms < rmsThreshold;
++    this._ultimoRms = stats.rms;
++
++    const rmsThreshold = parseInt(process.env.VAD_RMS_THRESHOLD) || 650;
++    const maxThreshold = parseInt(process.env.VAD_MAX_THRESHOLD) || 2200;
++
++    // Suelo de ruido por percentil sobre los ultimos 3 segundos.
++    // Medido en una llamada real: el ruido de la linea entre palabra y palabra
++    // vive en RMS 3300-4700 y la voz pica a 16000-20000. Un umbral fijo (650)
++    // da el ruido por voz y el turno no se cierra nunca; una media exponencial
++    // converge demasiado despacio (tardaba ~10 s). El percentil 20 de la ventana
++    // se planta en el ruido en menos de un segundo y no lo arrastra la voz.
++    if (!this._ventanaRms) this._ventanaRms = [];
++    this._ventanaRms.push(stats.rms);
++    if (this._ventanaRms.length > 150) this._ventanaRms.shift();
++    const ordenada = this._ventanaRms.slice().sort(function (a, b) { return a - b; });
++    this._noiseFloor = ordenada[Math.floor(ordenada.length * 0.2)];
++
++    const factor = parseFloat(process.env.VAD_NOISE_FACTOR) || 2.2;
++    const dynRms = Math.max(rmsThreshold, this._noiseFloor * factor);
++    const dynMax = Math.max(maxThreshold, this._noiseFloor * factor * 2);
++
++    const looksSilent = stats.nearZeroRatio > 0.94 && stats.rms < dynRms;
+     if (looksSilent) return false;
+-    return stats.maxAbs >= maxThreshold || stats.rms >= rmsThreshold;
++    return stats.maxAbs >= dynMax || stats.rms >= dynRms;
+   }
+ 
+   _onMessage(data) {
+@@ -225,13 +325,13 @@ class AudioForkSession extends EventEmitter {
+ 
+     if (data.length < 2) return;
+ 
+-    const isSpeech = this._isSpeech(data);
++    let isSpeech = this._isSpeech(data);
+     const chunkMs = this._chunkDurationMs(data.length);
+ 
+     // Log speech detection periodically
+     if (this._binaryCount % 50 === 1) {
+       const stats = pcmStats(data, this._pcmEndian || 'LE');
+-      console.log('[AUDIO-DEBUG] VAD: isSpeech=' + isSpeech + ', inSpeech=' + this._inSpeech + ', silenceMs=' + Math.round(this._silenceMs) + ', RMS=' + Math.round(stats.rms) + ', max=' + stats.maxAbs);
++      console.log('[AUDIO-DEBUG] VAD: isSpeech=' + isSpeech + ', inSpeech=' + this._inSpeech + ', silenceMs=' + Math.round(this._silenceMs) + ', RMS=' + Math.round(stats.rms) + ', max=' + stats.maxAbs + ', suelo=' + Math.round(this._noiseFloor || 0));
+     }
+ 
+     if (!this._inSpeech) {
+@@ -240,18 +340,75 @@ class AudioForkSession extends EventEmitter {
+       this._startUtteranceWithPreRoll();
+     }
+ 
++    // Una vez empezada la frase, se compara con TU voz, no solo con el ruido.
++    // Comparar con el suelo de ruido no basta en un sitio ruidoso: el ruido
++    // (gente, tráfico, un golpe) pica por encima del suelo, reinicia la cuenta de
++    // silencio y el turno no se cerraba nunca. Tu voz, pegada al micro, suena mucho
++    // más fuerte que lo de alrededor: lo que quede por debajo de una fracción de tu
++    // nivel de voz (el percentil 80 de lo que llevas dicho) cuenta como silencio.
++    // Solo mira el RMS: un pico suelto (un golpe) ya no basta para seguir escuchando.
++    if (isSpeech) {
++      const voz = this._rmsVoz;
++      if (voz.length >= 15) {                     // ~300 ms de voz para fiarse del nivel
++        const ordenada = voz.slice().sort(function (a, b) { return a - b; });
++        const nivel = ordenada[Math.floor(ordenada.length * 0.8)];
++        const ratio = parseFloat(process.env.VAD_VOICE_RATIO) || 0.3;
++        if (this._ultimoRms < nivel * ratio) isSpeech = false;
++      }
++      if (isSpeech) {
++        voz.push(this._ultimoRms);
++        if (voz.length > 500) voz.shift();        // los últimos ~10 s de voz
++      }
++    }
++
+     this._appendUtterance(data, isSpeech);
+ 
+-    if (isSpeech) this._silenceMs = 0;
+-    else this._silenceMs += chunkMs;
++    if (isSpeech) {
++      this._silenceMs = 0;
++      this._pausa = null;
++      this._pausaEmitida = false;
++    } else {
++      this._silenceMs += chunkMs;
++    }
++
++    if (this._anticipoMs > 0 && !this._pausaEmitida && this._silenceMs >= this._anticipoMs &&
++        this._silenceMs < this.endSilenceMs && this.listenerCount('pausa') > 0 &&
++        this._chunkDurationMs(this._speechBytes) >= this._vozMinimaMs()) {
++      this._pausaEmitida = true;
++      this._pausa = { audio: Buffer.concat(this._utteranceChunks) };
++      this.emit('pausa', this._pausa);
++    }
++
++    if (this._bargeArmado && this._chunkDurationMs(this._speechBytes) >= this._bargeMs) {
++      this._bargeArmado = false;
++      console.log('[AUDIO-DEBUG] barge-in: ' + Math.round(this._chunkDurationMs(this._speechBytes)) + ' ms de voz mientras Jarvis habla, for ' + this.callUuid);
++      this.emit('barge');
++    }
+ 
+     const utteranceMs = this._chunkDurationMs(this._utteranceBytes);
+     if (utteranceMs >= this.maxUtteranceMs) return this._finalizeUtterance('max_utterance');
++    // Parche 34: la transcripción de esta pausa dice que la frase está acabada.
++    if (this._pausa && this._pausa.completa && this._silenceMs >= this._cierreRapidoMs) {
++      console.log('[AUDIO-DEBUG] Cierre rápido a los ' + Math.round(this._silenceMs) + ' ms de silencio');
++      return this._finalizeUtterance('end_silence');
++    }
+     if (this._silenceMs >= this.endSilenceMs) return this._finalizeUtterance('end_silence');
+   }
+ 
++  // Parche 34: quien transcribe la pausa avisa de que lo dicho parece una frase entera.
++  // Si mientras tanto has vuelto a hablar, esa pausa ya no es la actual y no hace nada.
++  cerrarPausa(pausa) {
++    if (pausa && pausa === this._pausa) pausa.completa = true;
++  }
++
+   waitForUtterance({ timeoutMs = 30000 } = {}) {
+     console.log('[AUDIO-DEBUG] waitForUtterance called, timeoutMs=' + timeoutMs + ', captureEnabled=' + this.captureEnabled);
++    if (this._sinRecoger) {
++      const u = this._sinRecoger;
++      this._sinRecoger = null;
++      console.log('[AUDIO-DEBUG] waitForUtterance: la frase ya había acabado (barge-in), ' + u.audio.length + ' bytes');
++      return Promise.resolve(u);
++    }
+     return new Promise((resolve, reject) => {
+       const onUtterance = (u) => {
+         cleanup();
+diff --git a/voice-app/lib/claude-bridge.js b/voice-app/lib/claude-bridge.js
+index 23326b5..be96efc 100644
+--- a/voice-app/lib/claude-bridge.js
++++ b/voice-app/lib/claude-bridge.js
+@@ -52,18 +52,21 @@ async function query(prompt, options = {}) {
+     // AC26: API server unreachable during call - don't crash, return helpful message
+     if (error.code === 'ECONNREFUSED' || error.code === 'EHOSTUNREACH' || error.code === 'ENETUNREACH') {
+       console.warn(`[${timestamp}] CLAUDE API server unreachable (${error.code})`);
+-      return "I'm having trouble connecting to my brain right now. The API server may be offline or unreachable. Please try again later.";
++      return "Ahora mismo no llego a mi cerebro: el servidor de Claude en caja no responde. Inténtalo en un rato.";
+     }
+ 
+     // AC27: Timeout with helpful error message
+     if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
+       console.error(`[${timestamp}] CLAUDE Timeout after ${timeout} seconds`);
+-      return "I'm sorry, that request took too long. This might mean the API server is slow or there's a network issue. Try asking something simpler, or check that claude-phone api-server is running.";
++      return "Perdona, eso ha tardado demasiado. Prueba con algo más sencillo o mira si el servidor de Claude en caja va bien.";
+     }
+ 
+     console.error(`[${timestamp}] CLAUDE Error:`, error.message);
+     // AC26: Don't crash on unknown errors, return friendly message
+-    return "I encountered an unexpected error. Please check that the API server is running claude-phone api-server and is on the same network.";
++    if (/authenticate|OAuth|login/i.test(error.message || '')) {
++      return "No puedo pensar: la sesión de Claude Code en caja ha caducado. Entra en caja con el usuario malbisudlf, abre claude y haz login.";
++    }
++    return "Me ha fallado algo al pensar la respuesta. Mira el registro del servidor de Claude en caja.";
+   }
+ }
+ 
+@@ -92,6 +95,28 @@ async function endSession(callId) {
+   }
+ }
+ 
++/**
++ * Parche 27: que el puente arranque la sesión de la llamada mientras suena el saludo.
++ * Nunca lanza ni hace esperar: si el puente es viejo (404) o no llega, la primera
++ * pregunta arranca la sesión como antes.
++ * @param {string} callId
++ * @param {string} devicePrompt
++ */
++async function precalentar(callId, devicePrompt) {
++  if (!callId || process.env.PRECALENTAR === '0') return false;
++  try {
++    const r = await axios.post(
++      `${CLAUDE_API_URL}/precalentar`,
++      { callId, devicePrompt },
++      { timeout: 3000, headers: { 'Content-Type': 'application/json' } }
++    );
++    return Boolean(r.data && r.data.success);
++  } catch (error) {
++    console.warn(`[${new Date().toISOString()}] CLAUDE No se pudo precalentar: ${error.message}`);
++    return false;
++  }
++}
++
+ /**
+  * Check if Claude API is available
+  * @returns {Promise<boolean>} True if API is reachable
+@@ -108,5 +133,6 @@ async function isAvailable() {
+ module.exports = {
+   query,
+   endSession,
++  precalentar,
+   isAvailable
+ };
+diff --git a/voice-app/lib/conversation-loop.js b/voice-app/lib/conversation-loop.js
+index ec1c60c..d43f4cc 100644
+--- a/voice-app/lib/conversation-loop.js
++++ b/voice-app/lib/conversation-loop.js
+@@ -13,29 +13,30 @@
+  */
+ 
+ const logger = require('./logger');
++const { pensar, decirInterrumpible, AVISO_INTERRUPCION } = require('./turno-rapido');
++// Parche 18: «📖 LEER: briefing» en la respuesta → lo lee la llamada, no Claude.
++// Parche 24: y obedece «sigue», «siguiente» o «ve a la de economía» sin preguntarle.
++const { leerSiLoPide, ControlLectura } = require('./lectura');
++// Parche 20: «✅ CONFIRMAR: <id>» → la llamada pregunta y oye el sí o el no, no Claude.
++const { preguntarSiLoPide, resolverConfirmacion, siONo, turnoDeRespuesta } = require('./confirmacion');
++// Parche 22: la escucha pasiva («modo coche»): callado hasta que oye «Jarvis».
++const { EscuchaPasiva, FRASES: FRASES_PASIVA, AVISO_PASIVA } = require('./escucha-pasiva');
++// Parche 26: se transcribe durante el silencio que cierra la frase.
++const { armarAnticipo, transcribirFrase } = require('./anticipo');
+ 
+ // Audio cue URLs
+-const READY_BEEP_URL = 'http://127.0.0.1:3000/static/ready-beep.wav';
+-const GOTIT_BEEP_URL = 'http://127.0.0.1:3000/static/gotit-beep.wav';
+-const HOLD_MUSIC_URL = 'http://127.0.0.1:3000/static/hold-music.mp3';
++const READY_BEEP_URL = `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/static/ready-beep.wav`;
++const GOTIT_BEEP_URL = `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/static/gotit-beep.wav`;
++const reflejos = require('./reflejos');
++const HOLD_MUSIC_URL = `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/static/hold-music.wav`;
+ 
+ // Claude Code-style thinking phrases
+ const THINKING_PHRASES = [
+-  "Pondering...",
+-  "Elucidating...",
+-  "Cogitating...",
+-  "Ruminating...",
+-  "Contemplating...",
+-  "Consulting the oracle...",
+-  "Summoning knowledge...",
+-  "Engaging neural pathways...",
+-  "Accessing the mainframe...",
+-  "Querying the void...",
+-  "Let me think about that...",
+-  "Processing...",
+-  "Hmm, interesting question...",
+-  "One moment...",
+-  "Searching my brain...",
++  "Un momento, señor.",
++  "Enseguida, señor.",
++  "Déjeme ver.",
++  "Ahora mismo.",
++  "Lo miro.",
+ ];
+ 
+ function getRandomThinkingPhrase() {
+@@ -44,7 +45,7 @@ function getRandomThinkingPhrase() {
+ 
+ function isGoodbye(transcript) {
+   const lower = transcript.toLowerCase().trim();
+-  const goodbyePhrases = ['goodbye', 'good bye', 'bye', 'hang up', 'end call', "that's all", 'thats all'];
++  const goodbyePhrases = ['adios', 'adiós', 'hasta luego', 'cuelga', 'cuelgo', 'nada mas', 'nada más', 'eso es todo', 'gracias, nada mas', 'goodbye', 'bye'];
+   return goodbyePhrases.some(phrase => {
+     return lower === phrase || lower.includes(` ${phrase}`) ||
+            lower.startsWith(`${phrase} `) || lower.endsWith(` ${phrase}`);
+@@ -122,7 +123,11 @@ function extractVoiceLine(response) {
+  * @param {string} [options.initialContext] - Context for outbound calls (why we're calling)
+  * @param {boolean} [options.skipGreeting=false] - Skip greeting (for outbound, greeting already played)
+  * @param {number} [options.maxTurns=20] - Maximum conversation turns
+- * @returns {Promise<void>}
++ * @param {boolean} [options.escuchaPasiva=false] - Empezar a la escucha (parche 22)
++ * @param {Function} [options.onUserTurn] - Se llama cada vez que el otro lado dice algo
++ *   que se entiende (parche 12): es la prueba de que hay una persona
++ * @returns {Promise<{endReason: string}>} Por qué acabó (parche 12): 'silence' (dos
++ *   turnos sin oír a nadie), 'goodbye', 'max_turns', 'hangup', 'no_audio' o 'error'
+  */
+ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+   const {
+@@ -134,8 +139,13 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+     initialContext = null,
+     skipGreeting = false,
+     deviceConfig = null,
+-    maxTurns = 20
++    maxTurns = 20,
++    escuchaPasiva = false,
++    onUserTurn = null
+   } = options;
++  // Por qué acaba la conversación. Lo que importa distinguir es 'silence': una llamada
++  // contestada en la que nadie ha hablado es, casi siempre, el buzón (parche 12).
++  let fin = 'max_turns';
+ 
+   // Extract devicePrompt and voiceId from deviceConfig (for Cephanie etc)
+   const devicePrompt = deviceConfig?.prompt || null;
+@@ -164,7 +174,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+     // Play greeting (skip for outbound where initial message already played)
+     if (!skipGreeting && callActive) {
+       const greetingUrl = await ttsService.generateSpeech(
+-        "Hello! I'm your server. How can I help you today?",
++        "Hola, soy tu servidor. ¿En qué puedo ayudarte?",
+         voiceId
+       );
+       await endpoint.play(greetingUrl);
+@@ -178,12 +188,16 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+         `[SYSTEM CONTEXT - DO NOT REPEAT]: You just called the user to tell them: "${initialContext}". They have answered. Now listen to their response and help them.`,
+         { callId: callUuid, devicePrompt: devicePrompt, isSystemPrime: true }
+       ).catch(err => logger.warn('Prime query failed', { callUuid, error: err.message }));
++    } else if (callActive && typeof claudeBridge.precalentar === 'function') {
++      // Parche 27: sin aviso que dar (el modo coche, por ejemplo), Claude arranca ya y
++      // no con la primera pregunta. Con aviso, la consulta de arriba ya lo arranca.
++      claudeBridge.precalentar(callUuid, devicePrompt).catch(() => {});
+     }
+ 
+     // Check if call is still active before starting audio fork
+     if (!callActive) {
+       logger.info('Call ended before audio fork could start', { callUuid });
+-      return;
++      return { endReason: 'hangup' };
+     }
+ 
+     // Start audio fork for entire call
+@@ -195,7 +209,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+       sessionPromise = audioForkServer.expectSession(callUuid, { timeoutMs: 10000 });
+     } catch (err) {
+       logger.warn('Failed to set up session expectation', { callUuid, error: err.message });
+-      return;
++      return { endReason: 'no_audio' };
+     }
+ 
+     await endpoint.forkAudioStart({
+@@ -212,7 +226,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+       logger.warn('Audio fork session failed', { callUuid, error: err.message });
+       // Cancel the pending expectation if still there
+       audioForkServer.cancelExpectation && audioForkServer.cancelExpectation(callUuid);
+-      return;
++      return { endReason: 'no_audio' };
+     }
+ 
+     // Set up DTMF handler for # key
+@@ -245,6 +259,23 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+ 
+     // Main conversation loop
+     let turnCount = 0;
++    // Turnos seguidos sin oír a nadie: sin tope, una llamada vacía repetía
++    // «¿sigues ahí?» hasta maxTurns con la extensión de Jarvis ocupada.
++    let silencios = 0;
++    // Si interrumpiste la respuesta anterior (parche 16), ya estás hablando: ni pitido
++    // ni oído nuevo, se espera la frase que ya está entrando.
++    let interrumpio = false;
++    // Lo que pasó con la última lectura (parche 18), para anteponerlo a la pregunta.
++    let avisoLectura = '';
++    // Lo que espera un sí o un no de viva voz (parche 20), o null.
++    let pendienteConfirmar = null;
++    // Parche 24: por dónde va la lectura, para seguirla o saltar sin pasar por Claude.
++    const control = new ControlLectura();
++    // Parche 22: la escucha pasiva; la llamada del coche ya empieza en ella.
++    const pasiva = new EscuchaPasiva({
++      log: (m) => logger.info(m, { callUuid }), activa: escuchaPasiva
++    });
++    armarAnticipo(session, whisperClient, { activo: () => !pasiva.dormida() });
+ 
+     while (turnCount < maxTurns && callActive) {
+       turnCount++;
+@@ -256,82 +287,189 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+         break;
+       }
+ 
+-      // ============================================
+-      // READY BEEP: Signal "your turn to speak"
+-      // ============================================
+-      try {
+-        if (callActive) await endpoint.play(READY_BEEP_URL);
+-      } catch (e) {
+-        if (!callActive) break;
+-        logger.warn('Ready beep failed', { callUuid, error: e.message });
++      // Parche 22: dormido, el turno no empieza hasta que alguien le nombra.
++      let transcript = null;
++      let llamado = false;
++      let fueInterrupcion = false;
++      if (pasiva.dormida()) {
++        const oido = await pasiva.esperarPalabra({ session, whisperClient, sigueActiva: () => callActive });
++        if (!oido) break;
++        if (oido.tope) {
++          if (callActive) await endpoint.play(await ttsService.generateSpeech(FRASES_PASIVA.tope, voiceId));
++          fin = 'pasiva_tope';
++          break;
++        }
++        turnCount = 1;
++        llamado = true;
++        if (onUserTurn) {
++          try { onUserTurn(oido.resto || 'Jarvis'); } catch (e) { /* contar no puede cortar la llamada */ }
++        }
++        if (oido.resto) {
++          transcript = oido.resto;
++        } else if (callActive) {
++          await endpoint.play(await ttsService.generateSpeech(FRASES_PASIVA.despierta, voiceId));
++        }
+       }
+ 
+-      // Enable capture and wait for speech
+-      session.setCaptureEnabled(true);
+-      logger.info('Waiting for speech (press # to send immediately)', { callUuid });
++      if (transcript === null) {
++        // ============================================
++        // READY BEEP: Signal "your turn to speak"
++        // ============================================
++        if (!interrumpio) {
++          try {
++            if (callActive) await endpoint.play(READY_BEEP_URL);
++          } catch (e) {
++            if (!callActive) break;
++            logger.warn('Ready beep failed', { callUuid, error: e.message });
++          }
++        }
++        fueInterrupcion = interrumpio;
++        interrumpio = false;
+ 
+-      let utterance = null;
+-      try {
+-        utterance = await session.waitForUtterance({ timeoutMs: 30000 });
+-        logger.info('Got utterance', { callUuid, bytes: utterance.audio.length, reason: utterance.reason });
+-      } catch (err) {
+-        if (!callActive) break;
+-        logger.info('Utterance timeout', { callUuid, error: err.message });
+-      }
++        // Enable capture and wait for speech
++        session.setCaptureEnabled(true);
++        logger.info('Waiting for speech (press # to send immediately)', { callUuid });
+ 
+-      session.setCaptureEnabled(false);
++        let utterance = null;
++        try {
++          utterance = await session.waitForUtterance({
++            timeoutMs: turnoDeRespuesta(session, pendienteConfirmar, pasiva.esperaTurnoMs(30000))
++          });
++          logger.info('Got utterance', { callUuid, bytes: utterance.audio.length, reason: utterance.reason });
++        } catch (err) {
++          if (!callActive) break;
++          logger.info('Utterance timeout', { callUuid, error: err.message });
++        }
+ 
+-      // Check if call ended during speech detection
+-      if (!callActive) {
+-        logger.info('Call ended during speech detection', { callUuid });
+-        break;
+-      }
++        session.setCaptureEnabled(false);
+ 
+-      // Handle no speech
+-      if (!utterance) {
+-        const promptUrl = await ttsService.generateSpeech(
+-          "I didn't hear anything. Are you still there?",
+-          voiceId
+-        );
+-        if (callActive) await endpoint.play(promptUrl);
+-        continue;
+-      }
++        // Check if call ended during speech detection
++        if (!callActive) {
++          logger.info('Call ended during speech detection', { callUuid });
++          break;
++        }
+ 
+-      // ============================================
+-      // GOT-IT BEEP: Signal "I heard you, processing"
+-      // ============================================
+-      try {
+-        if (callActive) await endpoint.play(GOTIT_BEEP_URL);
+-      } catch (e) {
+-        if (!callActive) break;
+-        logger.warn('Got-it beep failed', { callUuid, error: e.message });
+-      }
++        // Parche 22: tras contestar, si no le dices nada más, vuelve a dormirse sin preguntar.
++        if (!utterance && pasiva.activa) {
++          pasiva.dormir();
++          continue;
++        }
+ 
+-      // Transcribe
+-      const transcript = await whisperClient.transcribe(utterance.audio, {
+-        format: 'pcm',
+-        sampleRate: 16000
+-      });
++        // Handle no speech
++        if (!utterance) {
++          silencios++;
++          if (silencios >= 2) {
++            logger.info('Dos turnos sin oír a nadie, cuelgo', { callUuid });
++            fin = 'silence';
++            break;
++          }
++          const promptUrl = await ttsService.generateSpeech(
++            "No te he oído. ¿Sigues ahí?",
++            voiceId
++          );
++          if (callActive) await endpoint.play(promptUrl);
++          continue;
++        }
++        silencios = 0;
++
++        // Parche 26: la transcripción (o lo que le falte al anticipo) corre mientras pita.
++        const transcribiendo = transcribirFrase(whisperClient, utterance, (m) => logger.info(m, { callUuid }));
++        transcribiendo.catch(() => {});
++
++        // ============================================
++        // GOT-IT BEEP: Signal "I heard you, processing"
++        // ============================================
++        try {
++          if (callActive) await endpoint.play(GOTIT_BEEP_URL);
++        } catch (e) {
++          if (!callActive) break;
++          logger.warn('Got-it beep failed', { callUuid, error: e.message });
++        }
++
++        // Transcribe
++        transcript = await transcribiendo;
++
++        logger.info('Transcribed', { callUuid, transcript });
++
++        if ((!transcript || transcript.trim().length < 2) && pasiva.activa) {
++          // Parche 35: ruido en mitad de una pregunta: sigue esperando el sí o el no.
++          if (!pendienteConfirmar) pasiva.dormir();
++          continue;
++        }
+ 
+-      logger.info('Transcribed', { callUuid, transcript });
++        // Handle empty transcription
++        if (!transcript || transcript.trim().length < 2) {
++          const clarifyUrl = await ttsService.generateSpeech(
++            "Perdona, no te he entendido. ¿Puedes repetir?",
++            voiceId
++          );
++          if (callActive) await endpoint.play(clarifyUrl);
++          continue;
++        }
++      }
+ 
+-      // Handle empty transcription
+-      if (!transcript || transcript.trim().length < 2) {
+-        const clarifyUrl = await ttsService.generateSpeech(
+-          "Sorry, I didn't catch that. Could you repeat?",
+-          voiceId
+-        );
+-        if (callActive) await endpoint.play(clarifyUrl);
++      // Parche 22: «modo coche», «modo normal», «gracias» (dormido otra vez)…
++      // Parche 35: contestando a «¿lo hago?», «vale» es un sí, no «vuelve a dormirte».
++      const ordenPasiva = (pendienteConfirmar && siONo(transcript)) ? null : pasiva.orden(transcript);
++      if (ordenPasiva) {
++        if (callActive) await endpoint.play(await ttsService.generateSpeech(ordenPasiva.frase, voiceId));
+         continue;
+       }
+ 
++      // Alguien ha dicho algo que se entiende: hay una persona al otro lado.
++      if (onUserTurn && !llamado) {
++        try { onUserTurn(transcript); } catch (e) { /* contar no puede cortar la llamada */ }
++      }
++
+       // Handle goodbye
+       if (isGoodbye(transcript)) {
+-        const byeUrl = await ttsService.generateSpeech("Goodbye! Call again anytime.", voiceId);
++        const byeUrl = await ttsService.generateSpeech("Hasta luego. Llámame cuando quieras.", voiceId);
+         if (callActive) await endpoint.play(byeUrl);
++        fin = 'goodbye';
+         break;
+       }
+ 
++      // Parche 20: lo que contestas a «¿lo hago?» lo decide la voice-app, no Claude.
++      if (pendienteConfirmar) {
++        const pendiente = pendienteConfirmar;
++        pendienteConfirmar = null;
++        const rc = await resolverConfirmacion(pendiente, transcript, {
++          endpoint, session, ttsService, voiceId,
++          log: (m) => logger.info(m, { callUuid })
++        });
++        if (rc.resuelta) {
++          pendienteConfirmar = rc.pendiente || null;
++          interrumpio = rc.interrumpio;
++          avisoLectura = rc.aviso;
++          continue;
++        }
++        avisoLectura = rc.aviso + avisoLectura;
++      }
++
++      // Parche 24: «sigue», «siguiente», «ve a la de economía»… los cumple la llamada.
++      const ordenLectura = await control.atender(transcript, {
++        endpoint, session, ttsService, voiceId,
++        log: (m) => logger.info(m, { callUuid }),
++        sigueActiva: () => callActive
++      });
++      if (ordenLectura) {
++        interrumpio = ordenLectura.interrumpio;
++        avisoLectura = ordenLectura.aviso;
++        continue;
++      }
++
++      // Parche 34: la tele y lo que no hace falta pensar, sin pasar por Claude.
++      const reflejo = await reflejos.atender(transcript, {
++        endpoint, session, ttsService, voiceId,
++        log: (m) => logger.info(m, { callUuid }),
++        sigueActiva: () => callActive
++      });
++      if (reflejo) {
++        interrumpio = reflejo.interrumpio;
++        avisoLectura = reflejo.aviso;
++        continue;
++      }
++
+       // ============================================
+       // THINKING FEEDBACK
+       // ============================================
+@@ -339,36 +477,23 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+       // Check if call still active before thinking feedback
+       if (!callActive) break;
+ 
+-      // 1. Play random thinking phrase
++      // 1-4. Claude piensa mientras suenan la frase de espera y la música (parche 15)
+       const thinkingPhrase = getRandomThinkingPhrase();
+-      logger.info('Playing thinking phrase', { callUuid, phrase: thinkingPhrase });
+-      const thinkingUrl = await ttsService.generateSpeech(thinkingPhrase, voiceId);
+-      if (callActive) await endpoint.play(thinkingUrl);
+-
+-      // 2. Start hold music in background
+-      let musicPlaying = false;
+-      if (callActive) {
+-        endpoint.play(HOLD_MUSIC_URL).catch(e => {
+-          logger.warn('Hold music failed', { callUuid, error: e.message });
+-        });
+-        musicPlaying = true;
+-      }
+-
+-      // 3. Query Claude
+-      logger.info('Querying Claude', { callUuid });
+-      const claudeResponse = await claudeBridge.query(
+-        transcript,
+-        { callId: callUuid, devicePrompt: devicePrompt }
+-      );
+-
+-      // 4. Stop hold music
+-      if (musicPlaying && callActive) {
+-        try {
+-          await endpoint.api('uuid_break', endpoint.uuid);
+-        } catch (e) {
+-          // Ignore - music may have already stopped
+-        }
+-      }
++      logger.info('Querying Claude', { callUuid, phrase: thinkingPhrase });
++      const claudeResponse = await pensar({
++        consultar: () => claudeBridge.query(
++          (llamado ? AVISO_PASIVA : '') +
++          (avisoLectura || (fueInterrupcion ? AVISO_INTERRUPCION : '')) + transcript,
++          { callId: callUuid, devicePrompt: devicePrompt }
++        ),
++        endpoint,
++        ttsService,
++        frase: thinkingPhrase,
++        voiceId,
++        musicaUrl: HOLD_MUSIC_URL,
++        sigueActiva: () => callActive,
++        extraer: extractVoiceLine
++      });
+ 
+       // Check if call ended during Claude processing
+       if (!callActive) {
+@@ -377,13 +502,38 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+       }
+ 
+       logger.info('Claude responded', { callUuid });
++      control.turnoDeClaude();
+ 
+       // 5. Extract and play voice line
+       const voiceLine = extractVoiceLine(claudeResponse);
+       logger.info('Voice line', { callUuid, voiceLine });
+ 
+       const responseUrl = await ttsService.generateSpeech(voiceLine, voiceId);
+-      if (callActive) await endpoint.play(responseUrl);
++      if (callActive) {
++        interrumpio = await decirInterrumpible(endpoint, session, responseUrl,
++          (m) => logger.info(m, { callUuid }));
++      }
++      avisoLectura = '';
++      if (callActive && !interrumpio) {
++        const lectura = await leerSiLoPide(claudeResponse, {
++          endpoint, session, ttsService, voiceId,
++          log: (m) => logger.info(m, { callUuid }),
++          sigueActiva: () => callActive,
++          musicaUrl: HOLD_MUSIC_URL,
++          control
++        });
++        interrumpio = lectura.interrumpio;
++        avisoLectura = lectura.aviso;
++      }
++      if (callActive && !interrumpio && !avisoLectura) {
++        const pc = await preguntarSiLoPide(claudeResponse, {
++          endpoint, session, ttsService, voiceId,
++          log: (m) => logger.info(m, { callUuid }),
++          sigueActiva: () => callActive
++        });
++        pendienteConfirmar = pc.pendiente;
++        interrumpio = pc.interrumpio;
++      }
+ 
+       logger.info('Turn complete', { callUuid, turn: turnCount });
+     }
+@@ -391,15 +541,17 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+     // Max turns reached
+     if (turnCount >= maxTurns && callActive) {
+       const maxUrl = await ttsService.generateSpeech(
+-        "We've been talking for a while. Goodbye!",
++        "Llevamos un rato hablando. Hasta luego.",
+         voiceId
+       );
+       await endpoint.play(maxUrl);
+     }
+ 
+-    logger.info('Conversation loop ended normally', { callUuid, turns: turnCount });
++    if (!callActive && fin !== 'silence' && fin !== 'goodbye') fin = 'hangup';
++    logger.info('Conversation loop ended normally', { callUuid, turns: turnCount, endReason: fin });
+ 
+   } catch (error) {
++    fin = 'error';
+     logger.error('Conversation loop error', {
+       callUuid,
+       error: error.message,
+@@ -409,7 +561,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+     try {
+       if (session) session.setCaptureEnabled(false);
+       if (callActive) {
+-        const errUrl = await ttsService.generateSpeech("Sorry, something went wrong.", voiceId);
++        const errUrl = await ttsService.generateSpeech("Perdona, algo ha fallado.", voiceId);
+         await endpoint.play(errUrl);
+       }
+     } catch (e) {
+@@ -447,6 +599,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+       }
+     }
+   }
++  return { endReason: fin };
+ }
+ 
+ module.exports = {
+diff --git a/voice-app/lib/http-server.js b/voice-app/lib/http-server.js
+index 4e8095e..baf6968 100644
+--- a/voice-app/lib/http-server.js
++++ b/voice-app/lib/http-server.js
+@@ -36,6 +36,10 @@ function createHttpServer(audioDir, port = 3000) {
+   app.use('/audio', express.raw({ type: 'audio/*', limit: '10mb' }));
+ 
+   // Serve static audio files
++  // Parche 34: las frases fijas viven aparte: la limpieza de abajo se lleva todo lo de
++  // audioDir que pase de FILE_MAX_AGE, y el 2026-11-04 se las llevó a media tarde.
++  app.use('/frases-fijas', express.static(path.join(__dirname, '..', 'config', 'frases-fijas')));
++
+   app.use('/audio-files', express.static(audioDir, {
+     setHeaders: (res, filepath) => {
+       // Set appropriate content type for audio files
+diff --git a/voice-app/lib/multi-registrar.js b/voice-app/lib/multi-registrar.js
+index 7e2c03e..0833994 100644
+--- a/voice-app/lib/multi-registrar.js
++++ b/voice-app/lib/multi-registrar.js
+@@ -1,13 +1,36 @@
+ /**
+  * Multi-Extension SIP Registrar
+  * Registers multiple extensions with 3CX independently
++ *
++ * Parche 14: cada REGISTER lleva un temporizador. Si en REGISTER_TIMEOUT_SECONDS (30
++ * por defecto) no ha llegado una respuesta final, se manda otro. Sin él, un REGISTER
++ * que se perdía sin respuesta (al arrancar antes que drachtio o que el SBC) no dejaba
++ * ningún temporizador vivo: ni reintento ni refresco, y la extensión se quedaba sin
++ * registrar hasta reiniciar el contenedor. Cada intento lleva su número, y la
++ * respuesta de un intento viejo que llegue tarde se ignora: si no, dos intentos
++ * contestados programarían dos refrescos y se irían duplicando.
+  */
+ 
++function segundosDeEspera() {
++  const valor = parseFloat(process.env.REGISTER_TIMEOUT_SECONDS);
++  return valor > 0 ? valor : 30;
++}
++
++// No es lo que mantiene vivo el proceso (para eso está el servidor HTTP), y así un
++// test puede terminar sin parar el registrador a mano.
++function temporizador(fn, segundos) {
++  const t = setTimeout(fn, segundos * 1000);
++  if (t.unref) t.unref();
++  return t;
++}
++
+ class MultiRegistrar {
+   constructor(srf, baseConfig) {
+     this.srf = srf;
+     this.baseConfig = baseConfig;
+     this.registrations = new Map();
++    this.estado = new Map();   // extensión → { intento, vigilante, siguiente }
++    this.parado = false;
+   }
+ 
+   /**
+@@ -17,7 +40,7 @@ class MultiRegistrar {
+   registerAll(devices) {
+     const extensions = Object.keys(devices);
+     console.log('[MULTI-REGISTRAR] Starting registration for ' + extensions.length + ' devices');
+-    
++
+     for (const [extension, device] of Object.entries(devices)) {
+       this.registerDevice(device);
+     }
+@@ -43,11 +66,42 @@ class MultiRegistrar {
+     this.sendRegister(device, config);
+   }
+ 
++  _estado(extension) {
++    let e = this.estado.get(extension);
++    if (!e) {
++      e = { intento: 0, vigilante: null, siguiente: null };
++      this.estado.set(extension, e);
++    }
++    return e;
++  }
++
++  _limpiar(e) {
++    if (e.vigilante) clearTimeout(e.vigilante);
++    if (e.siguiente) clearTimeout(e.siguiente);
++    e.vigilante = null;
++    e.siguiente = null;
++  }
++
+   /**
+    * Send REGISTER request for a device
+    */
+   sendRegister(device, config) {
+     const self = this;
++    if (this.parado) return;
++
++    const e = this._estado(config.extension);
++    this._limpiar(e);
++    const intento = ++e.intento;
++    const vigente = function() { return !self.parado && e.intento === intento; };
++
++    const espera = segundosDeEspera();
++    e.vigilante = temporizador(function() {
++      if (!vigente()) return;
++      e.vigilante = null;
++      console.error('[MULTI-REGISTRAR] ' + device.name + ' sin respuesta al REGISTER en ' + espera + 's, reintento');
++      self.sendRegister(device, config);
++    }, espera);
++
+     const uri = 'sip:' + config.registrar + ':' + config.registrar_port + ';transport=udp';
+     // Include local_port in Contact so INVITEs come to the right port (5070 when SBC is on 5060)
+     const localPort = config.local_port || 5060;
+@@ -56,75 +110,91 @@ class MultiRegistrar {
+     console.log('[MULTI-REGISTRAR] REGISTER ' + device.name + ' to ' + uri);
+     console.log('[MULTI-REGISTRAR]   Contact: ' + contact);
+ 
+-    this.srf.request(uri, {
+-      method: 'REGISTER',
+-      headers: {
+-        'From': '<sip:' + config.extension + '@' + config.domain + '>',
+-        'To': '<sip:' + config.extension + '@' + config.domain + '>',
+-        'Contact': '<' + contact + '>;expires=' + config.expiry,
+-        'Expires': config.expiry,
+-        'User-Agent': 'NetworkChuck-VoiceServer/1.0'
+-      },
+-      auth: {
+-        username: config.auth_id,
+-        password: config.password
+-      }
+-    }, function(err, req) {
+-      if (err) {
+-        console.error('[MULTI-REGISTRAR] ' + device.name + ' request error: ' + err.message);
+-        self.scheduleRetry(device, config, 60);
+-        return;
+-      }
+-
+-      req.on('response', function(res) {
+-        if (res.status === 200) {
+-          console.log('[MULTI-REGISTRAR] ' + device.name + ' SUCCESS - Registered as ext ' + config.extension);
+-          
+-          var expiry = config.expiry;
+-          var contactHeader = res.get('Contact');
+-          if (contactHeader) {
+-            var match = contactHeader.match(/expires=(\d+)/i);
+-            if (match) expiry = parseInt(match[1], 10);
+-          }
+-          
+-          self.registrations.set(config.extension, {
+-            device: device,
+-            config: config,
+-            expiry: expiry,
+-            registeredAt: Date.now()
+-          });
+-          
+-          var refreshTime = Math.floor(expiry * 0.9);
+-          console.log('[MULTI-REGISTRAR] ' + device.name + ' refresh in ' + refreshTime + 's');
+-          self.scheduleRefresh(device, config, refreshTime);
+-          
+-        } else if (res.status === 401 || res.status === 407) {
+-          console.log('[MULTI-REGISTRAR] ' + device.name + ' auth challenge - handled by drachtio');
+-        } else {
+-          console.error('[MULTI-REGISTRAR] ' + device.name + ' FAILED: ' + res.status + ' ' + res.reason);
++    try {
++      this.srf.request(uri, {
++        method: 'REGISTER',
++        headers: {
++          'From': '<sip:' + config.extension + '@' + config.domain + '>',
++          'To': '<sip:' + config.extension + '@' + config.domain + '>',
++          'Contact': '<' + contact + '>;expires=' + config.expiry,
++          'Expires': config.expiry,
++          'User-Agent': 'NetworkChuck-VoiceServer/1.0'
++        },
++        auth: {
++          username: config.auth_id,
++          password: config.password
++        }
++      }, function(err, req) {
++        if (!vigente()) return;
++        if (err) {
++          console.error('[MULTI-REGISTRAR] ' + device.name + ' request error: ' + err.message);
+           self.scheduleRetry(device, config, 60);
++          return;
+         }
++
++        req.on('response', function(res) {
++          if (!vigente()) return;
++          if (res.status === 200) {
++            console.log('[MULTI-REGISTRAR] ' + device.name + ' SUCCESS - Registered as ext ' + config.extension);
++
++            var expiry = config.expiry;
++            var contactHeader = res.get('Contact');
++            if (contactHeader) {
++              var match = contactHeader.match(/expires=(\d+)/i);
++              if (match) expiry = parseInt(match[1], 10);
++            }
++
++            self.registrations.set(config.extension, {
++              device: device,
++              config: config,
++              expiry: expiry,
++              registeredAt: Date.now()
++            });
++
++            var refreshTime = Math.floor(expiry * 0.9);
++            console.log('[MULTI-REGISTRAR] ' + device.name + ' refresh in ' + refreshTime + 's');
++            self.scheduleRefresh(device, config, refreshTime);
++
++          } else if (res.status === 401 || res.status === 407) {
++            // La respuesta final llega después; el vigilante sigue corriendo por si no.
++            console.log('[MULTI-REGISTRAR] ' + device.name + ' auth challenge - handled by drachtio');
++          } else {
++            console.error('[MULTI-REGISTRAR] ' + device.name + ' FAILED: ' + res.status + ' ' + res.reason);
++            self.scheduleRetry(device, config, 60);
++          }
++        });
+       });
+-    });
++    } catch (err) {
++      console.error('[MULTI-REGISTRAR] ' + device.name + ' request error: ' + err.message);
++      this.scheduleRetry(device, config, 60);
++    }
+   }
+ 
+   scheduleRefresh(device, config, seconds) {
+     const self = this;
+-    setTimeout(function() {
++    const e = this._estado(config.extension);
++    this._limpiar(e);
++    e.siguiente = temporizador(function() {
++      e.siguiente = null;
+       console.log('[MULTI-REGISTRAR] Refreshing ' + device.name);
+       self.sendRegister(device, config);
+-    }, seconds * 1000);
++    }, seconds);
+   }
+ 
+   scheduleRetry(device, config, seconds) {
+     const self = this;
++    const e = this._estado(config.extension);
++    this._limpiar(e);
+     console.log('[MULTI-REGISTRAR] ' + device.name + ' retry in ' + seconds + 's');
+-    setTimeout(function() {
++    e.siguiente = temporizador(function() {
++      e.siguiente = null;
+       self.sendRegister(device, config);
+-    }, seconds * 1000);
++    }, seconds);
+   }
+ 
+   stop() {
++    this.parado = true;
++    for (const e of this.estado.values()) this._limpiar(e);
+     this.registrations.clear();
+     console.log('[MULTI-REGISTRAR] Stopped all registrations');
+   }
+diff --git a/voice-app/lib/outbound-handler.js b/voice-app/lib/outbound-handler.js
+index 14573a0..d285abb 100644
+--- a/voice-app/lib/outbound-handler.js
++++ b/voice-app/lib/outbound-handler.js
+@@ -13,6 +13,26 @@ const { v4: uuidv4 } = require('uuid');
+ const logger = require('./logger');
+ const ttsService = require('./tts-service');
+ 
++/**
++ * Quién ha descolgado, mirando el Contact del 200 OK (parche 12).
++ *
++ * El 3CX pone el nombre de la extensión en el Contact cuando descuelga una persona
++ * ("Nombre" <sip:ext@sbc:5060>) y no lo pone cuando descuelga el buzón
++ * (<sip:ext@sbc:5060>). Acertó en las 14 salientes contestadas del 20 al 27/09/2026
++ * (10 personas, 4 buzones). El tiempo hasta descolgar NO sirve: el buzón cogió entre
++ * 7,5 y 41,5 s y la persona entre 4,1 y 11,4 s.
++ *
++ * @param {string} contact - La cabecera Contact en bruto
++ * @returns {'person'|'voicemail'|'unknown'}
++ */
++function quienContesta(contact) {
++  if (typeof contact !== 'string' || !contact.trim()) return 'unknown';
++  const abre = contact.indexOf('<');
++  // Sin <> no hay dónde buscar el nombre: ante la duda, se sigue como siempre.
++  if (abre < 0) return 'unknown';
++  return contact.slice(0, abre).trim() ? 'person' : 'voicemail';
++}
++
+ /**
+  * Initiate an outbound call
+  *
+@@ -31,11 +51,21 @@ async function initiateOutboundCall(srf, mediaServer, options) {
+     message,
+     callerId,
+     timeoutSeconds = 30,
+-    deviceConfig = null
++    deviceConfig = null,
++    // Parche 32: por la línea fija de O2 (LineaO2, ya registrada por quien llama).
++    lineaO2 = null
+   } = options;
+ 
+   const callId = uuidv4();
+   const startTime = Date.now();
++  // Fuera del try para poder destruirlo en el catch si nadie contesta.
++  let endpoint = null;
++  let invite = null;
++  let agotado = false;
++  // También el diálogo: si algo falla DESPUÉS de descolgar (endpoint.modify), hay que
++  // colgar la pata SIP o se queda abierta hasta que cuelgue el otro lado (parche 12).
++  let uac = null;
++  let answeredBy = null;
+ 
+   try {
+     logger.info('Initiating outbound call', {
+@@ -47,7 +77,7 @@ async function initiateOutboundCall(srf, mediaServer, options) {
+ 
+     // STEP 1: Create FreeSWITCH endpoint first (Early Offer pattern)
+     logger.info('Creating FreeSWITCH endpoint', { callId });
+-    const endpoint = await mediaServer.createEndpoint();
++    endpoint = await mediaServer.createEndpoint();
+ 
+     // Get local SDP from FreeSWITCH
+     const localSdp = endpoint.local.sdp;
+@@ -57,7 +87,9 @@ async function initiateOutboundCall(srf, mediaServer, options) {
+     // Internal extensions: dial as-is. External (E.164 with +): add 9 prefix for PSTN
+     const isExternal = to.startsWith('+');
+     const phoneNumber = isExternal ? '9' + to.replace(/^\+1?/, '') : to;
+-    const sipTrunkHost = process.env.SIP_TRUNK_HOST || '10.70.7.50';
++    const sipTrunkHost = process.env.SIP_TRUNK_HOST || process.env.SIP_DOMAIN || '10.70.7.50';
++    // El INVITE se manda al SBC local, pero las URIs llevan el dominio del PBX.
++    const sipProxy = process.env.SIP_PROXY || process.env.SIP_REGISTRAR || null;
+     const externalIp = process.env.EXTERNAL_IP || '10.70.7.81';
+     const defaultCallerId = callerId || process.env.DEFAULT_CALLER_ID || '+15551234567';
+ 
+@@ -65,7 +97,8 @@ async function initiateOutboundCall(srf, mediaServer, options) {
+     const sipAuthUsername = process.env.SIP_AUTH_USERNAME;
+     const sipAuthPassword = process.env.SIP_AUTH_PASSWORD;
+ 
+-    const sipUri = 'sip:' + phoneNumber + '@' + sipTrunkHost;
++    let sipUri = 'sip:' + phoneNumber + '@' + sipTrunkHost;
++    if (lineaO2) sipUri = lineaO2.destino(to);
+ 
+     logger.info('Dialing SIP URI', {
+       callId,
+@@ -95,7 +128,18 @@ async function initiateOutboundCall(srf, mediaServer, options) {
+     const authUsername = deviceConfig ? deviceConfig.authId : sipAuthUsername;
+     const authPassword = deviceConfig ? deviceConfig.password : sipAuthPassword;
+ 
+-    if (authUsername && authPassword) {
++    if (lineaO2) {
++      // Parche 32: las cabeceras con las que Telefónica dejó sonar el móvil, por su
++      // proxy y sin credencial (el registro previo es lo que cuenta).
++      Object.assign(uacOptions.headers, lineaO2.cabeceras(to));
++      uacOptions.proxy = 'sip:' + lineaO2.proxy;
++      logger.info('Saliente por la línea O2', { callId });
++    } else if (sipProxy) {
++      uacOptions.proxy = sipProxy.indexOf('sip:') === 0 ? sipProxy : 'sip:' + sipProxy;
++      logger.info('Saliente por proxy', { callId, proxy: uacOptions.proxy });
++    }
++
++    if (!lineaO2 && authUsername && authPassword) {
+       uacOptions.auth = {
+         username: authUsername,
+         password: authPassword
+@@ -110,10 +154,20 @@ async function initiateOutboundCall(srf, mediaServer, options) {
+     let isRinging = false;
+     let callAnswered = false;
+ 
++    // Si nadie contesta en timeoutSeconds se cancela el INVITE: si no, suena hasta
++    // que el 3CX desvía al buzón, el buzón descuelga y parece una llamada contestada.
++    const temporizador = setTimeout(function() {
++      agotado = true;
++      if (invite) invite.cancel();
++    }, timeoutSeconds * 1000);
++
+     // Create the outbound call (returns dialog directly, not { uas, uac })
+-    const uac = await srf.createUAC(sipUri, uacOptions, {
++    try {
++    uac = await srf.createUAC(sipUri, uacOptions, {
+       cbRequest: function(err, req) {
+         // Called when INVITE is sent
++        invite = req;
++        if (agotado && req) req.cancel();
+         if (err) {
+           logger.error('INVITE send failed', { callId, error: err.message });
+         } else {
+@@ -134,6 +188,9 @@ async function initiateOutboundCall(srf, mediaServer, options) {
+         }
+       }
+     });
++    } finally {
++      clearTimeout(temporizador);
++    }
+ 
+     // STEP 3: Call was answered! Connect endpoint with remote SDP
+     callAnswered = true;
+@@ -146,6 +203,13 @@ async function initiateOutboundCall(srf, mediaServer, options) {
+       isRinging
+     });
+ 
++    // Quién ha descolgado. El Contact en bruto va siempre al log: es lo que deja
++    // comprobar la heurística llamada a llamada (solo en este log, no en la API).
++    const contact = (uac.res && typeof uac.res.get === 'function') ? uac.res.get('Contact') : '';
++    // El Contact solo distingue el buzón en el 3CX: por O2 no se sabe quién descuelga.
++    answeredBy = lineaO2 ? 'unknown' : quienContesta(contact);
++    logger.info('Quién descuelga', { callId, answeredBy, contact: contact || null });
++
+     // Modify endpoint with remote SDP to complete media connection
+     await endpoint.modify(uac.remote.sdp);
+ 
+@@ -169,7 +233,8 @@ async function initiateOutboundCall(srf, mediaServer, options) {
+       dialog: uac,
+       endpoint,
+       isRinging,
+-      latency
++      latency,
++      answeredBy
+     };
+ 
+   } catch (error) {
+@@ -182,6 +247,16 @@ async function initiateOutboundCall(srf, mediaServer, options) {
+       latency
+     });
+ 
++    if (endpoint) endpoint.destroy().catch(function() {});
++    if (uac) {
++      // Ya habían descolgado: sin esto la pata SIP seguía viva (y el buzón grabando).
++      uac.destroy().catch(function() {});
++      const fallo = new Error('unplayed');
++      fallo.answeredBy = answeredBy;
++      throw fallo;
++    }
++    if (agotado) throw new Error('no_answer');
++
+     // Handle specific SIP error codes
+     if (error.status) {
+       const status = error.status;
+@@ -195,6 +270,8 @@ async function initiateOutboundCall(srf, mediaServer, options) {
+         throw new Error('service_unavailable');
+       } else if (status === 401 || status === 407) {
+         throw new Error('auth_failed');
++      } else if (status === 603) {
++        throw new Error('declined');
+       }
+     }
+ 
+@@ -285,5 +362,6 @@ async function hangupCall(dialog, endpoint, callId) {
+ module.exports = {
+   initiateOutboundCall: initiateOutboundCall,
+   playMessage: playMessage,
+-  hangupCall: hangupCall
++  hangupCall: hangupCall,
++  quienContesta: quienContesta
+ };
+diff --git a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
+index 1f93c9b..6f37d0f 100644
+--- a/voice-app/lib/outbound-routes.js
++++ b/voice-app/lib/outbound-routes.js
+@@ -11,6 +11,8 @@ const logger = require('./logger');
+ const { OutboundSession, getSession, getAllSessions } = require('./outbound-session');
+ const { initiateOutboundCall, playMessage, hangupCall } = require('./outbound-handler');
+ const { runConversationLoop } = require('./conversation-loop');
++// Parche 32: llamar a otras personas por la línea fija, con el backend de cerebro.
++const { runConversacionTercero } = require('./conversacion-tercero');
+ 
+ // Dependencies injected via setupRoutes()
+ var srf = null;
+@@ -21,6 +23,7 @@ var whisperClient = null;
+ var claudeBridge = null;
+ var ttsService = null;
+ var wsPort = 3001;
++var lineaO2 = null;
+ 
+ /**
+  * Validate phone number format
+@@ -64,8 +67,25 @@ function validateRequest(body) {
+     return { valid: false, error: 'Field "callerId" must be a valid E.164 phone number if provided' };
+   }
+ 
+-  if (body.mode && !['announce', 'conversation'].includes(body.mode)) {
+-    return { valid: false, error: 'Field "mode" must be either "announce" or "conversation"' };
++  if (body.mode && !['announce', 'conversation', 'tercero'].includes(body.mode)) {
++    return { valid: false, error: 'Field "mode" must be "announce", "conversation" or "tercero"' };
++  }
++
++  // Parche 32: la línea fija (O2) solo para hablar con otra persona, y solo a España.
++  if (body.linea !== undefined && body.linea !== 'o2') {
++    return { valid: false, error: 'Field "linea" must be "o2" if provided' };
++  }
++  if ((body.mode === 'tercero') !== (body.linea === 'o2')) {
++    return { valid: false, error: 'Mode "tercero" goes with linea "o2", and only it' };
++  }
++  if (body.mode === 'tercero') {
++    // Los mismos que deja el backend (_tel_llamable): móviles y fijos geográficos.
++    if (!/^\+34(?:6\d{8}|7[1-4]\d{7}|8[1-8]\d{7}|9[1-8]\d{7})$/.test(body.to)) {
++      return { valid: false, error: 'Field "to" must be a Spanish number (+34...) for linea "o2"' };
++    }
++    if (typeof body.tercero !== 'string' || !/^[0-9a-f-]{36}$/.test(body.tercero)) {
++      return { valid: false, error: 'Field "tercero" must be the backend call id' };
++    }
+   }
+ 
+   if (body.device !== undefined && typeof body.device !== 'string') {
+@@ -86,6 +106,25 @@ function validateRequest(body) {
+     }
+   }
+ 
++  // Parche 12: el recado para cuando descuelga el buzón.
++  if (body.detectVoicemail !== undefined && typeof body.detectVoicemail !== 'boolean') {
++    return { valid: false, error: 'Field "detectVoicemail" must be a boolean' };
++  }
++  if (body.voicemailMessage !== undefined) {
++    if (typeof body.voicemailMessage !== 'string' || !body.voicemailMessage.trim() ||
++        body.voicemailMessage.length > 1000) {
++      return { valid: false, error: 'Field "voicemailMessage" must be a non-empty string of 1000 characters or less' };
++    }
++  }
++
++  // Parche 22: la llamada del coche empieza en escucha pasiva.
++  if (body.escuchaPasiva !== undefined && typeof body.escuchaPasiva !== 'boolean') {
++    return { valid: false, error: 'Field "escuchaPasiva" must be a boolean' };
++  }
++  if (body.escuchaPasiva === true && body.mode !== 'conversation') {
++    return { valid: false, error: 'Field "escuchaPasiva" needs mode "conversation"' };
++  }
++
+   return { valid: true };
+ }
+ 
+@@ -101,6 +140,8 @@ function validateRequest(body) {
+  *   - device: Device extension or name for voice/personality (optional)
+  *   - callerId: Caller ID (optional)
+  *   - timeoutSeconds: Ring timeout (optional, default: 30)
++ *   - escuchaPasiva: true para empezar callado hasta oír «Jarvis» (parche 22, solo
++ *     con mode 'conversation')
+  */
+ router.post('/outbound-call', async function(req, res) {
+   var startTime = Date.now();
+@@ -129,7 +170,19 @@ router.post('/outbound-call', async function(req, res) {
+     var deviceParam = req.body.device;
+     var callerId = req.body.callerId;
+     var timeoutSeconds = req.body.timeoutSeconds || 30;
++    // Espera entre descolgar y hablar: para el buzón, que si no el mensaje se dice
++    // encima de su saludo y se graba a medias.
++    var delaySeconds = Math.min(Math.max(Number(req.body.delaySeconds) || 0, 0), 30);
++    // Parche 12: si descuelga el buzón (Contact sin nombre), no se conversa con él. Con
++    // recado, se espera al saludo, se deja y se cuelga; sin recado, se cuelga ya. Solo si
++    // quien llama lo pide: la llamada del buzón del backend QUIERE que coja el buzón.
++    var detectVoicemail = req.body.detectVoicemail === true;
++    var voicemailMessage = detectVoicemail && req.body.voicemailMessage ? req.body.voicemailMessage : null;
++    var voicemailDelaySeconds = req.body.voicemailDelaySeconds === undefined ? 8
++      : Math.min(Math.max(Number(req.body.voicemailDelaySeconds) || 0, 0), 30);
+     var webhookUrl = req.body.webhookUrl;
++    var escuchaPasiva = req.body.escuchaPasiva === true;
++    var tercero = mode === 'tercero' ? req.body.tercero : null;
+ 
+     // Look up device configuration
+     var deviceConfig = null;
+@@ -162,9 +215,17 @@ router.post('/outbound-call', async function(req, res) {
+       });
+     }
+ 
++    if (tercero && !(lineaO2 && lineaO2.configurada())) {
++      return res.status(503).json({
++        success: false,
++        error: 'service_unavailable',
++        message: 'La línea O2 no está configurada (O2_SIP_USUARIO, O2_PROXY)'
++      });
++    }
++
+     // For conversation mode, check additional dependencies
+-    if (mode === 'conversation') {
+-      if (!audioForkServer || !whisperClient || !claudeBridge || !ttsService) {
++    if (mode === 'conversation' || tercero) {
++      if (!audioForkServer || !whisperClient || (!claudeBridge && !tercero) || !ttsService) {
+         logger.error('Conversation mode dependencies not ready', {
+           audioForkServer: !!audioForkServer,
+           whisperClient: !!whisperClient,
+@@ -212,26 +273,109 @@ router.post('/outbound-call', async function(req, res) {
+ 
+     // Continue asynchronously
+     (async function() {
++      var conLinea = false;
++      var soltada = false;
++      // Una sola vez, sea por el BYE o por el finally: si el flujo se queda colgado tras
++      // un BYE (el EPIPE de FreeSWITCH al cerrar el audio, 2026-11-01), el registro en O2
++      // seguía renovándose y caja rechazaba con 480 las llamadas al fijo.
++      var soltarLinea = function() {
++        if (!conLinea || soltada) return Promise.resolve();
++        soltada = true;
++        return lineaO2.soltar();
++      };
+       try {
+         session.transition('DIALING');
+ 
++        if (tercero) {
++          // Parche 32: registrar la línea antes de marcar; se suelta al acabar (finally).
++          try {
++            await lineaO2.usar();
++            conLinea = true;
++          } catch (e) {
++            logger.error('Línea O2: no se pudo registrar', { callId: callId, error: e.message });
++            throw new Error('service_unavailable');
++          }
++        }
++
++        // La presentación se pide a la voz ya, mientras suena: al descolgar está lista y
++        // no se pagan sus ~0,7-1,5 s. La voz en directo guarda la frase entera y la sirve
++        // desde el principio cuando FreeSWITCH la pide (5 min de vida, de sobra para 30 s
++        // de timbre). Si falla, la conversación la pide otra vez al descolgar.
++        var aperturaUrl = tercero
++          ? ttsService.generateSpeech(message, (deviceConfig && deviceConfig.voiceId) ? deviceConfig.voiceId : null).catch(function(e) {
++              logger.warn('Presentación anticipada fallida', { callId: callId, error: e.message });
++              return null;
++            })
++          : null;
++
+         var result = await initiateOutboundCall(srf, mediaServer, {
+           to: to,
+           message: message,
+           callerId: callerId,
+           timeoutSeconds: timeoutSeconds,
+-          deviceConfig: deviceConfig  // Pass device for From header display name
++          deviceConfig: deviceConfig,  // Pass device for From header display name
++          lineaO2: tercero ? lineaO2 : null
+         });
+ 
+         var dialog = result.dialog;
++        if (tercero && dialog) dialog.once('destroy', function() { soltarLinea(); });
+         var endpoint = result.endpoint;
+ 
+         session.setDialog(dialog);
+         session.setEndpoint(endpoint);
++        session.answeredBy = result.answeredBy || 'unknown';
++        var voiceId = (deviceConfig && deviceConfig.voiceId) ? deviceConfig.voiceId : null;
++
++        if (tercero) {
++          // Parche 32: la presentación la dice la conversación, después del «¿Sí?».
++          session.transition('CONVERSING');
++          var finT = await runConversacionTercero(endpoint, dialog, callId, {
++            audioForkServer: audioForkServer,
++            whisperClient: whisperClient,
++            ttsService: ttsService,
++            wsPort: wsPort,
++            tercero: tercero,
++            apertura: message,
++            aperturaUrl: aperturaUrl,
++            voiceId: voiceId,
++            onTurno: function(quien, texto) {
++              session.turnCount++;
++              session.conversationHistory.push({ turn: session.turnCount, timestamp: Date.now(),
++                                                 quien: quien, texto: texto });
++            },
++            onUserTurn: function() { session.userTurns++; },
++            log: function(m) { logger.info(m, { callId: callId }); }
++          });
++          var motivoT = 'conversation_complete';
++          if (finT.endReason === 'silence') motivoT = 'no_speech';
++          else if (finT.endReason === 'voicemail') motivoT = 'voicemail_message';
++          else if (finT.endReason === 'error' || finT.endReason === 'no_audio') motivoT = 'conversation_error';
++          session.transition('COMPLETED', motivoT);
++          await hangupCall(dialog, endpoint, callId);
++          return;
++        }
++
++        if (detectVoicemail && session.answeredBy === 'voicemail') {
++          if (!voicemailMessage) {
++            // El FAILED antes de colgar: así ningún BYE posterior puede reescribir el final.
++            session.transition('FAILED', 'voicemail');
++            await hangupCall(dialog, endpoint, callId);
++            return;
++          }
++          // El buzón ya está al aparato: el recado se deja aquí, sin otra llamada.
++          session.message = voicemailMessage;
++          session.transition('PLAYING', 'voicemail');
++          await new Promise(function(r) { setTimeout(r, voicemailDelaySeconds * 1000); });
++          await playMessage(endpoint, voicemailMessage, { voiceId: voiceId });
++          session.transition('COMPLETED', 'voicemail_message');
++          await hangupCall(dialog, endpoint, callId);
++          return;
++        }
++
+         session.transition('PLAYING');
++        if (delaySeconds) await new Promise(function(r) { setTimeout(r, delaySeconds * 1000); });
+ 
+         // Play the initial message with device voice
+-        var voiceId = (deviceConfig && deviceConfig.voiceId) ? deviceConfig.voiceId : null;
+         await playMessage(endpoint, message, { voiceId: voiceId });
+ 
+         if (mode === 'announce') {
+@@ -247,7 +391,7 @@ router.post('/outbound-call', async function(req, res) {
+           session.transition('CONVERSING');
+ 
+           try {
+-            await runConversationLoop(endpoint, dialog, callId, {
++            var fin = await runConversationLoop(endpoint, dialog, callId, {
+               audioForkServer: audioForkServer,
+               whisperClient: whisperClient,
+               claudeBridge: claudeBridge,
+@@ -257,11 +401,19 @@ router.post('/outbound-call', async function(req, res) {
+               initialContext: message,
+               context: context,           // NEW: pass structured context
+               skipGreeting: true,
+-              maxTurns: 20
++              maxTurns: 20,
++              escuchaPasiva: escuchaPasiva,
++              onUserTurn: function() { session.userTurns++; }
+             });
+ 
++            // Parche 12: el motivo dice CÓMO acabó, y el backend decide con él y con
++            // userTurns si alguien llegó a coger la llamada.
++            var motivo = 'conversation_complete';
++            var porque = fin && fin.endReason;
++            if (porque === 'silence') motivo = 'no_speech';
++            else if (porque === 'error' || porque === 'no_audio') motivo = 'conversation_error';
++            session.transition('COMPLETED', motivo);
+             await hangupCall(dialog, endpoint, callId);
+-            session.transition('COMPLETED', 'conversation_complete');
+ 
+           } catch (convError) {
+             logger.error('Conversation loop error', {
+@@ -285,8 +437,22 @@ router.post('/outbound-call', async function(req, res) {
+         else if (error.message === 'no_answer') reason = 'no_answer';
+         else if (error.message === 'not_found') reason = 'not_found';
+         else if (error.message === 'service_unavailable') reason = 'service_unavailable';
+-
++        else if (error.message === 'declined') reason = 'declined';
++
++        // Parche 12: si ya habían descolgado (falló la voz, el audio...), 'unplayed' y se
++        // CUELGA. El 27/09 el TTS falló sin DNS, este catch solo marcaba FAILED y la pata
++        // siguió abierta 2 min 35 s con el buzón grabando silencio.
++        var descolgada = !!(session.dialog || session.endpoint) || error.message === 'unplayed';
++        if (descolgada) {
++          reason = 'unplayed';
++          if (!session.answeredBy && error.answeredBy) session.answeredBy = error.answeredBy;
++        }
+         session.transition('FAILED', reason);
++        if (session.dialog || session.endpoint) {
++          await hangupCall(session.dialog, session.endpoint, callId);
++        }
++      } finally {
++        await soltarLinea();
+       }
+     })();
+ 
+@@ -395,6 +561,7 @@ function setupRoutes(deps) {
+   claudeBridge = deps.claudeBridge || null;
+   ttsService = deps.ttsService || null;
+   wsPort = deps.wsPort || 3001;
++  lineaO2 = deps.lineaO2 || null;
+ 
+   var conversationReady = !!(audioForkServer && whisperClient && claudeBridge && ttsService);
+ 
+diff --git a/voice-app/lib/outbound-session.js b/voice-app/lib/outbound-session.js
+index 7447c27..f568659 100644
+--- a/voice-app/lib/outbound-session.js
++++ b/voice-app/lib/outbound-session.js
+@@ -42,8 +42,13 @@ class OutboundSession extends EventEmitter {
+     this.conversationHistory = [];
+     this.turnCount = 0;
+ 
++    // Parche 12: quién descolgó (por el Contact del 200 OK) y cuántas veces habló
++    // alguien al otro lado. Contestar no es coger: el backend lo decide con esto.
++    this.answeredBy = null;
++    this.userTurns = 0;
++
+     // Register in active sessions
+-    activeSessions.set(callId, this);
++    activeSessions.set(this.callId, this);
+ 
+     logger.info('Outbound session created', {
+       callId,
+@@ -65,8 +70,18 @@ class OutboundSession extends EventEmitter {
+     if (oldState === newState) {
+       return; // No change
+     }
++    // Un final es final (parche 12). Sin esto, el BYE del buzón convertía un FAILED en
++    // COMPLETED minutos después (y avisaba dos veces a la bitácora), o al revés.
++    if (oldState === 'COMPLETED' || oldState === 'FAILED') {
++      logger.info('Transición ignorada: la llamada ya había terminado', {
++        callId: this.callId, state: oldState, reason: this.reason || undefined,
++        ignored: newState + (reason ? '/' + reason : '')
++      });
++      return;
++    }
+ 
+     this.state = newState;
++    if (reason) this.reason = reason;
+ 
+     const logData = {
+       callId: this.callId,
+@@ -98,11 +113,24 @@ class OutboundSession extends EventEmitter {
+     if (newState === 'COMPLETED' || newState === 'FAILED') {
+       this.endedAt = Date.now();
+ 
+-      // Keep session for 1 minute for status queries, then remove
++      // Memoria entre llamadas: el puente con Claude apunta cómo acabó (ver su
++      // bitacora.js). Sin esperar y sin que un fallo aquí afecte a la llamada.
++      const apiClaude = process.env.CLAUDE_API_URL || 'http://localhost:3333';
++      fetch(apiClaude + '/bitacora', {
++        method: 'POST',
++        headers: { 'Content-Type': 'application/json' },
++        body: JSON.stringify(this.getInfo())
++      }).catch(err => {
++        logger.warn('Bitácora no disponible', { callId: this.callId, error: err.message });
++      });
++
++      // Keep session for 1 minute for status queries, then remove.
++      // `unref`: el servidor HTTP ya mantiene vivo el proceso; sin él, los tests
++      // esperarían este minuto antes de poder terminar.
+       setTimeout(() => {
+         activeSessions.delete(this.callId);
+         logger.info('Session cleaned up', { callId: this.callId });
+-      }, 60000);
++      }, 60000).unref();
+     }
+   }
+ 
+@@ -275,7 +303,13 @@ class OutboundSession extends EventEmitter {
+       createdAt: new Date(this.createdAt).toISOString(),
+       answeredAt: this.answeredAt ? new Date(this.answeredAt).toISOString() : null,
+       endedAt: this.endedAt ? new Date(this.endedAt).toISOString() : null,
+-      duration: this.getDuration()
++      duration: this.getDuration(),
++      reason: this.reason || null,
++      message: this.message,
++      // Parche 12. Van SIEMPRE, también a null: que la clave exista es lo que le dice
++      // al backend que este claude-phone ya distingue el buzón de una persona.
++      answeredBy: this.answeredBy || null,
++      userTurns: this.userTurns
+     };
+ 
+     // Include conversation stats for conversation mode
+diff --git a/voice-app/lib/sip-handler.js b/voice-app/lib/sip-handler.js
+index 3fd7e7b..e5e6be0 100644
+--- a/voice-app/lib/sip-handler.js
++++ b/voice-app/lib/sip-handler.js
+@@ -4,32 +4,33 @@
+  */
+ 
+ const { setTimeout: sleep } = require('node:timers/promises');
++const { pensar, decirInterrumpible, AVISO_INTERRUPCION } = require('./turno-rapido');
++// Parche 18: «📖 LEER: briefing» en la respuesta → lo lee la llamada, no Claude.
++// Parche 24: y obedece «sigue», «siguiente» o «ve a la de economía» sin preguntarle.
++const { leerSiLoPide, ControlLectura } = require('./lectura');
++// Parche 20: «✅ CONFIRMAR: <id>» → la llamada pregunta y oye el sí o el no, no Claude.
++const { preguntarSiLoPide, resolverConfirmacion, siONo, turnoDeRespuesta } = require('./confirmacion');
++// Parche 22: la escucha pasiva («modo coche»): callado hasta que oye «Jarvis».
++const { EscuchaPasiva, FRASES: FRASES_PASIVA, AVISO_PASIVA } = require('./escucha-pasiva');
++// Parche 26: se transcribe durante el silencio que cierra la frase.
++const { armarAnticipo, transcribirFrase } = require('./anticipo');
+ 
+ // Audio cue URLs
+-const READY_BEEP_URL = 'http://127.0.0.1:3000/static/ready-beep.wav';
+-const GOTIT_BEEP_URL = 'http://127.0.0.1:3000/static/gotit-beep.wav';
+-const HOLD_MUSIC_URL = 'http://127.0.0.1:3000/static/hold-music.mp3';
++const READY_BEEP_URL = `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/static/ready-beep.wav`;
++const GOTIT_BEEP_URL = `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/static/gotit-beep.wav`;
++const reflejos = require('./reflejos');
++const HOLD_MUSIC_URL = `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/static/hold-music.wav`;
+ 
+ // Default voice ID (Morpheus)
+ const DEFAULT_VOICE_ID = 'JAgnJveGGUh4qy4kh6dF';
+ 
+ // Claude Code-style thinking phrases
+ const THINKING_PHRASES = [
+-  "Pondering...",
+-  "Elucidating...",
+-  "Cogitating...",
+-  "Ruminating...",
+-  "Contemplating...",
+-  "Consulting the oracle...",
+-  "Summoning knowledge...",
+-  "Engaging neural pathways...",
+-  "Accessing the mainframe...",
+-  "Querying the void...",
+-  "Let me think about that...",
+-  "Processing...",
+-  "Hmm, interesting question...",
+-  "One moment...",
+-  "Searching my brain...",
++  "Un momento, señor.",
++  "Enseguida, señor.",
++  "Déjeme ver.",
++  "Ahora mismo.",
++  "Lo miro.",
+ ];
+ 
+ function getRandomThinkingPhrase() {
+@@ -59,7 +60,7 @@ function extractDialedExtension(req) {
+ 
+ function isGoodbye(transcript) {
+   const lower = transcript.toLowerCase().trim();
+-  const goodbyePhrases = ['goodbye', 'good bye', 'bye', 'hang up', 'end call', "that's all", 'thats all'];
++  const goodbyePhrases = ['adios', 'adiós', 'hasta luego', 'cuelga', 'cuelgo', 'nada mas', 'nada más', 'eso es todo', 'gracias, nada mas', 'goodbye', 'bye'];
+   return goodbyePhrases.some(function(phrase) {
+     return lower === phrase || lower.includes(' ' + phrase) ||
+            lower.startsWith(phrase + ' ') || lower.endsWith(' ' + phrase);
+@@ -118,13 +119,20 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
+   const deviceName = deviceConfig ? deviceConfig.name : 'Morpheus';
+   const devicePrompt = deviceConfig ? deviceConfig.prompt : null;
+   const voiceId = (deviceConfig && deviceConfig.voiceId) ? deviceConfig.voiceId : DEFAULT_VOICE_ID;
+-  const greeting = deviceConfig && deviceConfig.name !== 'Morpheus'
+-    ? "Hello! I'm " + deviceConfig.name + ". How can I help you today?"
+-    : "Hello! I'm your server. How can I help you today?";
++  const greeting = deviceConfig && deviceConfig.name === 'Jarvis'
++    ? "A su servicio, señor."
++    : deviceConfig && deviceConfig.name !== 'Morpheus'
++      ? "Hola, soy " + deviceConfig.name + ". ¿En qué puedo ayudarte?"
++      : "Hola, soy tu servidor. ¿En qué puedo ayudarte?";
+ 
+   try {
+     console.log('[' + new Date().toISOString() + '] CONVERSATION Starting (session: ' + callUuid + ', device: ' + deviceName + ', voice: ' + voiceId + ')...');
+ 
++    // Parche 27: Claude arranca mientras suena el saludo, no con la primera pregunta.
++    if (typeof claudeBridge.precalentar === 'function') {
++      claudeBridge.precalentar(callUuid, devicePrompt).catch(function () {});
++    }
++
+     // Play device-specific greeting with device voice
+     const greetingUrl = await ttsService.generateSpeech(greeting, voiceId);
+     await endpoint.play(greetingUrl);
+@@ -146,105 +154,225 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
+     // Main conversation loop
+     let turnCount = 0;
+     const MAX_TURNS = 20;
+-
+-    while (turnCount < MAX_TURNS) {
++    // Si interrumpiste la respuesta anterior (parche 16), ya estás hablando: ni pitido
++    // ni oído nuevo, se espera la frase que ya está entrando.
++    let interrumpio = false;
++    // Lo que pasó con la última lectura (parche 18), para anteponerlo a la pregunta.
++    let avisoLectura = '';
++    // Lo que espera un sí o un no de viva voz (parche 20), o null.
++    let pendienteConfirmar = null;
++    // Parche 24: por dónde va la lectura, para seguirla o saltar sin pasar por Claude.
++    const control = new ControlLectura();
++    const logTurno = function (m) { console.log('[' + new Date().toISOString() + '] ' + m); };
++    // Parche 22: la escucha pasiva, y si sigue la llamada (para no escuchar a nadie tras colgar).
++    const pasiva = new EscuchaPasiva({ log: logTurno });
++    armarAnticipo(session, whisperClient, { activo: function () { return !pasiva.dormida(); } });
++    let viva = true;
++    dialog.on('destroy', function () { viva = false; });
++
++    while (turnCount < MAX_TURNS && viva) {
+       turnCount++;
+       console.log('[' + new Date().toISOString() + '] CONVERSATION Turn ' + turnCount + '/' + MAX_TURNS);
+ 
+-      // READY BEEP
+-      try {
+-        await endpoint.play(READY_BEEP_URL);
+-      } catch (e) {
+-        console.log('[' + new Date().toISOString() + '] BEEP: Ready beep failed, continuing');
++      // Parche 22: dormido, el turno no empieza hasta que alguien le nombra.
++      let transcript = null;
++      let llamado = false;
++      let fueInterrupcion = false;
++      if (pasiva.dormida()) {
++        const oido = await pasiva.esperarPalabra({
++          session: session, whisperClient: whisperClient, sigueActiva: function () { return viva; }
++        });
++        if (!oido) break;
++        if (oido.tope) {
++          await endpoint.play(await ttsService.generateSpeech(FRASES_PASIVA.tope, voiceId));
++          break;
++        }
++        turnCount = 1;
++        llamado = true;
++        if (oido.resto) {
++          transcript = oido.resto;
++        } else {
++          await endpoint.play(await ttsService.generateSpeech(FRASES_PASIVA.despierta, voiceId));
++        }
+       }
+ 
+-      session.setCaptureEnabled(true);
+-      console.log('[' + new Date().toISOString() + '] LISTEN Waiting for speech...');
+-
+-      let utterance = null;
+-      try {
+-        utterance = await session.waitForUtterance({ timeoutMs: 30000 });
+-        console.log('[' + new Date().toISOString() + '] LISTEN Got: ' + utterance.audio.length + ' bytes');
+-      } catch (err) {
+-        console.log('[' + new Date().toISOString() + '] LISTEN Timeout: ' + err.message);
++      if (transcript === null) {
++        // READY BEEP
++        if (!interrumpio) {
++          try {
++            await endpoint.play(READY_BEEP_URL);
++          } catch (e) {
++            console.log('[' + new Date().toISOString() + '] BEEP: Ready beep failed, continuing');
++          }
++        }
++        fueInterrupcion = interrumpio;
++        interrumpio = false;
++
++        session.setCaptureEnabled(true);
++        console.log('[' + new Date().toISOString() + '] LISTEN Waiting for speech...');
++
++        let utterance = null;
++        try {
++          utterance = await session.waitForUtterance({
++            timeoutMs: turnoDeRespuesta(session, pendienteConfirmar, pasiva.esperaTurnoMs(30000))
++          });
++          console.log('[' + new Date().toISOString() + '] LISTEN Got: ' + utterance.audio.length + ' bytes');
++        } catch (err) {
++          console.log('[' + new Date().toISOString() + '] LISTEN Timeout: ' + err.message);
++        }
++
++        session.setCaptureEnabled(false);
++
++        // Parche 22: tras contestar, si no le dices nada más, vuelve a dormirse sin preguntar.
++        if (!utterance && pasiva.activa) {
++          pasiva.dormir();
++          continue;
++        }
++
++        if (!utterance) {
++          const promptUrl = await ttsService.generateSpeech("No te he oído. ¿Sigues ahí?", voiceId);
++          await endpoint.play(promptUrl);
++          continue;
++        }
++
++        // Parche 26: la transcripción (o lo que le falte al anticipo) corre mientras pita.
++        const transcribiendo = transcribirFrase(whisperClient, utterance, logTurno);
++        transcribiendo.catch(function () {});
++
++        // GOT-IT BEEP
++        try {
++          await endpoint.play(GOTIT_BEEP_URL);
++        } catch (e) {
++          console.log('[' + new Date().toISOString() + '] BEEP: Got-it beep failed, continuing');
++        }
++
++        // Transcribe
++        transcript = await transcribiendo;
++
++        console.log('[' + new Date().toISOString() + '] WHISPER: "' + transcript + '"');
++
++        if ((!transcript || transcript.trim().length < 2) && pasiva.activa) {
++          // Parche 35: ruido en mitad de una pregunta: sigue esperando el sí o el no.
++          if (!pendienteConfirmar) pasiva.dormir();
++          continue;
++        }
++
++        if (!transcript || transcript.trim().length < 2) {
++          const clarifyUrl = await ttsService.generateSpeech("Perdona, no te he entendido. ¿Puedes repetir?", voiceId);
++          await endpoint.play(clarifyUrl);
++          continue;
++        }
+       }
+ 
+-      session.setCaptureEnabled(false);
+-
+-      if (!utterance) {
+-        const promptUrl = await ttsService.generateSpeech("I didn't hear anything. Are you still there?", voiceId);
+-        await endpoint.play(promptUrl);
++      // Parche 22: «modo coche», «modo normal», «gracias» (dormido otra vez)…
++      // Parche 35: contestando a «¿lo hago?», «vale» es un sí, no «vuelve a dormirte».
++      const ordenPasiva = (pendienteConfirmar && siONo(transcript)) ? null : pasiva.orden(transcript);
++      if (ordenPasiva) {
++        await endpoint.play(await ttsService.generateSpeech(ordenPasiva.frase, voiceId));
+         continue;
+       }
+ 
+-      // GOT-IT BEEP
+-      try {
+-        await endpoint.play(GOTIT_BEEP_URL);
+-      } catch (e) {
+-        console.log('[' + new Date().toISOString() + '] BEEP: Got-it beep failed, continuing');
++      if (isGoodbye(transcript)) {
++        const byeUrl = await ttsService.generateSpeech("Hasta luego. Llámame cuando quieras.", voiceId);
++        await endpoint.play(byeUrl);
++        break;
+       }
+ 
+-      // Transcribe
+-      const transcript = await whisperClient.transcribe(utterance.audio, {
+-        format: 'pcm',
+-        sampleRate: 16000
+-      });
+-
+-      console.log('[' + new Date().toISOString() + '] WHISPER: "' + transcript + '"');
++      // Parche 20: lo que contestas a «¿lo hago?» lo decide la voice-app, no Claude.
++      if (pendienteConfirmar) {
++        const pendiente = pendienteConfirmar;
++        pendienteConfirmar = null;
++        const rc = await resolverConfirmacion(pendiente, transcript, {
++          endpoint: endpoint, session: session, ttsService: ttsService, voiceId: voiceId,
++          log: logTurno
++        });
++        if (rc.resuelta) {
++          pendienteConfirmar = rc.pendiente || null;
++          interrumpio = rc.interrumpio;
++          avisoLectura = rc.aviso;
++          continue;
++        }
++        avisoLectura = rc.aviso + avisoLectura;
++      }
+ 
+-      if (!transcript || transcript.trim().length < 2) {
+-        const clarifyUrl = await ttsService.generateSpeech("Sorry, I didn't catch that. Could you repeat?", voiceId);
+-        await endpoint.play(clarifyUrl);
++      // Parche 24: «sigue», «siguiente», «ve a la de economía»… los cumple la llamada.
++      const ordenLectura = await control.atender(transcript, {
++        endpoint: endpoint, session: session, ttsService: ttsService, voiceId: voiceId,
++        log: logTurno, sigueActiva: function () { return viva; }
++      });
++      if (ordenLectura) {
++        interrumpio = ordenLectura.interrumpio;
++        avisoLectura = ordenLectura.aviso;
+         continue;
+       }
+ 
+-      if (isGoodbye(transcript)) {
+-        const byeUrl = await ttsService.generateSpeech("Goodbye! Call again anytime.", voiceId);
+-        await endpoint.play(byeUrl);
+-        break;
++      // Parche 34: la tele y lo que no hace falta pensar, sin pasar por Claude.
++      const reflejo = await reflejos.atender(transcript, {
++        endpoint: endpoint, session: session, ttsService: ttsService, voiceId: voiceId,
++        log: logTurno, sigueActiva: function () { return viva; }
++      });
++      if (reflejo) {
++        interrumpio = reflejo.interrumpio;
++        avisoLectura = reflejo.aviso;
++        continue;
+       }
+ 
+-      // THINKING FEEDBACK
++      // THINKING FEEDBACK + Claude, a la vez (parche 15)
+       const thinkingPhrase = getRandomThinkingPhrase();
+       console.log('[' + new Date().toISOString() + '] THINKING: "' + thinkingPhrase + '"');
+-      const thinkingUrl = await ttsService.generateSpeech(thinkingPhrase, voiceId);
+-      await endpoint.play(thinkingUrl);
+-
+-      // Hold music in background
+-      let musicPlaying = false;
+-      endpoint.play(HOLD_MUSIC_URL).catch(function(e) {
+-        console.log('[' + new Date().toISOString() + '] MUSIC: Hold music failed, continuing');
+-      });
+-      musicPlaying = true;
+-
+-      // Query Claude with device-specific prompt
+       console.log('[' + new Date().toISOString() + '] CLAUDE Querying (device: ' + deviceName + ')...');
+-      const claudeResponse = await claudeBridge.query(
+-        transcript,
+-        { callId: callUuid, devicePrompt: devicePrompt }
+-      );
+-
+-      // Stop hold music
+-      if (musicPlaying) {
+-        try {
+-          await endpoint.api('uuid_break', endpoint.uuid);
+-        } catch (e) {}
+-      }
++      const claudeResponse = await pensar({
++        consultar: function () {
++          return claudeBridge.query(
++            (llamado ? AVISO_PASIVA : '') +
++            (avisoLectura || (fueInterrupcion ? AVISO_INTERRUPCION : '')) + transcript,
++            { callId: callUuid, devicePrompt: devicePrompt }
++          );
++        },
++        endpoint: endpoint,
++        ttsService: ttsService,
++        frase: thinkingPhrase,
++        voiceId: voiceId,
++        musicaUrl: HOLD_MUSIC_URL,
++        extraer: extractVoiceLine
++      });
+ 
+       console.log('[' + new Date().toISOString() + '] CLAUDE Response received');
++      control.turnoDeClaude();
+ 
+       // Extract and play voice line with device voice
+       const voiceLine = extractVoiceLine(claudeResponse);
+       console.log('[' + new Date().toISOString() + '] VOICE: "' + voiceLine + '"');
+ 
+       const responseUrl = await ttsService.generateSpeech(voiceLine, voiceId);
+-      await endpoint.play(responseUrl);
++      interrumpio = await decirInterrumpible(endpoint, session, responseUrl, function (m) {
++        console.log('[' + new Date().toISOString() + '] ' + m);
++      });
++      avisoLectura = '';
++      if (!interrumpio) {
++        const lectura = await leerSiLoPide(claudeResponse, {
++          endpoint: endpoint, session: session, ttsService: ttsService, voiceId: voiceId,
++          log: function (m) { console.log('[' + new Date().toISOString() + '] ' + m); },
++          sigueActiva: function () { return viva; },
++          control: control
++        });
++        interrumpio = lectura.interrumpio;
++        avisoLectura = lectura.aviso;
++      }
++      if (!interrumpio && !avisoLectura) {
++        const pc = await preguntarSiLoPide(claudeResponse, {
++          endpoint: endpoint, session: session, ttsService: ttsService, voiceId: voiceId,
++          log: logTurno
++        });
++        pendienteConfirmar = pc.pendiente;
++        interrumpio = pc.interrumpio;
++      }
+ 
+       console.log('[' + new Date().toISOString() + '] CONVERSATION Turn ' + turnCount + ' complete');
+     }
+ 
+     if (turnCount >= MAX_TURNS) {
+-      const maxUrl = await ttsService.generateSpeech("We've been talking for a while. Goodbye!", voiceId);
++      const maxUrl = await ttsService.generateSpeech("Llevamos un rato hablando. Hasta luego.", voiceId);
+       await endpoint.play(maxUrl);
+     }
+ 
+@@ -252,7 +380,7 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
+     console.error('[' + new Date().toISOString() + '] CONVERSATION Error:', error.message);
+     try {
+       if (session) session.setCaptureEnabled(false);
+-      const errUrl = await ttsService.generateSpeech("Sorry, something went wrong.", voiceId);
++      const errUrl = await ttsService.generateSpeech("Perdona, algo ha fallado.", voiceId);
+       await endpoint.play(errUrl);
+     } catch (e) {}
+   } finally {
+diff --git a/voice-app/lib/tts-service.js b/voice-app/lib/tts-service.js
+index 234b7b5..28f4c43 100644
+--- a/voice-app/lib/tts-service.js
++++ b/voice-app/lib/tts-service.js
+@@ -1,12 +1,36 @@
+ /**
+- * ElevenLabs Text-to-Speech Service
++ * Text-to-Speech Service
+  * Generates speech audio files and returns URLs for FreeSWITCH playback
++ *
++ * Parche 29 (Life Assistant, telefono/PARCHES.md): ElevenLabs ya no es la única voz.
++ * El 2026-10-28 a las 18:00 se acabó su cuota del mes (10.000 créditos, el plan
++ * gratuito) y desde entonces toda llamada se descolgaba y se colgaba sin decir nada:
++ * ElevenLabs devuelve 401 `quota_exceeded`, generateSpeech lanzaba y la voice-app
++ * colgaba. Ahora las voces van en orden (`TTS_ORDEN`, por defecto ElevenLabs y luego
++ * Azure, la misma voz que el dashboard) y la que falla se aparta un rato para no pagar
++ * su viaje en cada frase.
++ *
++ * Parche 30: la primera voz puede ser la de casa, Piper en jacobo (telefono/voz/), sin
++ * cuotas ni internet. Va delante si `TTS_ORDEN` empieza por `jacobo`; si jacobo no
++ * contesta a tiempo, la frase sigue por las de fuera.
++ *
++ * Parche 31: Fish Audio (la voz «Jarvis» que eligió Mikel) habla EN DIRECTO. Entera
++ * tardaba 5,7 s por frase; su primer byte llega en ~0,8-1 s. Las voces de
++ * `TTS_EN_DIRECTO` (por defecto fish y azure) no se guardan en disco: se devuelve una
++ * URL `shout://` y FreeSWITCH (mod_shout, el de las radios) va sonando según llega el
++ * audio. Las `http://` las descarga enteras mod_httapi antes de sonar, que es justo lo
++ * que no se quiere aquí. Solo se da por buena la voz cuando ha llegado el primer trozo:
++ * si no llega en `TTS_PRIMER_BYTE_MS`, la frase sigue por la siguiente.
+  */
+ 
+ const axios = require('axios');
++const https = require('https');
++// Parche 34: sin esto, cada frase pagaba un TLS nuevo con Fish (100-200 ms).
++axios.defaults.httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 8 });
+ const fs = require('fs');
+ const path = require('path');
+ const crypto = require('crypto');
++const { EventEmitter } = require('events');
+ const logger = require('./logger');
+ 
+ const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+@@ -14,7 +38,84 @@ const ELEVENLABS_API_URL = 'https://api.elevenlabs.io/v1';
+ 
+ // Default voice IDs (can be customized)
+ const DEFAULT_VOICE_ID = 'JAgnJveGGUh4qy4kh6dF'; // Morpheus voice
+-const MODEL_ID = 'eleven_turbo_v2'; // Fast, low-latency model
++// turbo_v2 es solo inglés: en español pronuncia con acento anglosajón.
++// flash_v2_5 es multilingüe y aún más rápido.
++const MODEL_ID = process.env.ELEVENLABS_MODEL_ID || 'eleven_flash_v2_5';
++
++// Azure Speech: la voz del dashboard (backend/main.py, «La voz se mudó a Azure»), con
++// las mismas variables. 24 kHz y 48 kbit/s, como allí: por teléfono sobra.
++const AZURE_SPEECH_KEY     = process.env.AZURE_SPEECH_KEY || '';
++const AZURE_SPEECH_REGION  = process.env.AZURE_SPEECH_REGION || '';
++const AZURE_SPEECH_VOICE   = process.env.AZURE_SPEECH_VOICE || 'es-ES-SaulNeural';
++const AZURE_SPEECH_FORMATO = process.env.AZURE_SPEECH_FORMATO || 'audio-24khz-48kbitrate-mono-mp3';
++
++// Fish Audio: la voz «Jarvis» (`FISH_AUDIO_VOICE`, el reference_id), las mismas variables
++// que el backend. `balanced` es su modo de menos latencia.
++const FISH_AUDIO_API_KEY  = process.env.FISH_AUDIO_API_KEY || '';
++const FISH_AUDIO_MODEL    = process.env.FISH_AUDIO_MODEL || 's2.1-pro-free';
++const FISH_AUDIO_VOICE    = process.env.FISH_AUDIO_VOICE || '';
++const FISH_AUDIO_LATENCIA = process.env.FISH_AUDIO_LATENCIA || 'balanced';
++
++// La voz de jacobo (telefono/voz/servidor.py). Devuelve WAV: FreeSWITCH lo reproduce
++// igual y se ahorra codificar. `VOZ_VOZ` elige la voz (vacía = la que tenga jacobo por
++// defecto) y `VOZ_VELOCIDAD` la acelera o la frena (0,5-2).
++const VOZ_URL       = (process.env.VOZ_URL || '').replace(/\/+$/, '');
++const VOZ_TOKEN     = process.env.VOZ_TOKEN || '';
++const VOZ_VOZ       = process.env.VOZ_VOZ || '';
++const VOZ_VELOCIDAD = parseFloat(process.env.VOZ_VELOCIDAD || '1') || 1;
++// Más corto que el de las de fuera: Piper tarda ~0,1-0,3 s por frase, así que pasar de
++// esto es que jacobo o su red no están, y hay otra voz esperando.
++const VOZ_TIMEOUT_MS = parseInt(process.env.VOZ_TIMEOUT_MS || '3000', 10);
++
++// Sin tope, una API colgada deja la llamada en silencio hasta que FreeSWITCH se canse.
++const TTS_TIMEOUT_MS = parseInt(process.env.TTS_TIMEOUT_MS || '8000', 10);
++// Cuánto se aparta una voz que ha fallado. La cuota o la llave no se arreglan solas en
++// un minuto (la de ElevenLabs vuelve con el mes), así que esas van largas; una caída o
++// un timeout, cortas, como la pausa del oído en el parche 25.
++const TTS_PAUSA_CUOTA_MS = parseInt(process.env.TTS_PAUSA_CUOTA_MS || String(30 * 60 * 1000), 10);
++const TTS_PAUSA_MS       = parseInt(process.env.TTS_PAUSA_MS || '60000', 10);
++// En directo: cuánto se espera al primer trozo de audio antes de pasar a otra voz, y
++// cuánto vive en memoria un audio ya servido (FreeSWITCH puede volver a pedirlo).
++const TTS_PRIMER_BYTE_MS  = parseInt(process.env.TTS_PRIMER_BYTE_MS || '3000', 10);
++const TTS_DIRECTO_VIDA_MS = 5 * 60 * 1000;
++
++const VOCES = {
++  fish: {
++    ext: 'mp3',
++    configurada: function () { return !!FISH_AUDIO_API_KEY; },
++    peticion: peticionFish
++  },
++  jacobo: {
++    ext: 'wav',
++    configurada: function () { return !!(VOZ_URL && VOZ_TOKEN); },
++    sintetizar: sintetizarJacobo
++  },
++  elevenlabs: {
++    ext: 'mp3',
++    configurada: function () { return !!ELEVENLABS_API_KEY; },
++    sintetizar: sintetizarElevenLabs
++  },
++  azure: {
++    ext: 'mp3',
++    configurada: function () { return !!(AZURE_SPEECH_KEY && AZURE_SPEECH_REGION && AZURE_SPEECH_VOICE); },
++    peticion: peticionAzure
++  }
++};
++
++function enDirecto(voz) {
++  return (process.env.TTS_EN_DIRECTO === undefined ? 'fish,azure' : process.env.TTS_EN_DIRECTO)
++    .split(',').map(function (s) { return s.trim().toLowerCase(); })
++    .indexOf(voz) !== -1 && !!VOCES[voz].peticion;
++}
++
++function ordenDeVoces() {
++  return (process.env.TTS_ORDEN || 'elevenlabs,azure')
++    .split(',').map(function (s) { return s.trim().toLowerCase(); })
++    .filter(function (s) { return VOCES[s]; });
++}
++
++// voz → instante (ms) hasta el que no se le pide nada
++const apartadaHasta = {};
+ 
+ // Audio output directory (set via setAudioDir)
+ let audioDir = path.join(__dirname, '../audio-temp');
+@@ -38,100 +139,342 @@ function setAudioDir(dir) {
+  * @param {string} text - Text being converted
+  * @returns {string} Filename (without path)
+  */
+-function generateFilename(text) {
++function generateFilename(text, ext = 'mp3') {
+   // Hash text to create unique identifier
+   const hash = crypto.createHash('md5').update(text).digest('hex').substring(0, 8);
+   const timestamp = Date.now();
+-  return `tts-${timestamp}-${hash}.mp3`;
++  return `tts-${timestamp}-${hash}.${ext}`;
++}
++
++async function sintetizarElevenLabs(text, voiceId) {
++  const response = await axios({
++    method: 'POST',
++    url: `${ELEVENLABS_API_URL}/text-to-speech/${voiceId}`,
++    headers: {
++      'Accept': 'audio/mpeg',
++      'Content-Type': 'application/json',
++      'xi-api-key': ELEVENLABS_API_KEY
++    },
++    data: {
++      text,
++      model_id: MODEL_ID,
++      voice_settings: {
++        stability: 0.5,
++        similarity_boost: 0.75,
++        style: 0.0,
++        use_speaker_boost: true
++      }
++    },
++    responseType: 'arraybuffer',
++    timeout: TTS_TIMEOUT_MS
++  });
++  return Buffer.from(response.data);
++}
++
++async function sintetizarJacobo(text) {
++  const datos = { texto: text, velocidad: VOZ_VELOCIDAD };
++  if (VOZ_VOZ) datos.voz = VOZ_VOZ;
++  const response = await axios({
++    method: 'POST',
++    url: `${VOZ_URL}/decir`,
++    headers: { 'Content-Type': 'application/json', 'X-Auth-Token': VOZ_TOKEN },
++    data: datos,
++    responseType: 'arraybuffer',
++    timeout: VOZ_TIMEOUT_MS
++  });
++  return Buffer.from(response.data);
++}
++
++// El texto lo ha escrito el modelo a partir de lo que oyó: va como DATO, escapado, igual
++// que `_ssml` del backend. Sin esto un `<` rompe el SSML y Azure devuelve 400.
++function escaparXml(s) {
++  return String(s)
++    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
++    .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
++}
++
++// `<lang>` hace que una voz multilingüe (la británica, `en-GB-Ryan:DragonHDLatestNeural`)
++// hable en español; con las españolas no cambia nada.
++function ssml(texto, voz) {
++  return '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="es-ES">'
++    + '<voice name="' + escaparXml(voz) + '"><lang xml:lang="es-ES">' + escaparXml(texto)
++    + '</lang></voice></speak>';
++}
++
++function peticionAzure(text) {
++  return {
++    method: 'POST',
++    url: `https://${encodeURIComponent(AZURE_SPEECH_REGION)}.tts.speech.microsoft.com/cognitiveservices/v1`,
++    headers: {
++      'Ocp-Apim-Subscription-Key': AZURE_SPEECH_KEY,
++      'Content-Type': 'application/ssml+xml',
++      'X-Microsoft-OutputFormat': AZURE_SPEECH_FORMATO,
++      'User-Agent': 'claude-phone'
++    },
++    data: ssml(text, AZURE_SPEECH_VOICE)
++  };
++}
++
++// Aquí no hay marcado: el texto va como campo de un JSON.
++function peticionFish(text) {
++  const datos = { text: text, format: 'mp3', latency: FISH_AUDIO_LATENCIA };
++  if (FISH_AUDIO_VOICE) datos.reference_id = FISH_AUDIO_VOICE;
++  return {
++    method: 'POST',
++    url: 'https://api.fish.audio/v1/tts',
++    headers: { 'Authorization': `Bearer ${FISH_AUDIO_API_KEY}`, 'model': FISH_AUDIO_MODEL,
++               'Content-Type': 'application/json' },
++    data: datos
++  };
+ }
+ 
++// Una voz con `peticion` y sin `sintetizar` se sintetiza entera igual, si no va en directo
++for (const v of Object.keys(VOCES)) {
++  if (!VOCES[v].sintetizar && VOCES[v].peticion) {
++    VOCES[v].sintetizar = async function (text) {
++      const cfg = VOCES[v].peticion(text);
++      cfg.responseType = 'arraybuffer';
++      cfg.timeout = TTS_TIMEOUT_MS;
++      const response = await axios(cfg);
++      return Buffer.from(response.data);
++    };
++  }
++}
++
++// ── En directo ──────────────────────────────────────────────────────────────────────
++// id → { trozos: [Buffer], bytes, acabado, error, avisos: EventEmitter, caduca, inicio }
++const directos = new Map();
++
+ /**
+- * Convert text to speech using ElevenLabs API
+- * @param {string} text - Text to convert to speech
+- * @param {string} voiceId - ElevenLabs voice ID (optional)
+- * @returns {Promise<string>} HTTP URL to audio file
++ * Pide el audio en streaming y vuelve en cuanto llega el primer trozo. Lanza si no llega
++ * a tiempo o si la voz contesta con error, para que generateSpeech pruebe la siguiente.
+  */
+-async function generateSpeech(text, voiceId = DEFAULT_VOICE_ID) {
+-  const startTime = Date.now();
+-
+-  try {
+-    if (!ELEVENLABS_API_KEY) {
+-      throw new Error('ELEVENLABS_API_KEY environment variable not set');
++function abrirEnDirecto(voz, text) {
++  return new Promise(function (resolve, reject) {
++    const cfg = VOCES[voz].peticion(text);
++    cfg.responseType = 'stream';
++    cfg.timeout = TTS_PRIMER_BYTE_MS;
++    let resuelto = false;
++    let respuesta = null;
++    const reloj = setTimeout(function () {
++      if (resuelto) return;
++      resuelto = true;
++      if (respuesta) respuesta.data.destroy();
++      reject(new Error(`sin audio en ${TTS_PRIMER_BYTE_MS} ms`));
++    }, TTS_PRIMER_BYTE_MS);
++
++    function falla(e) {
++      if (resuelto) return;
++      resuelto = true;
++      clearTimeout(reloj);
++      reject(e);
+     }
+ 
+-    logger.info('Generating speech with ElevenLabs', {
+-      textLength: text.length,
+-      voiceId,
+-      model: MODEL_ID
+-    });
+-
+-    // Call ElevenLabs API
+-    const response = await axios({
+-      method: 'POST',
+-      url: `${ELEVENLABS_API_URL}/text-to-speech/${voiceId}`,
+-      headers: {
+-        'Accept': 'audio/mpeg',
+-        'Content-Type': 'application/json',
+-        'xi-api-key': ELEVENLABS_API_KEY
+-      },
+-      data: {
+-        text,
+-        model_id: MODEL_ID,
+-        voice_settings: {
+-          stability: 0.5,
+-          similarity_boost: 0.75,
+-          style: 0.0,
+-          use_speaker_boost: true
++    axios(cfg).then(function (r) {
++      respuesta = r;
++      if (resuelto) { r.data.destroy(); return; }
++      const id = crypto.randomBytes(8).toString('hex');
++      const d = { trozos: [], bytes: 0, acabado: false, error: null, avisos: new EventEmitter(),
++                  caduca: Date.now() + TTS_DIRECTO_VIDA_MS, inicio: Date.now() };
++      r.data.on('data', function (trozo) {
++        d.trozos.push(trozo);
++        d.bytes += trozo.length;
++        d.avisos.emit('trozo', trozo);
++        if (!resuelto) {
++          resuelto = true;
++          clearTimeout(reloj);
++          directos.set(id, d);
++          resolve(id);
+         }
+-      },
+-      responseType: 'arraybuffer'
+-    });
++      });
++      r.data.on('end', function () {
++        d.acabado = true;
++        d.caduca = Date.now() + TTS_DIRECTO_VIDA_MS;
++        d.avisos.emit('fin');
++        logger.info('Speech stream completed', { proveedor: voz, id, bytes: d.bytes,
++                                                  ms: Date.now() - d.inicio });
++        falla(new Error('respuesta sin audio'));
++      });
++      r.data.on('error', function (e) {
++        d.error = e;
++        d.acabado = true;
++        d.avisos.emit('fin');
++        logger.error('Speech stream failed', { proveedor: voz, id, error: e.message, bytes: d.bytes });
++        falla(e);
++      });
++    }).catch(falla);
++  });
++}
+ 
+-    // Generate filename and save audio
+-    const filename = generateFilename(text);
+-    const filepath = path.join(audioDir, filename);
++/**
++ * GET /tts-stream/:id — lo que ya ha llegado y lo que va llegando. Lo monta index.js en
++ * el servidor HTTP de la voice-app, antes del 404.
++ */
++function servirEnDirecto(req, res) {
++  const id = String(req.params.id || '').replace(/\.mp3$/, '');
++  const d = directos.get(id);
++  if (!d) return res.status(404).end();
++  res.setHeader('Content-Type', 'audio/mpeg');
++  res.setHeader('Cache-Control', 'no-store');
++  for (const t of d.trozos) res.write(t);
++  if (d.acabado) return res.end();
++  const alTrozo = function (t) { res.write(t); };
++  const alFin = function () { quitar(); res.end(); };
++  function quitar() { d.avisos.off('trozo', alTrozo); d.avisos.off('fin', alFin); }
++  d.avisos.on('trozo', alTrozo);
++  d.avisos.on('fin', alFin);
++  // Si le cortan (barge-in) FreeSWITCH cierra: se deja de escribir, pero el audio se
++  // sigue recogiendo hasta el final por si lo vuelve a pedir.
++  res.on('close', quitar);
++}
+ 
+-    fs.writeFileSync(filepath, response.data);
++setInterval(function () {
++  const ahora = Date.now();
++  for (const [id, d] of directos) if (d.acabado && d.caduca < ahora) directos.delete(id);
++}, 60 * 1000).unref();
+ 
+-    const latency = Date.now() - startTime;
+-    const fileSize = response.data.length;
++// Cuota, llave o límite: no pasa solo en un minuto.
++function esFalloDeCuota(error) {
++  const status = error.response && error.response.status;
++  return status === 401 || status === 402 || status === 403 || status === 429;
++}
+ 
+-    logger.info('Speech generation successful', {
+-      filename,
+-      fileSize,
+-      latency,
+-      textLength: text.length
+-    });
++function cuerpoDelError(error) {
++  const datos = error.response && error.response.data;
++  if (!datos) return undefined;
++  if (typeof datos.pipe === 'function') return '(stream)';
++  return (Buffer.isBuffer(datos) ? datos.toString('utf8') : String(datos)).slice(0, 300);
++}
++
++/**
++ * Convert text to speech, trying each configured voice in order (`TTS_ORDEN`)
++ * @param {string} text - Text to convert to speech
++ * @param {string} voiceId - ElevenLabs voice ID (optional; Azure and jacobo use their own)
++ * @returns {Promise<string>} HTTP URL to audio file
++ */
++// ── Parche 34: lo que se dice siempre igual, ya sintetizado ─────────────────────────
++// El «¿Señor?» de hoy tardó 3 s con el móvil ya descolgado, y cada «Un momento» 0,7 s
++// para decir algo que no cambia nunca. Se sintetizan una vez, enteras, y se guardan en
++// el volumen de audio (`fija-*`, que cleanupOldFiles no toca): sobreviven a un reinicio
++// y salen al instante, o sin esperar a Fish si se cae.
++const fijas = new Set();
++
++const DIR_FIJAS = path.join(__dirname, '..', 'config', 'frases-fijas');
++
++function ficheroFija(text) {
++  const huella = crypto.createHash('md5').update([FISH_AUDIO_MODEL, FISH_AUDIO_VOICE, text].join('|')).digest('hex').slice(0, 16);
++  return 'fija-' + huella + '.mp3';
++}
+ 
+-    // Return HTTP URL (assumes audio-temp is served via HTTP)
+-    // Format: http://localhost:PORT/audio/filename.mp3
+-    // The HTTP server setup is handled elsewhere
+-    const audioUrl = `http://127.0.0.1:3000/audio-files/${filename}`;
++async function prepararFrasesFijas(frases) {
++  if (!FISH_AUDIO_API_KEY) return;
++  fs.mkdirSync(DIR_FIJAS, { recursive: true });
++  let nuevas = 0;
++  for (const text of frases) {
++    const ruta = path.join(DIR_FIJAS, ficheroFija(text));
++    try {
++      if (!fs.existsSync(ruta)) {
++        const audio = await VOCES.fish.sintetizar(text);
++        if (!audio || !audio.length) continue;
++        fs.writeFileSync(ruta, audio);
++        nuevas++;
++      }
++      fijas.add(text);
++    } catch (e) {
++      logger.warn('Frase fija sin sintetizar', { text, error: e.message });
++    }
++  }
++  logger.info('Frases fijas listas', { total: fijas.size, nuevas });
++}
+ 
+-    return audioUrl;
++// ── Parche 34: la respuesta se sintetiza en cuanto Claude la tiene, aunque aún suene la
++// frase de espera. El generateSpeech que venga después con ese texto se la encuentra.
++const anticipadas = new Map();
++
++function anticipar(text, voiceId) {
++  if (!text || fijas.has(text) || anticipadas.has(text)) return;
++  const p = generar(text, voiceId);
++  p.catch(function () {});
++  anticipadas.set(text, p);
++  const reloj = setTimeout(function () { anticipadas.delete(text); }, 20000);
++  if (reloj.unref) reloj.unref();
++}
+ 
+-  } catch (error) {
+-    const latency = Date.now() - startTime;
+-
+-    logger.error('Speech generation failed', {
+-      error: error.message,
+-      latency,
+-      textLength: text?.length,
+-      responseStatus: error.response?.status,
+-      responseData: error.response?.data?.toString()
+-    });
++async function generateSpeech(text, voiceId = DEFAULT_VOICE_ID) {
++  // Mirando el disco cada vez: que falte el fichero no puede costar una llamada.
++  if (fijas.has(text) && fs.existsSync(path.join(DIR_FIJAS, ficheroFija(text)))) {
++    return `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/frases-fijas/${ficheroFija(text)}`;
++  }
++  const ya = anticipadas.get(text);
++  if (ya) {
++    anticipadas.delete(text);
++    return ya;
++  }
++  return generar(text, voiceId);
++}
+ 
+-    // Handle specific errors
+-    if (error.response?.status === 401) {
+-      throw new Error('ElevenLabs API authentication failed - check API key');
+-    } else if (error.response?.status === 429) {
+-      throw new Error('ElevenLabs API rate limit exceeded');
+-    } else if (error.response?.status === 400) {
+-      throw new Error('Invalid request to ElevenLabs API');
+-    }
++async function generar(text, voiceId = DEFAULT_VOICE_ID) {
++  const startTime = Date.now();
++  const orden = ordenDeVoces().filter(function (v) { return VOCES[v].configurada(); });
++  if (!orden.length) {
++    throw new Error('TTS generation failed: no hay ninguna voz configurada (ELEVENLABS_API_KEY o AZURE_SPEECH_*)');
++  }
+ 
+-    throw new Error(`TTS generation failed: ${error.message}`);
++  // Las apartadas van al final, no fuera: si todas lo están, se prueban igual antes
++  // que dejar la llamada muda.
++  const ahora = Date.now();
++  const libres    = orden.filter(function (v) { return !(apartadaHasta[v] > ahora); });
++  const apartadas = orden.filter(function (v) { return apartadaHasta[v] > ahora; });
++
++  let ultimo = null;
++  for (const voz of libres.concat(apartadas)) {
++    const inicioVoz = Date.now();
++    try {
++      logger.info('Generating speech', { proveedor: voz, textLength: text.length, voiceId });
++      if (enDirecto(voz)) {
++        const id = await abrirEnDirecto(voz, text);
++        delete apartadaHasta[voz];
++        logger.info('Speech generation successful', {
++          proveedor: voz, enDirecto: true, id, latency: Date.now() - startTime, textLength: text.length
++        });
++        return `shout://127.0.0.1:${process.env.HTTP_PORT || 3000}/tts-stream/${id}.mp3`;
++      }
++      const audio = await VOCES[voz].sintetizar(text, voiceId);
++      if (!audio || !audio.length) throw new Error('respuesta sin audio');
++
++      const filename = generateFilename(text, VOCES[voz].ext);
++      fs.writeFileSync(path.join(audioDir, filename), audio);
++      delete apartadaHasta[voz];
++
++      logger.info('Speech generation successful', {
++        proveedor: voz,
++        filename,
++        fileSize: audio.length,
++        latency: Date.now() - startTime,
++        textLength: text.length
++      });
++
++      // Return HTTP URL (assumes audio-temp is served via HTTP)
++      // Format: http://localhost:PORT/audio/filename.mp3
++      // The HTTP server setup is handled elsewhere
++      return `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/audio-files/${filename}`;
++    } catch (error) {
++      ultimo = error;
++      const pausa = esFalloDeCuota(error) ? TTS_PAUSA_CUOTA_MS : TTS_PAUSA_MS;
++      apartadaHasta[voz] = Date.now() + pausa;
++      logger.error('Speech generation failed', {
++        proveedor: voz,
++        error: error.message,
++        latency: Date.now() - inicioVoz,
++        textLength: text?.length,
++        responseStatus: error.response?.status,
++        responseData: cuerpoDelError(error),
++        apartadaMs: pausa
++      });
++    }
+   }
++
++  throw new Error(`TTS generation failed: ninguna voz ha podido (${ultimo && ultimo.message})`);
+ }
+ 
+ /**
+@@ -145,7 +488,7 @@ function cleanupOldFiles(maxAgeMs = 60 * 60 * 1000) {
+ 
+     let deletedCount = 0;
+     files.forEach(file => {
+-      if (!file.startsWith('tts-') || !file.endsWith('.mp3')) {
++      if (!file.startsWith('tts-') || !(file.endsWith('.mp3') || file.endsWith('.wav'))) {
+         return;
+       }
+ 
+@@ -197,13 +540,16 @@ async function getAvailableVoices() {
+ // Initialize audio directory
+ setAudioDir(audioDir);
+ 
+-// Setup periodic cleanup (every 30 minutes)
++// Setup periodic cleanup (every 30 minutes); unref para que no retenga el proceso (tests)
+ setInterval(() => {
+   cleanupOldFiles();
+-}, 30 * 60 * 1000);
++}, 30 * 60 * 1000).unref();
+ 
+ module.exports = {
+   generateSpeech,
++  prepararFrasesFijas,
++  anticipar,
++  servirEnDirecto,
+   setAudioDir,
+   cleanupOldFiles,
+   getAvailableVoices
+diff --git a/voice-app/lib/whisper-client.js b/voice-app/lib/whisper-client.js
+index fae405d..a066431 100644
+--- a/voice-app/lib/whisper-client.js
++++ b/voice-app/lib/whisper-client.js
+@@ -1,6 +1,12 @@
+ /**
+- * OpenAI Whisper API Client for Speech-to-Text
++ * Speech-to-Text: primero el oído de jacobo, OpenAI Whisper de reserva
+  * Converts audio buffers (L16 PCM from FreeSWITCH) to text
++ *
++ * Parche 25: si están OIDO_URL y OIDO_TOKEN, cada frase va antes a `POST /transcribir`
++ * del oído (whisper.cpp `large-v3-turbo` en la GPU de jacobo). Si no contesta a tiempo o
++ * falla, la misma frase va a whisper-1 de OpenAI, y el oído se salta durante
++ * OIDO_PAUSA_MS para no pagar la espera en cada turno mientras jacobo esté caído.
++ * OIDO=0 lo apaga sin quitar las variables.
+  */
+ 
+ const OpenAI = require("openai");
+@@ -8,6 +14,20 @@ const WaveFile = require("wavefile").WaveFile;
+ const fs = require("fs");
+ const path = require("path");
+ 
++// Parche 34: el 2026-11-04, con jacobo apagado, cada 60 s un turno perdía estos 4 s
++// enteros antes de ir a OpenAI. Ahora un sondeo lo sabe antes de que haga falta, y si
++// aun así no contesta a OIDO_CARRERA_MS sale OpenAI a la vez: gana quien llegue antes.
++const OIDO_TIMEOUT_MS = parseInt(process.env.OIDO_TIMEOUT_MS || "2500", 10);
++const OIDO_CARRERA_MS = parseInt(process.env.OIDO_CARRERA_MS || "1500", 10);
++const OPENAI_MODELO = process.env.OPENAI_STT_MODELO || "gpt-4o-transcribe";
++const OPENAI_RESERVA = process.env.OPENAI_STT_RESERVA || "whisper-1";
++const OPENAI_CARRERA_MS = parseInt(process.env.OPENAI_CARRERA_MS || "1500", 10);
++const OIDO_SONDEO_MS = parseInt(process.env.OIDO_SONDEO_MS || "8000", 10);
++const OIDO_PAUSA_MS = parseInt(process.env.OIDO_PAUSA_MS || "60000", 10);
++
++// Hasta cuándo no se le pregunta al oído (después de un fallo)
++let oidoCaidoHasta = 0;
++
+ // Lazy-initialized OpenAI client
+ let openai = null;
+ 
+@@ -24,6 +44,77 @@ function getOpenAIClient() {
+   return openai;
+ }
+ 
++function oidoConfigurado() {
++  return !!(process.env.OIDO_URL && process.env.OIDO_TOKEN) && process.env.OIDO !== "0";
++}
++
++// Parche 26: el anticipo solo se lanza si contestaría jacobo; contra OpenAI cada pausa
++// a media frase sería una llamada de pago tirada.
++function oidoDisponible() {
++  return oidoConfigurado() && Date.now() >= oidoCaidoHasta;
++}
++
++// Parche 34: cualquier respuesta vale (401 incluido, /salud pide llave): lo que se
++// quiere saber es si hay alguien al otro lado. Dos fallos seguidos lo dan por caído
++// hasta el sondeo siguiente; uno bueno lo devuelve al momento.
++let fallosSondeo = 0;
++async function sondearOido() {
++  if (!oidoConfigurado()) return;
++  try {
++    const r = await fetch(process.env.OIDO_URL.replace(/\/+$/, "") + "/salud", {
++      headers: { "X-Auth-Token": process.env.OIDO_TOKEN },
++      signal: AbortSignal.timeout(2000)
++    });
++    if (r.status >= 500) throw new Error("HTTP " + r.status);
++    if (oidoCaidoHasta) console.log("[WHISPER] El oído de jacobo ha vuelto");
++    fallosSondeo = 0;
++    oidoCaidoHasta = 0;
++  } catch (e) {
++    if (++fallosSondeo >= 2) {
++      if (!oidoCaidoHasta) console.warn("[WHISPER] El oído de jacobo no contesta al sondeo: OpenAI");
++      oidoCaidoHasta = Date.now() + OIDO_SONDEO_MS * 3;
++    }
++  }
++}
++sondearOido();
++const relojSondeo = setInterval(sondearOido, OIDO_SONDEO_MS);
++if (relojSondeo.unref) relojSondeo.unref();
++
++/**
++ * La primera que salga bien. La segunda solo arranca si la primera tarda más de `ms`
++ * o falla; si fallan las dos, lanza el último error.
++ */
++function carrera(primera, lanzarSegunda, ms) {
++  return new Promise(function (resolve, reject) {
++    let acabado = false;
++    let lanzada = false;
++    let vivas = 1;
++    const bien = function (v) {
++      if (acabado) return;
++      acabado = true;
++      clearTimeout(reloj);
++      resolve(v);
++    };
++    const lanzar = function () {
++      if (lanzada || acabado) return;
++      lanzada = true;
++      vivas++;
++      Promise.resolve().then(lanzarSegunda).then(bien, mal);
++    };
++    const mal = function (e) {
++      vivas--;
++      if (acabado) return;
++      if (!lanzada) return lanzar();
++      if (vivas <= 0) {
++        acabado = true;
++        reject(e);
++      }
++    };
++    const reloj = setTimeout(lanzar, ms);
++    primera.then(bien, mal);
++  });
++}
++
+ /**
+  * Convert L16 PCM buffer to WAV format for Whisper API
+  * @param {Buffer} pcmBuffer - Raw L16 PCM audio data
+@@ -43,24 +134,110 @@ function pcmToWav(pcmBuffer, sampleRate = 8000) {
+ }
+ 
+ /**
+- * Transcribe audio using OpenAI Whisper API
++ * El oído de jacobo. El WAV va tal cual en el cuerpo (no multipart); el oído lo pasa a
++ * 16 kHz con ffmpeg. No admite `prompt`: `turbo` ya escribe bien «Jarvis».
++ * @returns {Promise<{texto: string, ms: number}>}
++ */
++async function transcribirEnOido(wavBuffer, language, rapido) {
++  const url = process.env.OIDO_URL.replace(/\/+$/, "") + "/transcribir";
++  const r = await fetch(url, {
++    method: "POST",
++    headers: {
++      "X-Auth-Token": process.env.OIDO_TOKEN,
++      "X-Idioma": language,
++      // `small` en vez de `turbo`: ~0,3 s en vez de ~1,1, con algo más de error. Para
++      // respuestas cortas (las llamadas a otras personas, parche 32).
++      ...(rapido ? { "X-Modelo": "rapido" } : {}),
++      "Content-Type": "audio/wav"
++    },
++    body: wavBuffer,
++    signal: AbortSignal.timeout(OIDO_TIMEOUT_MS)
++  });
++  if (!r.ok) {
++    throw new Error("HTTP " + r.status);
++  }
++  const datos = await r.json();
++  return { texto: datos.texto || "", ms: datos.ms };
++}
++
++// Parche 34: gpt-4o-transcribe da el mismo texto que whisper-1 y mucha menos cola
++// (medido el 2026-11-04 con voz real: mediana 0,83 s y máximo 1,1 s, frente a 1,14 y
++// 3 s), y cuesta lo mismo. Si tarda, sale whisper-1 detrás.
++async function transcribirEnOpenAI(wavBuffer, language, prompt) {
++  return carrera(
++    pedirAOpenAI(wavBuffer, language, prompt, OPENAI_MODELO),
++    function () { return pedirAOpenAI(wavBuffer, language, prompt, OPENAI_RESERVA); },
++    OPENAI_CARRERA_MS
++  );
++}
++
++// Parche 34: en la segunda llamada real, gpt-4o-transcribe se iba de idioma («outra vez»,
++// «achterneefjes») pese a `language`. Con una pista de cómo suena la conversación se
++// agarra al español y a los nombres de aquí. Si hay silencio, estos modelos pueden
++// devolver la pista tal cual: eso se trata como que no se ha oído nada (`esEcoDePista`).
++const PISTA_STT = process.env.OPENAI_STT_PISTA ||
++  "Llamada de teléfono en español de España con Jarvis, su asistente: la tele, el volumen, Netflix, YouTube, Prime Video, Disney, Jellyfin, WhatsApp.";
++
++function esEcoDePista(texto) {
++  if (/#{2,}/.test(String(texto || ""))) return true;   // con ruido puro llegó a dar «context: ###»
++  const n = function (s) { return String(s || "").toLowerCase().replace(/[^a-záéíóúñ ]/g, "").trim(); };
++  const t = n(texto);
++  return t.length > 12 && n(PISTA_STT).includes(t);
++}
++
++async function pedirAOpenAI(wavBuffer, language, prompt, modelo) {
++  const client = getOpenAIClient();
++  if (!client) {
++    throw new Error("OpenAI API key not configured");
++  }
++
++  // Write to temp file (Whisper API requires a file)
++  const tempFile = path.join("/tmp", "whisper-" + Date.now() + "-" + Math.random().toString(36).slice(2) + ".wav");
++  fs.writeFileSync(tempFile, wavBuffer);
++
++  try {
++    return await client.audio.transcriptions.create({
++      file: fs.createReadStream(tempFile),
++      model: modelo,
++      language: language,
++      // Parche 22: la escucha pasiva le pasa «Jarvis.» para que escriba bien el nombre.
++      prompt: prompt || PISTA_STT,
++      response_format: "text"
++    });
++  } finally {
++    // Clean up temp file
++    try {
++      fs.unlinkSync(tempFile);
++    } catch (e) {
++      // Ignore cleanup errors
++    }
++  }
++}
++
++/**
++ * Transcribe audio: el oído de jacobo y, si falla, OpenAI Whisper
+  * @param {Buffer} audioBuffer - Audio data (either WAV or raw PCM)
+  * @param {Object} options - Transcription options
+  * @param {string} options.format - Input format: "wav" or "pcm" (default: "pcm")
+  * @param {number} options.sampleRate - Sample rate for PCM (default: 8000)
+- * @param {string} options.language - Language code (default: "en")
++ * @param {string} options.language - Language code (default: "es")
++ * @param {string} options.prompt - Pista para whisper-1 (el oído la ignora)
++ * @param {boolean} options.soloOido - Parche 26: sin reserva; si el oído falla, lanza
++ * @param {boolean} options.rapido - Parche 32: el modelo pequeño del oído (`small`)
+  * @returns {Promise<string>} Transcribed text
+  */
+ async function transcribe(audioBuffer, options = {}) {
+   const {
+     format = "pcm",
+     sampleRate = 8000,
+-    language = "en"
++    language = "es",
++    prompt = null,
++    soloOido = false,
++    rapido = false
+   } = options;
+ 
+-  const client = getOpenAIClient();
+-  if (!client) {
+-    throw new Error("OpenAI API key not configured");
++  if (soloOido && !oidoDisponible()) {
++    throw new Error("el oído de jacobo no está disponible");
+   }
+ 
+   // Convert PCM to WAV if needed
+@@ -71,42 +248,71 @@ async function transcribe(audioBuffer, options = {}) {
+     wavBuffer = audioBuffer;
+   }
+ 
+-  // Write to temp file (Whisper API requires a file)
+-  const tempFile = path.join("/tmp", "whisper-" + Date.now() + ".wav");
+-  fs.writeFileSync(tempFile, wavBuffer);
++  let transcription = null;
++  let origen = "openai";
+ 
+-  try {
+-    const transcription = await client.audio.transcriptions.create({
+-      file: fs.createReadStream(tempFile),
+-      model: "whisper-1",
+-      language: language,
+-      response_format: "text"
++  if (oidoConfigurado() && Date.now() >= oidoCaidoHasta) {
++    const t0 = Date.now();
++    const delOido = transcribirEnOido(wavBuffer, language, rapido).then(function (oido) {
++      return { texto: oido.texto, origen: "jacobo" + (rapido ? " rápido " : " ") + (Date.now() - t0) + " ms" };
++    }).catch(function (e) {
++      oidoCaidoHasta = Date.now() + OIDO_PAUSA_MS;
++      const motivo = e.name === "TimeoutError" ? "sin respuesta en " + OIDO_TIMEOUT_MS + " ms" : (e.cause && e.cause.code) || e.message;
++      console.warn("[WHISPER] El oído de jacobo falla (" + motivo + "): OpenAI durante " + Math.round(OIDO_PAUSA_MS / 1000) + " s");
++      throw e;
+     });
+-
+-    const timestamp = new Date().toISOString();
+-    console.log("[" + timestamp + "] WHISPER Transcribed: " + transcription.substring(0, 100) + (transcription.length > 100 ? "..." : ""));
+-
+-    return transcription;
+-  } finally {
+-    // Clean up temp file
+-    try {
+-      fs.unlinkSync(tempFile);
+-    } catch (e) {
+-      // Ignore cleanup errors
++    if (soloOido) {
++      const r = await delOido;
++      transcription = r.texto;
++      origen = r.origen;
++    } else {
++      const r = await carrera(delOido, function () {
++        return transcribirEnOpenAI(wavBuffer, language, prompt).then(function (texto) {
++          return { texto: texto, origen: "openai, en carrera " + (Date.now() - t0) + " ms" };
++        });
++      }, OIDO_CARRERA_MS);
++      transcription = r.texto;
++      origen = r.origen;
+     }
+   }
++
++  if (transcription === null) {
++    const t0 = Date.now();
++    transcription = await transcribirEnOpenAI(wavBuffer, language, prompt);
++    origen = "openai " + (Date.now() - t0) + " ms";
++  }
++  if (esEcoDePista(transcription)) transcription = "";
++
++  const timestamp = new Date().toISOString();
++  console.log("[" + timestamp + "] WHISPER (" + origen + ") Transcribed: " + transcription.substring(0, 100) + (transcription.length > 100 ? "..." : ""));
++
++  return transcription;
+ }
+ 
+ /**
+- * Check if Whisper API is configured and available
+- * @returns {boolean} True if API key is set
++ * Check if some STT is configured and available
++ * @returns {boolean} True if the oído or the OpenAI API key is set
+  */
+ function isAvailable() {
+-  return !!process.env.OPENAI_API_KEY;
++  return oidoConfigurado() || !!process.env.OPENAI_API_KEY;
++}
++
++// Parche 34: mismo audio por whisper-1, solo para el registro, para decidir el transcriptor
++// con la voz de Mikel por teléfono y no con voz sintética (`docker logs voice-app | grep
++// STT-SOMBRA`). Unos 0,03 céntimos por turno; STT_SOMBRA=0 lo apaga.
++function sombra(audioBuffer, texto, opciones) {
++  if (process.env.STT_SOMBRA === "0" || !process.env.OPENAI_API_KEY) return;
++  const o = opciones || {};
++  pedirAOpenAI(pcmToWav(audioBuffer, o.sampleRate || 8000), o.language || "es", null, OPENAI_RESERVA)
++    .then(function (otro) {
++      console.log("[STT-SOMBRA] usado: «" + String(texto || "").trim() + "» | " + OPENAI_RESERVA + ": «" + String(otro || "").trim() + "»");
++    }, function () {});
+ }
+ 
+ module.exports = {
+   transcribe,
++  sombra,
+   pcmToWav,
+-  isAvailable
++  isAvailable,
++  oidoDisponible
+ };

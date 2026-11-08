@@ -1,0 +1,56 @@
+version: '3.8'
+
+# CRITICAL: All containers must use network_mode: host
+# Docker bridge networking causes FreeSWITCH to advertise internal IPs
+# in SDP, making RTP unreachable from external callers.
+
+services:
+  drachtio:
+    image: drachtio/drachtio-server:latest
+    container_name: drachtio
+    restart: unless-stopped
+    network_mode: host
+    # Parche 13 (Life Assistant, telefono/PARCHES.md): con sip:* drachtio se engancha
+    # solo a las IP que existen AL ARRANCAR. Tras un reinicio arrancaba antes de que la
+    # red de casa tuviera IP y las llamadas entrantes no llegaban a ninguna parte.
+    # Espera a EXTERNAL_IP (del .env) hasta 2 minutos; luego arranca igualmente.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        n=0
+        until grep -qF "${EXTERNAL_IP}" /proc/net/fib_trie || [ $$n -ge 60 ]; do n=$$((n+1)); sleep 2; done
+        exec /entrypoint.sh drachtio --contact "sip:${EXTERNAL_IP}:5070;transport=tcp,udp" --contact "sip:127.0.0.1:5070;transport=tcp,udp" --secret ${DRACHTIO_SECRET} --port 9022 --loglevel info
+
+  freeswitch:
+    image: drachtio/drachtio-freeswitch-mrf:latest
+    container_name: freeswitch
+    restart: unless-stopped
+    network_mode: host
+    # Parche 33 (Life Assistant, telefono/PARCHES.md): como drachtio (parche 13), espera a
+    # EXTERNAL_IP; y anuncia el audio en ella, no en $${local_ip_v4}: arrancando antes que la
+    # red, FreeSWITCH se quedaba en 127.0.0.1, que vale para el SBC del 3CX (en esta misma
+    # máquina) pero no para la línea de O2 (parche 32): su audio no tenía a dónde volver.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        n=0
+        until grep -qF "${EXTERNAL_IP}" /proc/net/fib_trie || [ $$n -ge 60 ]; do n=$$((n+1)); sleep 2; done
+        sed -i -e "s|name=\"rtp-ip\" value=\"[^\"]*\"|name=\"rtp-ip\" value=\"${EXTERNAL_IP}\"|" -e "s|name=\"ext-rtp-ip\" value=\"[^\"]*\"|name=\"ext-rtp-ip\" value=\"${EXTERNAL_IP}\"|" /usr/local/freeswitch/conf/sip_profiles/mrf.xml
+        exec /entrypoint.sh freeswitch --sip-port 5080 --rtp-range-start 30000 --rtp-range-end 30100
+    # RTP ports 30000-30100 avoid conflict with 3CX SBC (uses 20000-20099)
+    environment:
+      - EXTERNAL_IP=${EXTERNAL_IP}
+
+  voice-app:
+    build: ${HOME}/.claude-phone-cli/voice-app
+    container_name: voice-app
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - ${HOME}/.claude-phone/.env
+    volumes:
+      - ${HOME}/.claude-phone-cli/voice-app/audio:/app/audio
+      - ${HOME}/.claude-phone-cli/voice-app/config:/app/config
+    depends_on:
+      - drachtio
+      - freeswitch
