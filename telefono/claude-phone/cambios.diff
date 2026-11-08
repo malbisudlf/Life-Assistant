@@ -510,7 +510,7 @@ index 5e58907..c0106fd 100644
          audioForkServer: audioForkServer,
          mediaServer: mediaServer,
 diff --git a/voice-app/lib/audio-fork.js b/voice-app/lib/audio-fork.js
-index 503e831..c70f4f8 100644
+index 503e831..88947ea 100644
 --- a/voice-app/lib/audio-fork.js
 +++ b/voice-app/lib/audio-fork.js
 @@ -29,9 +29,14 @@ class AudioForkSession extends EventEmitter {
@@ -608,7 +608,7 @@ index 503e831..c70f4f8 100644
  
      if (this._preRollChunks.length) {
        for (const chunk of this._preRollChunks) this._appendUtterance(chunk, false);
-@@ -122,9 +175,13 @@ class AudioForkSession extends EventEmitter {
+@@ -122,12 +175,19 @@ class AudioForkSession extends EventEmitter {
      this._utteranceBytes = 0;
      this._speechBytes = 0;
      this._silenceMs = 0;
@@ -622,7 +622,13 @@ index 503e831..c70f4f8 100644
      const durationMs = this._chunkDurationMs(this._utteranceBytes);
      const speechMs = this._chunkDurationMs(this._speechBytes);
      const speechRatio = this._utteranceBytes > 0 ? this._speechBytes / this._utteranceBytes : 0;
-@@ -136,15 +193,17 @@ class AudioForkSession extends EventEmitter {
++    // Parche 38: cuándo dejó de hablar (el silencio que cierra la frase llega en tiempo
++    // real, así que restarlo de ahora es el final de la voz). El cronómetro mide desde aquí.
++    const finHabla = Date.now() - Math.round(this._silenceMs || 0);
+ 
+     const audio = Buffer.concat(this._utteranceChunks);
+     this._resetUtterance();
+@@ -136,15 +196,17 @@ class AudioForkSession extends EventEmitter {
  
      // For DTMF-triggered finalization, be more lenient with requirements
      const isDtmfTriggered = reason === 'dtmf_trigger';
@@ -637,13 +643,13 @@ index 503e831..c70f4f8 100644
      }
      console.log('[AUDIO-DEBUG] Utterance ACCEPTED, emitting event');
 -    this.emit('utterance', { callUuid: this.callUuid, audio, durationMs, speechMs, reason });
-+    const u = { callUuid: this.callUuid, audio, durationMs, speechMs, reason, pausa };
++    const u = { callUuid: this.callUuid, audio, durationMs, speechMs, reason, pausa, finHabla };
 +    if (this.listenerCount('utterance') === 0) this._sinRecoger = u;
 +    this.emit('utterance', u);
      return true;
    }
  
-@@ -163,26 +222,67 @@ class AudioForkSession extends EventEmitter {
+@@ -163,26 +225,67 @@ class AudioForkSession extends EventEmitter {
      return this._finalizeUtterance('dtmf_trigger');
    }
  
@@ -723,7 +729,7 @@ index 503e831..c70f4f8 100644
    }
  
    _onMessage(data) {
-@@ -225,13 +325,13 @@ class AudioForkSession extends EventEmitter {
+@@ -225,13 +328,13 @@ class AudioForkSession extends EventEmitter {
  
      if (data.length < 2) return;
  
@@ -739,7 +745,7 @@ index 503e831..c70f4f8 100644
      }
  
      if (!this._inSpeech) {
-@@ -240,18 +340,75 @@ class AudioForkSession extends EventEmitter {
+@@ -240,18 +343,75 @@ class AudioForkSession extends EventEmitter {
        this._startUtteranceWithPreRoll();
      }
  
@@ -883,10 +889,10 @@ index 23326b5..be96efc 100644
    isAvailable
  };
 diff --git a/voice-app/lib/conversation-loop.js b/voice-app/lib/conversation-loop.js
-index ec1c60c..d43f4cc 100644
+index ec1c60c..86305fd 100644
 --- a/voice-app/lib/conversation-loop.js
 +++ b/voice-app/lib/conversation-loop.js
-@@ -13,29 +13,30 @@
+@@ -13,29 +13,32 @@
   */
  
  const logger = require('./logger');
@@ -900,6 +906,8 @@ index ec1c60c..d43f4cc 100644
 +const { EscuchaPasiva, FRASES: FRASES_PASIVA, AVISO_PASIVA } = require('./escucha-pasiva');
 +// Parche 26: se transcribe durante el silencio que cierra la frase.
 +const { armarAnticipo, transcribirFrase } = require('./anticipo');
++// Parche 38: el cronómetro de cada turno (de que dejas de hablar a oír a Jarvis).
++const cronometro = require('./cronometro');
  
  // Audio cue URLs
 -const READY_BEEP_URL = 'http://127.0.0.1:3000/static/ready-beep.wav';
@@ -935,7 +943,7 @@ index ec1c60c..d43f4cc 100644
  ];
  
  function getRandomThinkingPhrase() {
-@@ -44,7 +45,7 @@ function getRandomThinkingPhrase() {
+@@ -44,7 +47,7 @@ function getRandomThinkingPhrase() {
  
  function isGoodbye(transcript) {
    const lower = transcript.toLowerCase().trim();
@@ -944,7 +952,7 @@ index ec1c60c..d43f4cc 100644
    return goodbyePhrases.some(phrase => {
      return lower === phrase || lower.includes(` ${phrase}`) ||
             lower.startsWith(`${phrase} `) || lower.endsWith(` ${phrase}`);
-@@ -122,7 +123,11 @@ function extractVoiceLine(response) {
+@@ -122,7 +125,11 @@ function extractVoiceLine(response) {
   * @param {string} [options.initialContext] - Context for outbound calls (why we're calling)
   * @param {boolean} [options.skipGreeting=false] - Skip greeting (for outbound, greeting already played)
   * @param {number} [options.maxTurns=20] - Maximum conversation turns
@@ -957,7 +965,7 @@ index ec1c60c..d43f4cc 100644
   */
  async function runConversationLoop(endpoint, dialog, callUuid, options) {
    const {
-@@ -134,8 +139,13 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -134,8 +141,13 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
      initialContext = null,
      skipGreeting = false,
      deviceConfig = null,
@@ -972,7 +980,7 @@ index ec1c60c..d43f4cc 100644
  
    // Extract devicePrompt and voiceId from deviceConfig (for Cephanie etc)
    const devicePrompt = deviceConfig?.prompt || null;
-@@ -164,7 +174,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -164,7 +176,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
      // Play greeting (skip for outbound where initial message already played)
      if (!skipGreeting && callActive) {
        const greetingUrl = await ttsService.generateSpeech(
@@ -981,7 +989,7 @@ index ec1c60c..d43f4cc 100644
          voiceId
        );
        await endpoint.play(greetingUrl);
-@@ -178,12 +188,16 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -178,12 +190,16 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
          `[SYSTEM CONTEXT - DO NOT REPEAT]: You just called the user to tell them: "${initialContext}". They have answered. Now listen to their response and help them.`,
          { callId: callUuid, devicePrompt: devicePrompt, isSystemPrime: true }
        ).catch(err => logger.warn('Prime query failed', { callUuid, error: err.message }));
@@ -999,7 +1007,7 @@ index ec1c60c..d43f4cc 100644
      }
  
      // Start audio fork for entire call
-@@ -195,7 +209,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -195,7 +211,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
        sessionPromise = audioForkServer.expectSession(callUuid, { timeoutMs: 10000 });
      } catch (err) {
        logger.warn('Failed to set up session expectation', { callUuid, error: err.message });
@@ -1008,7 +1016,7 @@ index ec1c60c..d43f4cc 100644
      }
  
      await endpoint.forkAudioStart({
-@@ -212,7 +226,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -212,7 +228,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
        logger.warn('Audio fork session failed', { callUuid, error: err.message });
        // Cancel the pending expectation if still there
        audioForkServer.cancelExpectation && audioForkServer.cancelExpectation(callUuid);
@@ -1017,7 +1025,7 @@ index ec1c60c..d43f4cc 100644
      }
  
      // Set up DTMF handler for # key
-@@ -245,6 +259,23 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -245,6 +261,23 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
  
      // Main conversation loop
      let turnCount = 0;
@@ -1041,7 +1049,7 @@ index ec1c60c..d43f4cc 100644
  
      while (turnCount < maxTurns && callActive) {
        turnCount++;
-@@ -256,82 +287,189 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -256,82 +289,195 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
          break;
        }
  
@@ -1057,6 +1065,8 @@ index ec1c60c..d43f4cc 100644
 +      let transcript = null;
 +      let llamado = false;
 +      let fueInterrupcion = false;
++      const crono = cronometro.turno(callUuid, 'saliente');
++      const logCrono = (m) => logger.info(m, { callUuid });
 +      if (pasiva.dormida()) {
 +        const oido = await pasiva.esperarPalabra({ session, whisperClient, sigueActiva: () => callActive });
 +        if (!oido) break;
@@ -1072,6 +1082,7 @@ index ec1c60c..d43f4cc 100644
 +        }
 +        if (oido.resto) {
 +          transcript = oido.resto;
++          crono.marca('cierre').marca('texto');
 +        } else if (callActive) {
 +          await endpoint.play(await ttsService.generateSpeech(FRASES_PASIVA.despierta, voiceId));
 +        }
@@ -1114,6 +1125,7 @@ index ec1c60c..d43f4cc 100644
 +            timeoutMs: turnoDeRespuesta(session, pendienteConfirmar, pasiva.esperaTurnoMs(30000))
 +          });
 +          logger.info('Got utterance', { callUuid, bytes: utterance.audio.length, reason: utterance.reason });
++          crono.frase(utterance);
 +        } catch (err) {
 +          if (!callActive) break;
 +          logger.info('Utterance timeout', { callUuid, error: err.message });
@@ -1194,6 +1206,7 @@ index ec1c60c..d43f4cc 100644
 +
 +        // Transcribe
 +        transcript = await transcribiendo;
++        crono.marca('texto');
 +
 +        logger.info('Transcribed', { callUuid, transcript });
 +
@@ -1280,6 +1293,7 @@ index ec1c60c..d43f4cc 100644
 +        sigueActiva: () => callActive
 +      });
 +      if (reflejo) {
++        crono.cerrar('reflejo', logCrono);
 +        interrumpio = reflejo.interrumpio;
 +        avisoLectura = reflejo.aviso;
 +        continue;
@@ -1288,7 +1302,7 @@ index ec1c60c..d43f4cc 100644
        // ============================================
        // THINKING FEEDBACK
        // ============================================
-@@ -339,36 +477,23 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -339,36 +485,25 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
        // Check if call still active before thinking feedback
        if (!callActive) break;
  
@@ -1324,6 +1338,7 @@ index ec1c60c..d43f4cc 100644
 -        }
 -      }
 +      logger.info('Querying Claude', { callUuid, phrase: thinkingPhrase });
++      crono.marca('consulta');
 +      const claudeResponse = await pensar({
 +        consultar: () => claudeBridge.query(
 +          (llamado ? AVISO_PASIVA : '') +
@@ -1336,14 +1351,17 @@ index ec1c60c..d43f4cc 100644
 +        voiceId,
 +        musicaUrl: HOLD_MUSIC_URL,
 +        sigueActiva: () => callActive,
-+        extraer: extractVoiceLine
++        extraer: extractVoiceLine,
++        alContestar: () => crono.marca('claudeListo')
 +      });
  
        // Check if call ended during Claude processing
        if (!callActive) {
-@@ -377,13 +502,38 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -376,14 +511,41 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+         break;
        }
  
++      crono.marca('respuesta');
        logger.info('Claude responded', { callUuid });
 +      control.turnoDeClaude();
  
@@ -1353,6 +1371,7 @@ index ec1c60c..d43f4cc 100644
  
        const responseUrl = await ttsService.generateSpeech(voiceLine, voiceId);
 -      if (callActive) await endpoint.play(responseUrl);
++      crono.marca('suena').cerrar('claude', logCrono);
 +      if (callActive) {
 +        interrumpio = await decirInterrumpible(endpoint, session, responseUrl,
 +          (m) => logger.info(m, { callUuid }));
@@ -1381,7 +1400,7 @@ index ec1c60c..d43f4cc 100644
  
        logger.info('Turn complete', { callUuid, turn: turnCount });
      }
-@@ -391,15 +541,17 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -391,15 +553,17 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
      // Max turns reached
      if (turnCount >= maxTurns && callActive) {
        const maxUrl = await ttsService.generateSpeech(
@@ -1401,7 +1420,7 @@ index ec1c60c..d43f4cc 100644
      logger.error('Conversation loop error', {
        callUuid,
        error: error.message,
-@@ -409,7 +561,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -409,7 +573,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
      try {
        if (session) session.setCaptureEnabled(false);
        if (callActive) {
@@ -1410,7 +1429,7 @@ index ec1c60c..d43f4cc 100644
          await endpoint.play(errUrl);
        }
      } catch (e) {
-@@ -447,6 +599,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -447,6 +611,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
        }
      }
    }
@@ -1419,7 +1438,7 @@ index ec1c60c..d43f4cc 100644
  
  module.exports = {
 diff --git a/voice-app/lib/http-server.js b/voice-app/lib/http-server.js
-index 4e8095e..baf6968 100644
+index 4e8095e..51826b1 100644
 --- a/voice-app/lib/http-server.js
 +++ b/voice-app/lib/http-server.js
 @@ -36,6 +36,10 @@ function createHttpServer(audioDir, port = 3000) {
@@ -1433,6 +1452,24 @@ index 4e8095e..baf6968 100644
    app.use('/audio-files', express.static(audioDir, {
      setHeaders: (res, filepath) => {
        // Set appropriate content type for audio files
+@@ -68,6 +72,17 @@ function createHttpServer(audioDir, port = 3000) {
+     });
+   });
+ 
++  // Parche 38: lo que tarda cada turno. /metrics lo lee el Prometheus de caja; /turnos es
++  // para mirarlo a mano. Solo duraciones: ni texto ni números de teléfono.
++  const cronometro = require('./cronometro');
++  app.get('/metrics', (req, res) => {
++    res.type('text/plain; version=0.0.4').send(cronometro.metricas());
++  });
++  app.get('/turnos', (req, res) => {
++    const n = Math.min(Math.max(parseInt(req.query.n, 10) || 20, 1), 100);
++    res.json({ turnos: cronometro.ultimos(n) });
++  });
++
+   // Audio upload endpoint
+   app.post("/audio", async (req, res) => {
+     try {
 diff --git a/voice-app/lib/multi-registrar.js b/voice-app/lib/multi-registrar.js
 index 7e2c03e..0833994 100644
 --- a/voice-app/lib/multi-registrar.js
@@ -2243,10 +2280,10 @@ index 7447c27..f568659 100644
  
      // Include conversation stats for conversation mode
 diff --git a/voice-app/lib/sip-handler.js b/voice-app/lib/sip-handler.js
-index 3fd7e7b..e5e6be0 100644
+index 3fd7e7b..1b66ee5 100644
 --- a/voice-app/lib/sip-handler.js
 +++ b/voice-app/lib/sip-handler.js
-@@ -4,32 +4,33 @@
+@@ -4,32 +4,35 @@
   */
  
  const { setTimeout: sleep } = require('node:timers/promises');
@@ -2260,6 +2297,8 @@ index 3fd7e7b..e5e6be0 100644
 +const { EscuchaPasiva, FRASES: FRASES_PASIVA, AVISO_PASIVA } = require('./escucha-pasiva');
 +// Parche 26: se transcribe durante el silencio que cierra la frase.
 +const { armarAnticipo, transcribirFrase } = require('./anticipo');
++// Parche 38: el cronómetro de cada turno (de que dejas de hablar a oír a Jarvis).
++const cronometro = require('./cronometro');
  
  // Audio cue URLs
 -const READY_BEEP_URL = 'http://127.0.0.1:3000/static/ready-beep.wav';
@@ -2298,7 +2337,7 @@ index 3fd7e7b..e5e6be0 100644
  ];
  
  function getRandomThinkingPhrase() {
-@@ -59,7 +60,7 @@ function extractDialedExtension(req) {
+@@ -59,7 +62,7 @@ function extractDialedExtension(req) {
  
  function isGoodbye(transcript) {
    const lower = transcript.toLowerCase().trim();
@@ -2307,7 +2346,7 @@ index 3fd7e7b..e5e6be0 100644
    return goodbyePhrases.some(function(phrase) {
      return lower === phrase || lower.includes(' ' + phrase) ||
             lower.startsWith(phrase + ' ') || lower.endsWith(' ' + phrase);
-@@ -118,13 +119,20 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
+@@ -118,13 +121,20 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
    const deviceName = deviceConfig ? deviceConfig.name : 'Morpheus';
    const devicePrompt = deviceConfig ? deviceConfig.prompt : null;
    const voiceId = (deviceConfig && deviceConfig.voiceId) ? deviceConfig.voiceId : DEFAULT_VOICE_ID;
@@ -2331,7 +2370,7 @@ index 3fd7e7b..e5e6be0 100644
      // Play device-specific greeting with device voice
      const greetingUrl = await ttsService.generateSpeech(greeting, voiceId);
      await endpoint.play(greetingUrl);
-@@ -146,105 +154,225 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
+@@ -146,105 +156,234 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
      // Main conversation loop
      let turnCount = 0;
      const MAX_TURNS = 20;
@@ -2366,6 +2405,7 @@ index 3fd7e7b..e5e6be0 100644
 +      let transcript = null;
 +      let llamado = false;
 +      let fueInterrupcion = false;
++      const crono = cronometro.turno(callUuid, 'entrante');
 +      if (pasiva.dormida()) {
 +        const oido = await pasiva.esperarPalabra({
 +          session: session, whisperClient: whisperClient, sigueActiva: function () { return viva; }
@@ -2379,6 +2419,7 @@ index 3fd7e7b..e5e6be0 100644
 +        llamado = true;
 +        if (oido.resto) {
 +          transcript = oido.resto;
++          crono.marca('cierre').marca('texto');
 +        } else {
 +          await endpoint.play(await ttsService.generateSpeech(FRASES_PASIVA.despierta, voiceId));
 +        }
@@ -2414,6 +2455,7 @@ index 3fd7e7b..e5e6be0 100644
 +            timeoutMs: turnoDeRespuesta(session, pendienteConfirmar, pasiva.esperaTurnoMs(30000))
 +          });
 +          console.log('[' + new Date().toISOString() + '] LISTEN Got: ' + utterance.audio.length + ' bytes');
++          crono.frase(utterance);
 +        } catch (err) {
 +          console.log('[' + new Date().toISOString() + '] LISTEN Timeout: ' + err.message);
 +        }
@@ -2445,6 +2487,7 @@ index 3fd7e7b..e5e6be0 100644
 +
 +        // Transcribe
 +        transcript = await transcribiendo;
++        crono.marca('texto');
 +
 +        console.log('[' + new Date().toISOString() + '] WHISPER: "' + transcript + '"');
 +
@@ -2533,6 +2576,7 @@ index 3fd7e7b..e5e6be0 100644
 +        log: logTurno, sigueActiva: function () { return viva; }
 +      });
 +      if (reflejo) {
++        crono.cerrar('reflejo', logTurno);
 +        interrumpio = reflejo.interrumpio;
 +        avisoLectura = reflejo.aviso;
 +        continue;
@@ -2565,6 +2609,7 @@ index 3fd7e7b..e5e6be0 100644
 -          await endpoint.api('uuid_break', endpoint.uuid);
 -        } catch (e) {}
 -      }
++      crono.marca('consulta');
 +      const claudeResponse = await pensar({
 +        consultar: function () {
 +          return claudeBridge.query(
@@ -2578,9 +2623,11 @@ index 3fd7e7b..e5e6be0 100644
 +        frase: thinkingPhrase,
 +        voiceId: voiceId,
 +        musicaUrl: HOLD_MUSIC_URL,
-+        extraer: extractVoiceLine
++        extraer: extractVoiceLine,
++        alContestar: function () { crono.marca('claudeListo'); }
 +      });
  
++      crono.marca('respuesta');
        console.log('[' + new Date().toISOString() + '] CLAUDE Response received');
 +      control.turnoDeClaude();
  
@@ -2590,6 +2637,7 @@ index 3fd7e7b..e5e6be0 100644
  
        const responseUrl = await ttsService.generateSpeech(voiceLine, voiceId);
 -      await endpoint.play(responseUrl);
++      crono.marca('suena').cerrar('claude', logTurno);
 +      interrumpio = await decirInterrumpible(endpoint, session, responseUrl, function (m) {
 +        console.log('[' + new Date().toISOString() + '] ' + m);
 +      });
@@ -2622,7 +2670,7 @@ index 3fd7e7b..e5e6be0 100644
        await endpoint.play(maxUrl);
      }
  
-@@ -252,7 +380,7 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
+@@ -252,7 +391,7 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
      console.error('[' + new Date().toISOString() + '] CONVERSATION Error:', error.message);
      try {
        if (session) session.setCaptureEnabled(false);

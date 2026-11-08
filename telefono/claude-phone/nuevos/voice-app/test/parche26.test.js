@@ -139,9 +139,9 @@ test('con jacobo arriba, la frase sale del anticipo y no se transcribe dos veces
   s.oir(1000, 1500);
   const u = await llega;
   assert.deepStrictEqual(w.pedidos.map(function (p) { return [p.soloOido, p.rapido]; }),
-    [[false, false], [true, true]], 'turbo con su reserva, y small solo contra jacobo');
+    [[false, false]], 'turbo con su reserva; small ya no, desde el parche 38 (ANTICIPO_RAPIDO=1)');
   assert.strictEqual(await transcribirFrase(w, u), 'turbo ' + u.pausa.audio.length, 'lo que se usa es turbo');
-  assert.strictEqual(w.pedidos.length, 2);
+  assert.strictEqual(w.pedidos.length, 1);
 });
 
 test('con el oído caído se anticipa igual, por OpenAI y sin preguntar a small', async function () {
@@ -165,8 +165,8 @@ test('si el anticipo falla, se transcribe la frase entera', async function () {
   const u = await llega;
   w.falla = false;
   assert.strictEqual(await transcribirFrase(w, u), 'turbo ' + u.audio.length);
-  assert.strictEqual(w.pedidos.length, 3, 'turbo y small en la pausa, y la frase entera');
-  assert.strictEqual(w.pedidos[2].bytes, u.audio.length);
+  assert.strictEqual(w.pedidos.length, 2, 'turbo en la pausa, y la frase entera');
+  assert.strictEqual(w.pedidos[1].bytes, u.audio.length);
 });
 
 test('con la escucha pasiva dormida no se anticipa (la radio del coche)', async function () {
@@ -182,7 +182,7 @@ test('con la escucha pasiva dormida no se anticipa (la radio del coche)', async 
   llega = frase(s);
   s.oir(1000, 1500);
   await llega;
-  assert.strictEqual(w.pedidos.length, 2, 'despierta: turbo y small');
+  assert.strictEqual(w.pedidos.length, 1, 'despierta: turbo');
 });
 
 test('un whisperClient sin oidoDisponible (los dobles de los otros tests) no se toca', async function () {

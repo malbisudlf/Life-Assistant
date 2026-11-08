@@ -70,7 +70,17 @@ const BUZON_RE = new RegExp([
   'leave a message', 'after the (tone|beep)'
 ].join('|'), 'i');
 
+// Parche 39: la consulta a Mikel sin colgar (dos llamadas a la vez). Cada cuánto se pregunta
+// al backend si ya ha contestado, cada cuánto se le dice algo al otro para que no cuelgue, y
+// el tope: el backend corta a los TERCEROS_CONSULTA_SEG (90) y contesta él; esto es la red
+// por si el backend no contesta nunca.
+const CONSULTA_SONDEO_MS = 2000;
+const CONSULTA_RECUERDO_MS = 30000;
+const CONSULTA_TOPE_MS = 120000;
+const MUSICA_URL = 'http://127.0.0.1:' + (process.env.HTTP_PORT || 3000) + '/static/hold-music.wav';
+
 const FRASES = {
+  sigo: 'Sigo aquí, un momento, que me está contestando.',
   hola: '¿Hola? ¿Me oyes?',
   repite: 'Perdona, no te he entendido bien. ¿Me lo repites?',
   fallo: 'Perdona, se me ha cortado algo por aquí. Mikel te escribirá. ¡Hasta luego!',
@@ -240,12 +250,59 @@ async function preguntarAlBackend(tercero, dicho, opciones) {
     const d = await r.json();
     const decir = String((d && d.decir) || '').trim();
     if (!decir) throw new Error('respuesta vacía');
-    return { decir: decir, colgar: Boolean(d.colgar) };
+    return { decir: decir, colgar: Boolean(d.colgar), esperar: Boolean(d.esperar) && !d.colgar };
   } catch (e) {
     if (opciones && opciones.log) opciones.log('TERCERO: el backend no contestó (' + e.message + ')');
     return { decir: FRASES.fallo, colgar: true, fallo: true };
   } finally {
     clearTimeout(vigia);
+  }
+}
+
+/**
+ * Parche 39: mientras Mikel contesta en el móvil, el otro oye música y, cada
+ * CONSULTA_RECUERDO_MS, «sigo aquí». Pregunta al backend cada CONSULTA_SONDEO_MS; vuelve
+ * con {decir, colgar} cuando hay respuesta (o cuando el backend da la espera por perdida).
+ * Si el backend falla tres veces seguidas o se pasa el tope, la despedida de fallo.
+ */
+async function esperarConsulta(tercero, o) {
+  const fetchFn = o.fetch || fetch;
+  const dormirFn = o.dormir || dormir;
+  const ahora = o.ahora || Date.now;
+  const inicio = ahora();
+  let recuerdo = inicio;
+  let fallos = 0;
+  if (o.musica) o.musica(true);
+  try {
+    while (ahora() - inicio < (o.topeMs || CONSULTA_TOPE_MS)) {
+      if (o.sigueActiva && !o.sigueActiva()) return { decir: '', colgar: true, colgada: true };
+      await dormirFn(o.sondeoMs || CONSULTA_SONDEO_MS);
+      try {
+        const r = await fetchFn(backendUrl() + '/telefono/tercero/' + encodeURIComponent(tercero) + '/consulta', {
+          headers: { 'X-Auth-Token': process.env.TELEFONO_TERCEROS_TOKEN || '' },
+          signal: AbortSignal.timeout(5000)
+        });
+        if (!r.ok) throw new Error('backend ' + r.status);
+        const d = await r.json();
+        fallos = 0;
+        if (d && d.listo) {
+          const decir = String(d.decir || '').trim();
+          return decir ? { decir: decir, colgar: Boolean(d.colgar) } : { decir: FRASES.fallo, colgar: true, fallo: true };
+        }
+      } catch (e) {
+        if (o.log) o.log('TERCERO: la consulta no contestó (' + e.message + ')');
+        if (++fallos >= 3) return { decir: FRASES.fallo, colgar: true, fallo: true };
+      }
+      if (ahora() - recuerdo >= (o.recuerdoMs || CONSULTA_RECUERDO_MS) && o.recordar) {
+        recuerdo = ahora();
+        if (o.musica) o.musica(false);
+        await o.recordar();
+        if (o.musica) o.musica(true);
+      }
+    }
+    return { decir: FRASES.fallo, colgar: true, fallo: true };
+  } finally {
+    if (o.musica) o.musica(false);
   }
 }
 
@@ -394,8 +451,30 @@ async function runConversacionTercero(endpoint, dialog, callId, o) {
       if (o.onTurno) o.onTurno('otro', dicho);
       if (o.onUserTurn) o.onUserTurn(dicho);
 
-      const r = await preguntarAlBackend(o.tercero, dicho, { log: log, fetch: o.fetch });
+      let r = await preguntarAlBackend(o.tercero, dicho, { log: log, fetch: o.fetch });
       if (!activa) break;
+      if (r.esperar) {
+        // Parche 39: «Un segundo, que se lo consulto a Mikel» y a esperar su botón.
+        await decir(r.decir);
+        if (!activa) break;
+        log('TERCERO: consultando a Mikel; el otro espera');
+        let sonando = false;
+        r = await esperarConsulta(o.tercero, {
+          fetch: o.fetch, log: log, dormir: o.dormir,
+          sigueActiva: function () { return activa; },
+          recordar: function () { return decir(FRASES.sigo); },
+          musica: function (encender) {
+            if (encender && !sonando && activa) {
+              sonando = true;
+              Promise.resolve().then(function () { return endpoint.play(o.musicaUrl || MUSICA_URL); }).catch(function () {});
+            } else if (!encender && sonando) {
+              sonando = false;
+              Promise.resolve().then(function () { return endpoint.api('uuid_break', endpoint.uuid); }).catch(function () {});
+            }
+          }
+        });
+        if (!activa || r.colgada) break;
+      }
       if (r.colgar) {
         await decir(r.decir);
         fin = r.fallo ? 'error' : 'goodbye';
@@ -424,5 +503,5 @@ async function runConversacionTercero(endpoint, dialog, callId, o) {
   return { endReason: fin };
 }
 
-module.exports = { runConversacionTercero, preguntarAlBackend, esperarSaludo, esperarLocucion,
+module.exports = { runConversacionTercero, preguntarAlBackend, esperarConsulta, esperarSaludo, esperarLocucion,
                    esperarSilencio, prepararGuion, conModeloRapido, FRASES };

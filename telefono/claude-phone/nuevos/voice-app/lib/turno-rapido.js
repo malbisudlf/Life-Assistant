@@ -34,6 +34,7 @@ function bargeInActivo() {
  * @param {string}   p.voiceId
  * @param {string}   p.musicaUrl
  * @param {Function} [p.sigueActiva] - () => boolean; false si se ha colgado
+ * @param {Function} [p.alContestar] - parche 38: se llama en cuanto Claude contesta (el cronómetro)
  */
 async function pensar(p) {
   const sigueActiva = p.sigueActiva || function () { return true; };
@@ -44,6 +45,7 @@ async function pensar(p) {
   // que acabe la frase de espera (`extraer` saca de la respuesta lo que se va a decir).
   consulta.then(function (respuesta) {
     listo = true;
+    try { if (p.alContestar) p.alContestar(); } catch (e) { /* medir no tumba la llamada */ }
     try {
       if (p.extraer && p.ttsService.anticipar) p.ttsService.anticipar(p.extraer(respuesta), p.voiceId);
     } catch (e) { /* lo intentará quien llama */ }
