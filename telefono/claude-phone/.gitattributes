@@ -1,0 +1,5 @@
+# La foto se compara byte a byte con caja (comprobar.sh) y cambios.diff se aplica con git apply:
+# en Windows no puede convertirse a CRLF.
+* text eol=lf
+*.wav binary
+*.mp3 binary
