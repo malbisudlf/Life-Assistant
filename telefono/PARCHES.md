@@ -1976,6 +1976,15 @@ tele por ella sola (6 s) antes de decir que no está, y tira la lista. Comprobad
 tablero» → «Jarvis en pantalla, señor», y la tele cargó el tablero. Suite: 199 de 199. Aplicado
 copiando `tele.js` (CRLF en caja, ver el 40).
 
+## El parche 42: una conexión por petición a la tele
+
+Del 2026-11-08 (`telefono/parche-42.diff`; vuelta atrás: imagen `antes-p42`). La causa de fondo de lo del 41:
+Node 20 reutiliza la conexión HTTP (keep-alive) y esta tele la cierra al contestar, así que **una de
+cada dos peticiones** al REST de la tele moría al instante con «socket hang up» (medido: 200, fallo,
+200, fallo). Las listas de apps salían a medias y «abrir» fallaba según tocase. `pedirHttp` va ahora
+con `agent: false`. Con eso la lista sale con las 8 de siempre y «pon el tablero» abre la app a la
+primera. Suite: 200 de 200. Aplicado copiando `tele.js` (CRLF).
+
 ## Lo que además NO está en el repositorio original
 
 - **El servicio de systemd** `claude-phone-api` (`/etc/systemd/system/`), que levanta el

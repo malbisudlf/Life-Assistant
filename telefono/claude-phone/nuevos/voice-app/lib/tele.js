@@ -93,7 +93,11 @@ function emparejada() { return !!leerToken(); }
 
 function pedirHttp(opciones, cuerpo, msTope) {
   return new Promise(function (resolve, reject) {
-    const r = http.request(Object.assign({ host: IP }, opciones), function (res) {
+    // Parche 42: una conexión por petición (`agent: false`). Node 20 reutiliza la conexión
+    // (keep-alive) y esta tele la cierra al contestar: la petición siguiente moría al instante
+    // con «socket hang up», una de cada dos (medido el 2026-11-08). De ahí las listas de apps
+    // a medias y el «no encuentro el tablero».
+    const r = http.request(Object.assign({ host: IP, agent: false }, opciones), function (res) {
       let d = '';
       res.setEncoding('utf8');
       res.on('data', function (t) { d += t; });

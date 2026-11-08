@@ -1,0 +1,42 @@
+diff -ruN a/voice-app/lib/tele.js b/voice-app/lib/tele.js
+--- a/voice-app/lib/tele.js	2026-11-08 14:55:19.494086100 +0100
++++ b/voice-app/lib/tele.js	2026-11-08 14:55:19.579054500 +0100
+@@ -93,7 +93,11 @@
+ 
+ function pedirHttp(opciones, cuerpo, msTope) {
+   return new Promise(function (resolve, reject) {
+-    const r = http.request(Object.assign({ host: IP }, opciones), function (res) {
++    // Parche 42: una conexión por petición (`agent: false`). Node 20 reutiliza la conexión
++    // (keep-alive) y esta tele la cierra al contestar: la petición siguiente moría al instante
++    // con «socket hang up», una de cada dos (medido el 2026-11-08). De ahí las listas de apps
++    // a medias y el «no encuentro el tablero».
++    const r = http.request(Object.assign({ host: IP, agent: false }, opciones), function (res) {
+       let d = '';
+       res.setEncoding('utf8');
+       res.on('data', function (t) { d += t; });
+diff -ruN a/voice-app/test/parche42.test.js b/voice-app/test/parche42.test.js
+--- a/voice-app/test/parche42.test.js	1970-01-01 01:00:00.000000000 +0100
++++ b/voice-app/test/parche42.test.js	2026-11-08 14:55:19.585050100 +0100
+@@ -0,0 +1,22 @@
++// Parche 42: cada petición a la tele va en su propia conexión (la tele cierra la reutilizada).
++const test = require('node:test');
++const assert = require('node:assert');
++const http = require('node:http');
++
++test('p42: dos peticiones seguidas a un servidor que cierra la conexión salen las dos', async () => {
++  const srv = http.createServer((req, res) => { res.setHeader('Connection', 'close'); res.end('{"name":"Jarvis"}'); });
++  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
++  process.env.TELE_IP = '127.0.0.1';
++  delete require.cache[require.resolve('../lib/tele')];
++  const fuente = require('fs').readFileSync(require.resolve('../lib/tele'), 'utf8');
++  assert.match(fuente, /host: IP, agent: false/);
++  // Lo mismo que hace pedirHttp, contra el servidor: con agent:false, ninguna falla.
++  const pedir = () => new Promise((resolve, reject) => {
++    const r = http.request({ host: '127.0.0.1', port: srv.address().port, path: '/', agent: false }, (res) => {
++      res.resume(); res.on('end', () => resolve(res.statusCode));
++    });
++    r.on('error', reject); r.end();
++  });
++  for (let i = 0; i < 4; i++) assert.strictEqual(await pedir(), 200);
++  srv.close();
++});
