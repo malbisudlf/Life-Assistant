@@ -1962,6 +1962,10 @@ entre las conocidas, con «tablero», «el tablero», «dashboard» y «panel» 
 `reflejos.js`, esos nombres entre las apps que se abren sin Claude. Tests: `parche40.test.js`;
 suite entera, 198 de 198.
 
+**Ojo al aplicarlo**: `tele.js` está en caja con finales CRLF y el diff del repositorio en LF, así que
+`patch` lo rechaza («different line endings»). Se aplicó copiando los ficheros probados; la
+foto (`telefono/claude-phone/`, byte a byte) es la referencia.
+
 ## Lo que además NO está en el repositorio original
 
 - **El servicio de systemd** `claude-phone-api` (`/etc/systemd/system/`), que levanta el

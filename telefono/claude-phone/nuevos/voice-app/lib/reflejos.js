@@ -40,7 +40,7 @@ const DETRAS = /(?: (?:por favor|porfa|jarvis|harvis|senor|ya|ahora|ahora mismo|
 
 const TELE = '(?:la )?(?:tele|television|tv)(?: (?:de|del|de la) (?:la )?(?:sala|salon))?';
 const OBRA = '(?:la (?:peli|pelicula|serie|tele|television|tv)|el (?:video|contenido|capitulo|programa|partido|episodio)|esto|eso)';
-const APPS_VOZ = 'netflix|youtube|you tube|prime video|amazon prime|prime|amazon|disney plus|disney|hbo max|hbo|max|apple tv plus|apple tv|spotify|dazn|plex|jellyfin|movistar plus|movistar|twitch';
+const APPS_VOZ = 'netflix|youtube|you tube|prime video|amazon prime|prime|amazon|disney plus|disney|hbo max|hbo|max|apple tv plus|apple tv|spotify|dazn|plex|jellyfin|movistar plus|movistar|twitch|el tablero|tablero|el dashboard|dashboard';
 
 const EN_TELE = '(?: (?:en|de|a) ' + TELE + ')?';
 

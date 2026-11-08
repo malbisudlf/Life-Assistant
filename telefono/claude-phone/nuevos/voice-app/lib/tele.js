@@ -52,6 +52,9 @@ const APPS_CONOCIDAS = {
   jellyfin: 'AprZAARz4r.Jellyfin', 'movistar plus+': '3201707014489', twitch: '3202203026841',
   tiktok: '3202008021577', filmin: '3201703012079', rtve: '3201909019175', atresplayer: '3201710014981',
   mitele: '3201710015037', pluto: '3201808016802', 'samsung tv plus': '3201707014361',
+  // Parche 40: la app «Jarvis» de Life Assistant (tele/tablero-tizen/), que abre el tablero.
+  // La tele ignora «abre esta URL», pero obedece «abre esta app»: por eso es una app.
+  jarvis: 'JarvisTabl.Tablero',
 };
 // Lo que se dice → el nombre con el que se busca
 const ALIAS = {
@@ -59,6 +62,7 @@ const ALIAS = {
   prime: 'prime video', amazon: 'prime video', 'amazon prime': 'prime video',
   apple: 'apple tv', 'apple tv plus': 'apple tv', movistar: 'movistar plus+', 'movistar plus': 'movistar plus+',
   'you tube': 'youtube', yutub: 'youtube',
+  tablero: 'jarvis', 'el tablero': 'jarvis', dashboard: 'jarvis', 'el dashboard': 'jarvis', panel: 'jarvis', 'el panel': 'jarvis',
 };
 
 function normalizar(s) {
