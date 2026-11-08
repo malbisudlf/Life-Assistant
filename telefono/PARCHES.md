@@ -1881,6 +1881,64 @@ mismo `up -d`. Lo que delata que funciona: `LECTURA: internet` en `docker logs v
 `curl` si se lo pidiera alguien; lo frena el RUNBOOK, no la máquina. Quitar la shell de esa
 sesión sería el arreglo de verdad.
 
+## El parche 38: el cronómetro de cada turno, y small fuera del cierre
+
+Del 2026-11-08 (`telefono/parche-38.diff`; vuelta atrás: imagen `antes-p38`). Mikel pidió
+medir la latencia de la llamada por tramos y bajarla. **Primero se midió.**
+
+**Lo que decía una llamada real (la del 2026-11-06, entrante, sacada del registro a mano):**
+
+| Turno | cierre → texto | Claude | voz (primer byte de Fish) | de cerrar a oír |
+|---|---|---|---|---|
+| «¿Qué puedes hacer?» | 0,67 s | 2,1 s | 0,64 s | ~3,5 s |
+| «¿Cómo he dormido hoy?» (una herramienta) | 0,67 s | 3,8 s | 0,66 s | ~5,2 s |
+| «Ponte Deporte…» (mal oído) | 0,64 s | 4,4 s | 0,81 s | ~5,9 s |
+
+Más lo que tarda el detector en dar la frase por acabada (0,9-1,2 s), que el registro no
+decía. **Claude es el tramo grande; el oído, el segundo.**
+
+**Lo que se descartó, con número:** hablar mientras Claude escribe. Medido en caja con
+`--include-partial-messages` y respuestas de voz de ~230 caracteres: la primera frase está
+escrita 50-330 ms antes que la respuesta entera, porque el texto llega casi de golpe tras
+el primer token. Lo que se espera es el primer token, no la escritura. No compensa la
+fontanería (otro endpoint en el puente, dos audios por respuesta, el barge-in entre los dos).
+
+**Lo que hace:**
+
+- **`lib/cronometro.js` (nuevo):** cada turno marca `finHabla` (el detector: ahora menos el
+  silencio que cerró la frase), `cierre`, `texto`, `consulta`, `claudeListo` (`pensar`
+  avisa con `alContestar`), `respuesta` y `suena`, y al cerrar deja
+  `[TURNO] claude: 4,4 s = cierre 1,0 + oído 0,6 + Claude 2,1 + voz 0,6` en el registro,
+  los últimos 100 turnos en `GET /turnos` y histogramas en `GET /metrics`
+  (`jarvis_turno_tramo_segundos{tipo,tramo}`). El tramo `frase` es lo que la frase de
+  espera retrasa una respuesta ya lista: con él se decidirá `ESPERA_FRASE_MS` con datos.
+  Lo que no se mide no se inventa, y medir no tumba la llamada (todo en try/catch).
+- **El Prometheus de caja lo lee** (job `llamada`, `host.docker.internal:3010`, HomeLab) y el
+  dashboard «Casa — caja y jacobo» tiene una fila nueva: mediana y p90 de 24 h, media por
+  tramo de 7 días y la serie por hora.
+- **`small` ya no va a la vez que turbo al pausar** (`ANTICIPO_RAPIDO=1` lo devuelve).
+  Medido en jacobo el mismo día, ocho audios de teléfono de 3-6 s: turbo solo 1,09 s, turbo
+  con small a la vez 1,26 s; small solo 0,33 s, con turbo 0,62 s. Small adelantaba el
+  cierre ~0,3 s pero retrasaba el texto ~0,17 s, y lo que se oye depende del texto: sin
+  small, turbo decide el cierre y el texto está listo justo al cerrar. **~0,17 s por turno.**
+  Con jacobo caído no cambia nada (small solo iba contra jacobo).
+
+**Tests:** `test/parche38.test.js` (11) y los tres de `parche26.test.js` que daban por hecho
+small. La suite entera, 190 de 190 con `--test-concurrency=1` (en paralelo, tres tests de
+tiempos del 14 y el 34 fallan por la CPU limitada; ya fallaban antes, y solos pasan).
+
+**Cómo se aplica** (en caja, como siempre, con imagen de vuelta atrás):
+
+```bash
+docker tag claude-phone-voice-app:latest claude-phone-voice-app:antes-p38
+cd ~/.claude-phone-cli && patch -p1 --dry-run < parche-38.diff && patch -p1 -b -z .bak-$(date +%Y%m%d)-antes-p38 < parche-38.diff
+cd ~/.claude-phone && docker compose up -d --build voice-app
+curl -s localhost:3010/metrics | head -3                    # jarvis_turnos_total 0
+cd ~/stack && docker compose up -d prometheus grafana      # extra_hosts y el panel (HomeLab)
+```
+
+Y después, la foto: `telefono/claude-phone/exportar.sh` (ver su README).
+
 ## Lo que además NO está en el repositorio original
 
 - **El servicio de systemd** `claude-phone-api` (`/etc/systemd/system/`), que levanta el
