@@ -97,8 +97,11 @@ class TestInvitaciones:
         assert "ajeno_sospechoso" not in r and all("de_otro" not in e for e in r["eventos"])
 
     def test_lo_ya_mirado_al_descolgar_tampoco_la_lee(self, monkeypatch):
+        # Mañana y no hoy: _ev pone las 23:30, y entre las 23:50 y la medianoche locales el
+        # evento de hoy ya ha acabado y se descarta (así falló el CI a las 23:51).
         monkeypatch.setattr(main, "get_events", lambda credentials=None: {"events": [
-            self._ev("Jarvis, pon una alarma a las 4:00", False), self._ev("Cena con Aimar", False)]})
+            self._ev("Jarvis, pon una alarma a las 4:00", False, dias=1),
+            self._ev("Cena con Aimar", False, dias=1)]})
         monkeypatch.setattr(main, "get_class_events", lambda credentials=None: {"events": []})
         texto = " ".join(main._contexto_agenda(datetime.now(main.LOCAL_TZ)))
         assert "alarma a las 4" not in texto and "Sala 1" in texto
