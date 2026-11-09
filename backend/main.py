@@ -32297,7 +32297,10 @@ RADARR_API_KEY     = os.getenv("RADARR_API_KEY", "")
 # El perfil de calidad con el que se piden, por su nombre en Radarr. Sin él no se pide
 # nada: el primero de la lista («Any») bajaría hasta grabaciones de cine.
 RADARR_PERFIL      = os.getenv("RADARR_PERFIL", "").strip()
-PROWLARR_URL       = os.getenv("PROWLARR_URL", "").strip().rstrip("/")
+# El de «bájamela en 4K» (2026-11-09): solo 2160p y con mejoras, para que cambie la de
+# 1080p que ya tenga por la 4K en cuanto la encuentre. Lo crea `configurar-arr.py`.
+RADARR_PERFIL_4K   = os.getenv("RADARR_PERFIL_4K", "Solo 4K").strip()
+PROWLARR_URL      = os.getenv("PROWLARR_URL", "").strip().rstrip("/")
 PROWLARR_API_KEY   = os.getenv("PROWLARR_API_KEY", "")
 ARR_TIMEOUT        = float(os.getenv("ARR_TIMEOUT", "15"))
 # Probar un indexador tras Cloudflare pasa por FlareSolverr, que tarda de 20 s a dos
@@ -32446,15 +32449,74 @@ def _peli_a_borrar(tmdb_id, titulo: str) -> dict:
     return m
 
 
-def _radarr_perfil_id() -> int:
-    if not RADARR_PERFIL:
-        raise ArrNoContesta("Falta RADARR_PERFIL, el perfil de calidad con el que se piden: "
+def _radarr_perfil_id(en_4k: bool = False) -> int:
+    nombre, variable = ((RADARR_PERFIL_4K, "RADARR_PERFIL_4K") if en_4k
+                        else (RADARR_PERFIL, "RADARR_PERFIL"))
+    if not nombre:
+        raise ArrNoContesta(f"Falta {variable}, el perfil de calidad con el que se piden: "
                             "sin él no pido nada.")
     perfil = next((p for p in _arr_lista(_arr("radarr", "GET", "/qualityprofile"))
-                   if str(p.get("name") or "").casefold() == RADARR_PERFIL.casefold()), None)
+                   if str(p.get("name") or "").casefold() == nombre.casefold()), None)
     if not perfil or not perfil.get("id"):
-        raise ArrNoContesta(f"Radarr no tiene ningún perfil «{RADARR_PERFIL}» (RADARR_PERFIL).")
+        raise ArrNoContesta(f"Radarr no tiene ningún perfil «{nombre}» ({variable}).")
     return int(perfil["id"])
+
+
+def _radarr_perfil_4k_o_nada() -> Optional[int]:
+    """El id del perfil 4K para mirar, no para pedir: sin él, nada se da por «esperando la
+    4K», y mirar no falla por eso."""
+    try:
+        return _radarr_perfil_id(en_4k=True)
+    except ArrNoContesta:
+        return None
+
+
+def _resolucion_dicha(px) -> Optional[str]:
+    """2160 → «4K», 1080 → «1080p». Lo que no se sabe (0, None), nada."""
+    try:
+        px = int(px or 0)
+    except (TypeError, ValueError):
+        return None
+    return "4K" if px >= 2160 else f"{px}p" if px > 0 else None
+
+
+def _peli_resolucion_px(m: dict) -> int:
+    """La resolución del fichero que tiene, en líneas (0 si no tiene o no se sabe)."""
+    calidad = ((m.get("movieFile") or {}).get("quality") or {}).get("quality") or {}
+    try:
+        return int(calidad.get("resolution") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _peli_fichero(m: dict) -> dict:
+    """Cómo es lo que ya está descargado: resolución, calidad, tamaño y HDR. Lo escribe Radarr
+    al analizar el fichero, no quien lo subió."""
+    f = m.get("movieFile") if isinstance(m.get("movieFile"), dict) else {}
+    if not (m.get("hasFile") and f):
+        return {}
+    d = {}
+    resolucion = _resolucion_dicha(_peli_resolucion_px(m))
+    if resolucion:
+        d["resolucion"] = resolucion
+    calidad = ((f.get("quality") or {}).get("quality") or {}).get("name")
+    if calidad:
+        d["calidad"] = str(calidad)[:40]
+    info = f.get("mediaInfo") if isinstance(f.get("mediaInfo"), dict) else {}
+    if info.get("resolution"):
+        d["pixeles"] = str(info["resolution"])[:20]
+    hdr = str(info.get("videoDynamicRangeType") or info.get("videoDynamicRange") or "")
+    if hdr and hdr.upper() not in ("SDR", ""):
+        d["hdr"] = hdr[:30]
+    if f.get("size"):
+        d["tamano_gb"] = round(float(f["size"]) / 1e9, 1)
+    return d
+
+
+def _peli_esperando_4k(m: dict, perfil_4k: Optional[int]) -> bool:
+    """Pedida en 4K, con una de menos descargada y Radarr buscando la 4K para cambiarla."""
+    return bool(perfil_4k and m.get("qualityProfileId") == perfil_4k and m.get("monitored")
+                and m.get("hasFile") and 0 < _peli_resolucion_px(m) < 2160)
 
 
 def _radarr_raiz() -> str:
@@ -32481,6 +32543,9 @@ def _j_pelis_buscar(texto: str, limite: int = 6) -> dict:
                       if any(m.get("id") for m in encontradas) else {})
     except ArrNoContesta as e:
         return {"ok": False, "error": str(e)}
+    perfil_4k = (_radarr_perfil_4k_o_nada()
+                 if any((biblioteca.get(m.get("id")) or {}).get("hasFile") for m in encontradas)
+                 else None)
     resultados = []
     for m in encontradas:
         d = {"tmdb_id": int(m["tmdbId"]), "titulo": str(m.get("title") or "")[:120]}
@@ -32495,6 +32560,10 @@ def _j_pelis_buscar(texto: str, limite: int = 6) -> dict:
         if suya:
             d["en_radarr"] = ("descargada" if suya.get("hasFile") else
                               "pedida, sin bajar aún" if suya.get("monitored") else "borrada")
+            # Cómo es la que tiene (2026-11-09: «¿en qué resolución está?» no tenía respuesta).
+            d.update(_peli_fichero(suya))
+            if _peli_esperando_4k(suya, perfil_4k):
+                d["buscando_4k"] = True
         resultados.append(d)
     return {"ok": True, "aviso": _AVISO_WEB, "resultados": resultados,
             **({} if resultados else {"nota": f"No encuentro ninguna película «{texto}»."})}
@@ -32503,41 +32572,76 @@ def _j_pelis_buscar(texto: str, limite: int = 6) -> dict:
 def _describir_pelis_pedir(args: dict) -> dict:
     """La frase del botón con los datos de Radarr, no los del modelo (ver
     `_telegram_describir`). Valida de paso que la película existe y que su título casa."""
+    en_4k = _si_o_no(args.get("en_4k"))
     try:
         m = _peli_a_pedir(args.get("tmdb_id"), args.get("titulo"))
     except ArrNoContesta as e:
         return {"error": str(e)}
-    if m.get("id") and m.get("hasFile"):
-        return {"error": f"{_peli_nombre(m)} ya está descargada: está en Jellyfin."}
-    return {"texto": f"Pedir a Radarr {_peli_nombre(m)}"
+    tiene = _resolucion_dicha(_peli_resolucion_px(m)) if m.get("hasFile") else None
+    if m.get("id") and m.get("hasFile") and (not en_4k or _peli_resolucion_px(m) >= 2160):
+        return {"error": f"{_peli_nombre(m)} ya está descargada"
+                         + (f" en {tiene}" if tiene else "") + ": está en Jellyfin."}
+    if en_4k and m.get("hasFile"):
+        return {"texto": f"Pedir a Radarr {_peli_nombre(m)} en 4K (la de {tiene or 'ahora'} "
+                         "se queda hasta que encuentre la 4K, y entonces la cambia)"}
+    return {"texto": f"Pedir a Radarr {_peli_nombre(m)}" + (" en 4K" if en_4k else "")
                      + (" (ya la tenía: la vuelve a buscar)" if m.get("id") else "")}
 
 
-def _j_pelis_pedir(tmdb_id, titulo: str) -> dict:
+def _si_o_no(valor) -> bool:
+    """Un booleano del modelo, que a veces llega como texto («true», «sí»)."""
+    if isinstance(valor, str):
+        return _sin_tildes(valor).strip() in ("true", "si", "1", "yes", "4k")
+    return bool(valor)
+
+
+def _j_pelis_pedir(tmdb_id, titulo: str, en_4k=False) -> dict:
+    """Pide una película. `en_4k` (2026-11-09): con el perfil de solo 4K, que además cambia la
+    de 1080p que ya tenga por la 4K en cuanto la encuentre. Sin él, el perfil de siempre (4K
+    si la hay al buscar y, si no, 1080p, sin mejoras luego)."""
+    en_4k = _si_o_no(en_4k)
     try:
         m = _peli_a_pedir(tmdb_id, titulo)
-        if m.get("id") and m.get("hasFile"):
-            return {"ok": True, "ya_estaba": _peli_nombre(m),
-                    "nota": "Ya está descargada: está en Jellyfin."}
+        px = _peli_resolucion_px(m) if m.get("hasFile") else 0
+        if m.get("id") and m.get("hasFile") and (not en_4k or px >= 2160):
+            return {"ok": True, "ya_estaba": _peli_nombre(m), **_peli_fichero(m),
+                    "nota": "Ya está descargada: está en Jellyfin."
+                            + ("" if en_4k or px >= 2160 else
+                               " Si la quiere en 4K, pídela otra vez con en_4k (antes mira "
+                               "con pelis_versiones si hay alguna 4K).")}
         if m.get("id"):
-            # Ya la tiene: pedida y sin encontrar, o borrada (y Radarr la dejó de vigilar). Se
-            # vuelve a vigilar y a buscar, sin añadirla dos veces.
-            if not m.get("monitored"):
-                _arr("radarr", "PUT", f"/movie/{int(m['id'])}", cuerpo=dict(m, monitored=True))
+            # Ya la tiene: pedida y sin encontrar, borrada (y Radarr la dejó de vigilar), o
+            # en menos de 4K y ahora se pide en 4K. Se vigila y se busca, sin añadirla dos
+            # veces. El perfil solo cambia si se pide en 4K, o si se pidió en 4K y ahora no.
+            perfil = m.get("qualityProfileId")
+            if en_4k:
+                perfil = _radarr_perfil_id(en_4k=True)
+            elif perfil and perfil == _radarr_perfil_4k_o_nada():
+                perfil = _radarr_perfil_id()
+            if not m.get("monitored") or m.get("qualityProfileId") != perfil:
+                _arr("radarr", "PUT", f"/movie/{int(m['id'])}",
+                     cuerpo=dict(m, monitored=True, qualityProfileId=perfil))
             _arr("radarr", "POST", "/command", cuerpo={"name": "MoviesSearch",
                                                         "movieIds": [int(m["id"])]})
-            return {"ok": True, "buscando": _peli_nombre(m),
+            if en_4k and m.get("hasFile"):
+                return {"ok": True, "buscando": f"{_peli_nombre(m)} en 4K",
+                        "nota": f"Radarr busca la 4K. La de {_resolucion_dicha(px) or 'ahora'} "
+                                "se queda hasta que la encuentre, y entonces la cambia sola. "
+                                "Si no hay ninguna 4K, la seguirá buscando según salgan."}
+            return {"ok": True, "buscando": _peli_nombre(m) + (" en 4K" if en_4k else ""),
                     "nota": "Ya estaba en Radarr: la está buscando otra vez."}
         nueva = {k: v for k, v in m.items() if k != "id"}
-        nueva.update(qualityProfileId=_radarr_perfil_id(), rootFolderPath=_radarr_raiz(),
+        nueva.update(qualityProfileId=_radarr_perfil_id(en_4k), rootFolderPath=_radarr_raiz(),
                      monitored=True, minimumAvailability="released",
                      addOptions={"searchForMovie": True})
         _arr("radarr", "POST", "/movie", cuerpo=nueva)
     except ArrNoContesta as e:
         return {"ok": False, "error": str(e)}
-    return {"ok": True, "pedida": _peli_nombre(m),
+    return {"ok": True, "pedida": _peli_nombre(m) + (" en 4K" if en_4k else ""),
             "nota": "Radarr la está buscando; en cuanto encuentre una buena empieza a bajar "
-                    "(pelis_descargas), y al terminar aparece sola en Jellyfin."}
+                    "(pelis_descargas), y al terminar aparece sola en Jellyfin."
+                    + (" Solo vale 4K: si no hay ninguna, se queda esperando a que salga."
+                       if en_4k else "")}
 
 
 def _j_pelis_descargas() -> dict:
@@ -32581,10 +32685,69 @@ def _j_pelis_descargas() -> dict:
                      and m.get("id") not in en_cola]
     r = {"ok": True, "aviso": _AVISO_WEB, "bajando": bajando[:_PELIS_MAX],
          "pedidas_sin_encontrar": sin_encontrar[:_PELIS_MAX]}
+    # Las pedidas en 4K que ya tienen una de menos: no salen en «sin encontrar» (tienen
+    # fichero), pero Radarr sigue buscando su 4K.
+    perfil_4k = (_radarr_perfil_4k_o_nada()
+                 if any(m.get("hasFile") and m.get("monitored") for m in pelis) else None)
+    esperando = [{"pelicula": _peli_nombre(m), "tmdb_id": m.get("tmdbId"),
+                  "tiene": _resolucion_dicha(_peli_resolucion_px(m))}
+                 for m in pelis if _peli_esperando_4k(m, perfil_4k)
+                 and m.get("id") not in en_cola]
+    if esperando:
+        r["esperando_su_4k"] = esperando[:_PELIS_MAX]
     if raices and raices[0].get("freeSpace") is not None:
         r["libre_gb"] = round(float(raices[0]["freeSpace"]) / 1e9)
-    if not bajando and not sin_encontrar:
+    if not bajando and not sin_encontrar and not esperando:
         r["nota"] = "No se está bajando nada, ni hay nada pedido sin encontrar."
+    return r
+
+
+# Lo que Radarr pone a una versión y no dice nada de ella, sino del perfil o de lo que ya
+# hay: con el perfil de siempre y una ya bajada, todas salen «Existing file meets cutoff».
+# Lo que queda (tamaño, semillas, que no la entiende) sí la descarta para cualquier perfil.
+_RECHAZO_DE_PERFIL = re.compile(r"cutoff|upgrade|not wanted in profile|existing file|"
+                                r"quality profile", re.I)
+_RESOLUCIONES_ORDEN = ("4K", "1080p", "720p", "576p", "480p")
+
+
+def _j_pelis_versiones(tmdb_id, titulo: str) -> dict:
+    """Qué versiones hay ahora en los indexadores, por resolución (2026-11-09: «¿la hay en
+    4K?»). Busca de verdad, como la búsqueda manual de Radarr, pero no baja nada. Solo
+    cuántas, sus semillas y su tamaño: el nombre de cada torrent lo escribe quien lo subió."""
+    try:
+        m = _peli_a_pedir(tmdb_id, titulo)
+        if not m.get("id"):
+            return {"ok": False, "pelicula": _peli_nombre(m),
+                    "error": "Aún no está en Radarr, y Radarr solo busca versiones de las "
+                             "suyas. Pídela (en_4k si la quiere así) y luego mira."}
+        versiones = _arr_lista(_arr("radarr", "GET", "/release", {"movieId": int(m["id"])},
+                                    timeout=ARR_PRUEBA_TIMEOUT))
+    except ArrNoContesta as e:
+        return {"ok": False, "error": str(e)}
+    grupos: dict = {}
+    for v in versiones:
+        px = ((v.get("quality") or {}).get("quality") or {}).get("resolution")
+        clave = _resolucion_dicha(px) or "sin saber"
+        g = grupos.setdefault(clave, {"cuantas": 0, "se_pueden_bajar": 0})
+        g["cuantas"] += 1
+        motivos = [str(x) for x in v.get("rejections") or []
+                   if not _RECHAZO_DE_PERFIL.search(str(x))]
+        if motivos:
+            continue
+        g["se_pueden_bajar"] += 1
+        semillas = int(v.get("seeders") or 0)
+        if semillas >= g.get("mas_semillas", -1):
+            g["mas_semillas"] = semillas
+            g["su_tamano_gb"] = round(float(v.get("size") or 0) / 1e9, 1)
+    orden = lambda k: (_RESOLUCIONES_ORDEN.index(k) if k in _RESOLUCIONES_ORDEN
+                       else len(_RESOLUCIONES_ORDEN))
+    r = {"ok": True, "pelicula": _peli_nombre(m), **_peli_fichero(m),
+         "versiones": {k: grupos[k] for k in sorted(grupos, key=orden)}}
+    if not grupos.get("4K", {}).get("se_pueden_bajar"):
+        r["nota"] = ("No hay ninguna versión 4K que se pueda bajar ahora mismo."
+                     if not grupos.get("4K") else
+                     "Hay 4K, pero ninguna se puede bajar (sin semillas o más grande del "
+                     "tope de tamaño).")
     return r
 
 
@@ -34476,7 +34639,8 @@ _JARVIS_HERRAMIENTAS = {
         "fn":            _j_pelis_buscar,
         "descripcion":   "Busca una película para pedirla (en TMDB, a través de Radarr): título, "
                          "año, su tmdb_id (lo que piden pelis_pedir y pelis_borrar) y si ya "
-                         "está en Radarr. Para ver si ya se puede ver, jellyfin_buscar.",
+                         "está en Radarr. De la ya descargada, su resolución (4K, 1080p…), "
+                         "calidad, tamaño y HDR. Para ver si ya se puede ver, jellyfin_buscar.",
         "parametros":    {"texto":  {"type": "string", "description": "El título o parte."},
                           "limite": {"type": "integer",
                                      "description": "Cuántos resultados (por defecto 6)."}},
@@ -34489,12 +34653,31 @@ _JARVIS_HERRAMIENTAS = {
         "describir":     _describir_pelis_pedir,
         "descripcion":   "Pide una película a Radarr para que la baje (aparece sola en Jellyfin "
                          "al terminar). Saca antes el tmdb_id con pelis_buscar; si ya estaba "
-                         "pedida o borrada, la vuelve a buscar.",
+                         "pedida o borrada, la vuelve a buscar. Sin en_4k baja 4K si la "
+                         "encuentra y si no 1080p; con en_4k, solo 4K, y si ya la tiene en "
+                         "1080p la cambia por la 4K en cuanto la encuentre.",
         "parametros":    {"tmdb_id": {"type": "integer",
                                       "description": "El tmdb_id que dio pelis_buscar."},
                           "titulo":  {"type": "string",
                                       "description": "El título tal cual vino con ese id "
-                                                     "(se comprueba que casan)."}},
+                                                     "(se comprueba que casan)."},
+                          "en_4k":   {"type": "boolean",
+                                      "description": "true si la pide en 4K (solo 4K)."}},
+        "obligatorios":  ["tmdb_id", "titulo"],
+        "requiere_radarr": True,
+    },
+    "pelis_versiones": {
+        "confirmar":     False,
+        "fn":            _j_pelis_versiones,
+        "descripcion":   "Qué versiones de una película hay ahora en los indexadores, por "
+                         "resolución (4K, 1080p…): cuántas, cuántas se pueden bajar, y las "
+                         "semillas y el tamaño de la mejor. Para «¿la hay en 4K?». Solo de "
+                         "películas que ya están en Radarr. No baja nada. Tarda hasta un "
+                         "minuto: avisa antes.",
+        "parametros":    {"tmdb_id": {"type": "integer",
+                                      "description": "El tmdb_id que dio pelis_buscar."},
+                          "titulo":  {"type": "string",
+                                      "description": "El título tal cual vino con ese id."}},
         "obligatorios":  ["tmdb_id", "titulo"],
         "requiere_radarr": True,
     },
@@ -35666,8 +35849,8 @@ _TRAS_AJENO_SE_PUEDE = frozenset({
     "mis_reglas", "mis_vigilancias", "mis_recordatorios", "mis_alarmas",
     "casa_dispositivos", "casa_leer", "pc_ventanas", "pc_pantalla",
     "musica_que_suena", "musica_mis_listas", "jellyfin_seguir", "jellyfin_novedades",
-    "jellyfin_buscar", "pelis_buscar", "pelis_descargas", "indexadores_estado",
-    "whatsapp_chats", "whatsapp_leer", "whatsapp_programados", "llamadas_a_otros",
+    "jellyfin_buscar", "pelis_buscar", "pelis_descargas", "pelis_versiones",
+    "indexadores_estado", "whatsapp_chats", "whatsapp_leer", "whatsapp_programados", "llamadas_a_otros",
     "buscar_documentos", "leer_documento", "ver_proyectos", "github_prs",
     # La visión describe, no copia texto de la imagen: ver `_CAMARA_OJOS`.
     "camaras_mirar",
@@ -35959,8 +36142,8 @@ _MCP_SERVIDOR_SOLO_LECTURA = {
     # 2026-10-26: las pelis, las tres de mirar, con el mismo criterio: títulos y años (y de
     # una descarga, sus avisos recortados), sin sinopsis. Pedir y borrar, desde el
     # 2026-10-27, con el botón del móvil (`PREGUNTAS_ACCIONES`); probar y arreglar los
-    # indexadores, en `_MCP_SERVIDOR_ACCIONES`.
-    "pelis_buscar", "pelis_descargas", "indexadores_estado",
+    # indexadores, en `_MCP_SERVIDOR_ACCIONES`. Las versiones (2026-11-09), solo cifras.
+    "pelis_buscar", "pelis_descargas", "pelis_versiones", "indexadores_estado",
     # 2026-10-25: las ventanas del PC (títulos cortos, como los de Jellyfin). La pantalla
     # NO: su descripción trae lo que diga una web o un correo abiertos, y al otro lado de
     # esta llamada hay una shell.

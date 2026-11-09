@@ -30,6 +30,7 @@ tests, en `tests/backend/test_pelis.py`.
    RADARR_URL=http://172.17.0.1:7878
    RADARR_API_KEY=<la de Radarr>
    RADARR_PERFIL=<el perfil de calidad con el que se piden, por su nombre>
+   RADARR_PERFIL_4K=Solo 4K   # el de «en 4K»; ese es el valor por defecto
    PROWLARR_URL=http://172.17.0.1:9696
    PROWLARR_API_KEY=<la de Prowlarr>
    ```
@@ -46,13 +47,26 @@ tests, en `tests/backend/test_pelis.py`.
 
 | Herramienta | Confirma | Qué hace |
 |---|---|---|
-| `pelis_buscar` | No | `GET /movie/lookup` (TMDB a través de Radarr): título, original, año y `tmdb_id`. Si alguna ya está en Radarr, `GET /movie` para decir si está descargada, pedida o borrada |
-| `pelis_pedir` | **Sí** | Nueva: `POST /movie` con el perfil de `RADARR_PERFIL`, la primera carpeta raíz y `searchForMovie`. Ya en Radarr sin fichero: la vuelve a vigilar (`PUT /movie/{id}`) y la busca (`MoviesSearch`), sin añadirla dos veces. Ya descargada: no toca nada |
-| `pelis_descargas` | No | `GET /queue` (porcentaje, minutos, calidad y avisos), lo vigilado sin fichero que no está en la cola («pedidas sin encontrar») y el espacio libre de la carpeta |
+| `pelis_buscar` | No | `GET /movie/lookup` (TMDB a través de Radarr): título, original, año y `tmdb_id`. Si alguna ya está en Radarr, `GET /movie` para decir si está descargada, pedida o borrada; de la descargada, su resolución (`4K`, `1080p`), calidad, píxeles, HDR y tamaño, y `buscando_4k` si espera su 4K |
+| `pelis_pedir` | No (desde el 2026-11-08) | Nueva: `POST /movie` con el perfil de `RADARR_PERFIL` (o `RADARR_PERFIL_4K` con `en_4k`), la primera carpeta raíz y `searchForMovie`. Ya en Radarr sin fichero: la vuelve a vigilar (`PUT /movie/{id}`) y la busca (`MoviesSearch`), sin añadirla dos veces. Ya descargada: no toca nada, salvo que se pida `en_4k` y la que tiene sea de menos: entonces pasa al perfil 4K y se busca, y Radarr cambia el fichero al encontrarla |
+| `pelis_versiones` | No | `GET /release?movieId=` (la búsqueda manual de Radarr, hasta `ARR_PRUEBA_TIMEOUT`): cuántas versiones hay por resolución, cuántas se pueden bajar (sin contar los rechazos que solo son del perfil o del fichero que ya hay) y semillas y tamaño de la mejor. Sin nombres de torrent. Solo de películas que ya están en Radarr |
+| `pelis_descargas` | No | `GET /queue` (porcentaje, minutos, calidad y avisos), lo vigilado sin fichero que no está en la cola («pedidas sin encontrar»), las que esperan su 4K (`esperando_su_4k`) y el espacio libre de la carpeta |
 | `pelis_borrar` | **Sí** | Cancela lo que tenga a medias (`DELETE /queue/{id}` quitándolo de qBittorrent), borra el fichero (`DELETE /moviefile/{id}`) y la deja de vigilar. **La película se queda en Radarr**, ver abajo |
 | `indexadores_estado` | No | Prowlarr: los indexadores, si están activos y si pasan por FlareSolverr, y los avisos de su última comprobación; y los avisos de Radarr. No prueba nada |
 | `indexadores_probar` | No | `POST /indexer/test` (uno) o `/indexer/testall` (todos: 77 s con trece el 2026-10-26) |
 | `indexadores_flaresolverr` | No | Al indexador que Cloudflare bloquea le pone la etiqueta del proxy FlareSolverr (`PUT /indexer/{id}?forceSave=true`) y lo vuelve a probar |
+
+## En 4K (2026-11-09)
+
+Mortadelo bajó en 1080p y Jarvis no sabía decir en qué resolución estaba ni pedirla en 4K.
+El perfil de siempre («4K o 1080p») coge la mejor que haya **al buscar** y no mejora luego:
+una película se baja una vez. Para «en 4K» hay un segundo perfil, `Solo 4K` (WEB 2160p y
+Bluray-2160p, sin remux; corte en WEB 2160p y **con** mejoras), que crea
+`configurar-arr.py` en jacobo y que ese script no devuelve al de siempre. Las mejoras son
+lo que deja a Radarr cambiar la de 1080p por la 4K; el corte en la primera 4K, lo que
+impide que luego cambie una 4K por otra. La de 1080p no se borra al pedir: sigue en
+Jellyfin hasta que llega la 4K. Si no hay ninguna 4K (`pelis_versiones` lo dice antes),
+Radarr la sigue esperando por RSS, y `pelis_descargas` la cuenta en `esperando_su_4k`.
 
 ## Lo que no se puede relajar
 
@@ -86,7 +100,7 @@ tests, en `tests/backend/test_pelis.py`.
 
 ## El teléfono
 
-Las tres de mirar (`pelis_buscar`, `pelis_descargas`, `indexadores_estado`) **entran** en
+Las de mirar (`pelis_buscar`, `pelis_descargas`, `pelis_versiones`, `indexadores_estado`) **entran** en
 `_MCP_SERVIDOR_SOLO_LECTURA`, con el criterio de Jellyfin: poco texto ajeno, recortado y
 marcado como dato.
 
