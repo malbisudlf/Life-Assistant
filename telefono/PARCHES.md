@@ -662,7 +662,8 @@ voice-app, en los dos bucles (entrante y saliente), igual que el 18.
 - **El «sí» de viva voz** (`voice-app/lib/confirmacion.js`, nuevo). Si la respuesta de
   Claude trae `✅ CONFIRMAR: <id>` (la propuesta del backend se la da hecha), la llamada:
   1. pide `GET /telefono/confirmar/<id>` y, si se puede confirmar hablando, lee la frase
-     que escribió el backend y pregunta «¿Lo hago? Di sí o no.»;
+     que escribió el backend y pregunta «¿Lo hago? Di sí o no.» (desde el parche 44, solo
+     la `pregunta` corta del backend);
   2. lo siguiente que digas lo decide `siONo`, con las mismas listas cerradas que el
      dashboard: la frase **entera** tiene que ser un sí o un no, y el no gana;
   3. con un sí o un no, `POST /telefono/confirmar/<id>` y lee lo que contesta el backend
@@ -2024,6 +2025,33 @@ Con esto, la llamada de las 19:41 se habría presentado ~0,5 s después de su «
 el del buzón largo y el del guion que sigue pidiéndose, que son lo que no tenía que cambiar) y los dos
 de tiempos del saludo de `parche32.test.js`. Suite entera, 211 de 211 con `--test-concurrency=1`,
 dentro de la imagen y sin red.
+
+## El parche 44: una sola pregunta al confirmar
+
+Del 2026-11-09, aplicado ese día (`telefono/parche-44.diff`; vuelta atrás: imagen `antes-p44` y
+los `*.bak-20261109-antes-p44`). **Sin probar aún en una llamada real.** Mikel: «es demasiado redundante. Cuando
+le pida abrir la puerta, que diga: de acuerdo, ¿abro la puerta?». Para confirmar algo
+sonaban tres cosas seguidas: la frase de Claude («Se lo leo para que me confirme»), la del
+botón entera («Abrir la puerta del garaje (su móvil está a 40 m de casa).») y la coletilla
+«¿Lo hago? Di sí o no.».
+
+- **El backend escribe la pregunta** (`_pregunta_hablada`): `GET /telefono/confirmar/<id>`
+  devuelve, además de `frase`, una `pregunta` con el verbo en primera persona: «¿Abro la
+  puerta del garaje?», «¿Mando por WhatsApp a Ane: «…»?». Lo que se aprueba no se recorta
+  (el texto del mensaje, a quién va, qué cita es, a cuántos invitados les llega); se quita
+  lo que explica, que sigue en el botón del móvil.
+- **La llamada dice solo eso** (`voice-app/lib/confirmacion.js`): `pregunta` en vez de
+  `frase + ' ¿Lo hago? Di sí o no.'`. Con un backend anterior, la frase y «¿Lo hago?». La
+  `frase` entera sigue siendo la que se le cuenta a Claude en el turno siguiente. Y el
+  repetir, cuando suena a sí pero no está claro, es «Perdone, señor, ¿sí o no?».
+- **Claude dice solo «De acuerdo.»** (`telefono/RUNBOOK.md` y la `nota` de la propuesta).
+
+Queda en «De acuerdo. ¿Abro la puerta del garaje?» → «sí» → «Hecho. Abriendo la puerta del
+garaje.». El orden da igual: la voice-app nueva entiende al backend viejo y al revés. Lleva
+tres piezas, y las tres hay que ponerlas: el backend desplegado, el RUNBOOK copiado a
+`~/telefono-jarvis/CLAUDE.md` y la voice-app reconstruida.
+
+**Tests:** el 44 de `test/parche20.test.js`; suite entera, 212 de 212 dentro de la imagen.
 
 ## Lo que además NO está en el repositorio original
 

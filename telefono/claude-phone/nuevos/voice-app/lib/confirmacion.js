@@ -24,6 +24,12 @@
  * palabras de sí y de relleno (ver siONo); «Sí, pero a las 11» sigue yendo a Claude. Y si
  * suena a sí con alguna palabra mal oída («Sí, sí, audio, venga»), se pregunta otra vez.
  *
+ * Parche 44 (2026-11-09): la pregunta es UNA y corta. Mikel: «es demasiado redundante.
+ * Cuando le pida abrir la puerta, que diga: de acuerdo, ¿abro la puerta?». Se dice la
+ * `pregunta` del backend, no su `frase` (que sigue yendo a Claude en los avisos), y el
+ * repetir pasa de «Perdone, señor, no le he oído bien. ¿Lo hago? Diga sí o no.» a
+ * «Perdone, señor, ¿sí o no?».
+ *
  * Variables: LECTURA_URL (el backend, como la lectura), CONFIRMAR_TOKEN y
  * CONFIRMAR_ESPERA_MS.
  */
@@ -160,7 +166,10 @@ async function preguntarSiLoPide(respuesta, c) {
   }
   if (c.sigueActiva && !c.sigueActiva()) return { pendiente: null, interrumpio: false };
   log('CONFIRMAR: pregunto ' + id);
-  const interrumpio = await decir(c, datos.frase + ' ¿Lo hago? Di sí o no.');
+  // Parche 44: una pregunta, la que escribe el backend («¿Abro la puerta del garaje?»), en
+  // vez de la frase del botón entera más «¿Lo hago? Di sí o no.». Con un backend anterior,
+  // que no manda `pregunta`, la frase de siempre sin la coletilla.
+  const interrumpio = await decir(c, datos.pregunta || (datos.frase + ' ¿Lo hago?'));
   return { pendiente: { id: id, frase: datos.frase }, interrumpio: interrumpio };
 }
 
@@ -174,7 +183,7 @@ async function resolverConfirmacion(pendiente, transcript, c) {
   const respuesta = siONo(transcript);
   if (!respuesta && !pendiente.repetida && pareceSi(transcript)) {
     log('CONFIRMAR: ' + pendiente.id + ' suena a sí pero no está claro, lo pregunto otra vez');
-    const cortada = await decir(c, 'Perdone, señor, no le he oído bien. ¿Lo hago? Diga sí o no.');
+    const cortada = await decir(c, 'Perdone, señor, ¿sí o no?');
     return { resuelta: true, interrumpio: cortada, aviso: '',
              pendiente: { id: pendiente.id, frase: pendiente.frase, repetida: true } };
   }

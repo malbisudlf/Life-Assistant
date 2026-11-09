@@ -25,6 +25,11 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
     endpoint **solo admite las herramientas marcadas** (más las de `PREGUNTAS_ACCIONES`,
     ver abajo) — abrirlo al registro entero lo convertiría en un ejecutor de herramientas
     arbitrarias por HTTP. Qué se confirma hoy, en «Qué pide permiso» justo debajo.
+    **La propuesta es una sola pregunta corta** (2026-11-09, Mikel: «es demasiado
+    redundante»): «De acuerdo, ¿abro la puerta?». El detalle lo lleva el botón, escrito
+    por el backend, y el modelo no lo repite (`_AVISO_PENDIENTE`). Por teléfono la
+    pregunta la escribe el backend (`_pregunta_hablada`) y Claude solo dice «De acuerdo.»:
+    parche 44 en `telefono/PARCHES.md`.
   - **El despachador filtra los argumentos a los declarados en el esquema.** Los redacta
     un modelo a partir de texto: sin el filtro, un nombre inventado llegaría como kwarg a
     la función envuelta (`credentials`, `days`…) y decidiría cosas que no le tocan.

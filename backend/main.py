@@ -24616,7 +24616,9 @@ def _proponer_en_movil(herramienta: str, argumentos: dict) -> dict:
             "lo_que_se_hara": texto,
             "linea_para_la_llamada": f"✅ CONFIRMAR: {pid}",
             "nota": "NO está hecho. Pon linea_para_la_llamada tal cual en tu respuesta: la "
-                    "llamada le lee lo que se hará y él contesta sí o no hablando. Un sí "
+                    "llamada se lo pregunta en una frase y él contesta sí o no hablando. "
+                    "En VOICE_RESPONSE di SOLO «De acuerdo.»: no repitas lo que se hará "
+                    "ni le pidas que confirme, que eso ya lo dice la llamada. Un sí "
                     "hablado vale, no le mandes al móvil. Tú no confirmas nada."}
 
 
@@ -24758,6 +24760,40 @@ def _se_confirma_hablando(fila: dict) -> str:
     return ""
 
 
+# Lo que se PREGUNTA de viva voz, que no es lo que se lee en el botón. Mikel, el 2026-11-09:
+# «es demasiado redundante. Cuando le pida abrir la puerta, que diga: de acuerdo, ¿abro la
+# puerta?». Hasta entonces sonaban tres cosas seguidas: la frase de Claude, la del botón
+# entera («Abrir la puerta del garaje (su móvil está a 40 m de casa).») y «¿Lo hago? Di sí o
+# no.». Ahora es una pregunta: el verbo de la frase del botón, en primera persona.
+#
+# Lo que NO se recorta es lo que se está aprobando: el texto del WhatsApp, a quién va, qué
+# cita es y a cuántos invitados les llega. Se quita lo que explica (los paréntesis del
+# garaje y de las pelis, menos el año), que sigue escrito en el botón del móvil.
+_PREGUNTA_VERBOS = {"Crear": "Creo", "Borrar": "Borro", "Abrir": "Abro", "Cerrar": "Cierro",
+                    "Reservar": "Reservo", "Apuntar": "Apunto", "Poner": "Pongo",
+                    "Mandar": "Mando", "Pedir": "Pido"}
+_PREGUNTA_SIN_PARENTESIS = {"garaje", "pelis_pedir", "pelis_borrar"}
+_PREGUNTA_COLA = re.compile(r"\.\s+(Les? llegará [^.]*\.)$")
+
+
+def _pregunta_hablada(herramienta: str, texto: str) -> str:
+    """«Abrir la puerta del garaje (…).» → «¿Abro la puerta del garaje?». Si la frase no
+    empieza por un verbo conocido (mover una cita), se queda entera con «¿Lo hago?»."""
+    texto = " ".join(str(texto or "").split())
+    if herramienta in _PREGUNTA_SIN_PARENTESIS:
+        # El año de la película se queda: «El padrino (1972)» es cuál se borra.
+        texto = re.sub(r"\s*\((?!\d{4}\))[^()]*\)", "", texto)
+    cola = ""
+    m = _PREGUNTA_COLA.search(texto)
+    if m:
+        cola, texto = " " + m.group(1), texto[:m.start()]
+    cuerpo = texto.rstrip(". ")
+    verbo, _, resto = cuerpo.partition(" ")
+    if verbo not in _PREGUNTA_VERBOS or not resto:
+        return f"{cuerpo}.{cola} ¿Lo hago?" if cuerpo else "¿Lo hago?"
+    return f"¿{_PREGUNTA_VERBOS[verbo]} {resto}?{cola}"
+
+
 def _auth_confirmar(request: Request) -> None:
     if not _token_ok(_extract_service_token(request), TELEFONO_CONFIRMAR_TOKEN):
         raise HTTPException(status_code=401, detail="Token inválido")
@@ -24769,13 +24805,17 @@ class ConfirmarHabladoIn(BaseModel):
 
 @app.get("/telefono/confirmar/{pid}")
 def telefono_confirmar_ver(request: Request, pid: str = Path(..., pattern=_UUID_PATTERN)):
-    """Lo que la llamada lee antes de preguntar «¿lo hago?». Siempre 200 con `ok`."""
+    """Lo que la llamada pregunta (`pregunta`, corta) y la frase entera del botón (`frase`,
+    que es la que se le cuenta después a Claude). Siempre 200 con `ok`."""
     _auth_confirmar(request)
     fila   = _leer_pregunta(pid)
     motivo = _se_confirma_hablando(fila)
     if motivo:
         return {"ok": False, "motivo": motivo}
-    return {"ok": True, "frase": str(fila.get("texto") or "")}
+    frase = str(fila.get("texto") or "")
+    return {"ok": True, "frase": frase,
+            "pregunta": _pregunta_hablada(
+                str((fila.get("accion") or {}).get("herramienta") or ""), frase)}
 
 
 @app.post("/telefono/confirmar/{pid}")
@@ -36495,8 +36535,15 @@ _chat_turnos_lock = threading.Lock()
 
 _AVISO_PENDIENTE = (
     "NO se ha ejecutado nada todavía. Está solo PROPUESTO, esperando a que el usuario "
-    "pulse el botón de confirmar. No digas 'he creado', 'he enviado' ni 'está hecho': "
-    "dilo en futuro, como algo que harás si lo aprueba.")
+    "pulse el botón de confirmar. No digas 'he creado', 'he enviado' ni 'está hecho'. "
+    # Mikel, el 2026-11-09: «es demasiado redundante». El botón ya enseña la frase entera
+    # de lo que se hará, escrita por el backend; repetirla en la respuesta era decirlo dos
+    # veces, y tres con la explicación de que hay que pulsar.
+    "Contesta con UNA sola pregunta corta, en primera persona, que nombre lo que harás "
+    "en pocas palabras y sin más frases: «De acuerdo, ¿abro la puerta?», «De acuerdo, "
+    "¿le envío eso a Ane?». No repitas los detalles "
+    "(están escritos en el botón), no expliques que hay que confirmar ni menciones el "
+    "botón.")
 
 
 class ClaudeNoContesta(RuntimeError):
@@ -36623,8 +36670,10 @@ def _sistema_chat(voz: bool = False) -> str:
             "nombran una (por ejemplo `agenda`), es `mcp__jarvis__agenda`.\n"
             "- No tienes terminal ni acceso a ficheros: todo lo que puedes hacer es con "
             "esas herramientas. Si algo no se puede hacer con ellas, dilo.\n"
-            "- Lo que necesita confirmación queda PROPUESTO y al usuario le sale un botón: "
-            "no lo des por hecho.\n\n" + _jarvis_ahora())
+            "- Lo que necesita confirmación queda PROPUESTO y al usuario le sale un botón "
+            "con el detalle: no lo des por hecho, y pregúntalo en una sola frase corta "
+            "(«De acuerdo, ¿abro la puerta?»), sin repetir lo que ya dice el botón.\n\n"
+            + _jarvis_ahora())
 
 
 def _jarvis_turno_claude(body) -> dict:
@@ -37499,10 +37548,7 @@ def _jarvis_turno_bruto(body: JarvisIn, destilar_luego: list):
                     # Explícito hasta la pesadez a propósito: con un aviso más suave el
                     # modelo redactaba "he creado el issue, pero necesito que confirmes",
                     # que da por hecho algo que no ha ocurrido.
-                    "aviso":  "NO se ha ejecutado nada todavía. Está solo PROPUESTO, "
-                              "esperando a que el usuario pulse el botón de confirmar. "
-                              "No digas 'he creado', 'he enviado' ni 'está hecho': dilo "
-                              "en futuro, como algo que harás si lo aprueba.",
+                    "aviso":  _AVISO_PENDIENTE,
                 }
             else:
                 # Antes de trabajar, no después: es lo único que hay que decir mientras

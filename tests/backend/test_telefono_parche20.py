@@ -316,7 +316,30 @@ class TestElSiHablado:
     def test_ver_devuelve_la_frase_del_backend(self, client, mock_requests):
         _pregunta(mock_requests)
         r = client.get(f"/telefono/confirmar/{PID}", headers=TOKEN_SI).json()
-        assert r == {"ok": True, "frase": "Crear «Dentista» mañana de 10:00 a 11:00."}
+        assert r == {"ok": True, "frase": "Crear «Dentista» mañana de 10:00 a 11:00.",
+                     "pregunta": "¿Creo «Dentista» mañana de 10:00 a 11:00?"}
+
+    @pytest.mark.parametrize("herramienta, frase, pregunta", [
+        ("garaje", "Abrir la puerta del garaje (su móvil está a 40 m de casa).",
+         "¿Abro la puerta del garaje?"),
+        ("garaje", "Cerrar la puerta del garaje (su móvil está a 12 m de casa).",
+         "¿Cierro la puerta del garaje?"),
+        # Lo que se aprueba no se recorta: el texto del mensaje y a quién va.
+        ("whatsapp_enviar", "Mandar por WhatsApp a Ane: «Llego tarde. Empezad (sin mí)».",
+         "¿Mando por WhatsApp a Ane: «Llego tarde. Empezad (sin mí)»?"),
+        ("pelis_borrar", "Borrar El padrino (1972) con su fichero (no hay papelera).",
+         "¿Borro El padrino (1972) con su fichero?"),
+        # A quién le llega sigue sonando, detrás de la pregunta.
+        ("borrar_evento", "Borrar «Comida» (mañana a las 14:00). Les llegará la cancelación "
+                          "a 3 invitados.",
+         "¿Borro «Comida» (mañana a las 14:00)? Les llegará la cancelación a 3 invitados."),
+        # Sin verbo delante no se inventa uno.
+        ("editar_evento", "«Dentista» (mañana a las 10:00) pasa a el jueves 12/11 de 11:00 a 12:00.",
+         "«Dentista» (mañana a las 10:00) pasa a el jueves 12/11 de 11:00 a 12:00. ¿Lo hago?"),
+        ("crear_tarea", "", "¿Lo hago?"),
+    ])
+    def test_la_pregunta_es_una_y_corta(self, herramienta, frase, pregunta):
+        assert main._pregunta_hablada(herramienta, frase) == pregunta
 
     def test_el_si_hace_lo_guardado(self, client, mock_requests, hechas):
         _pregunta(mock_requests)

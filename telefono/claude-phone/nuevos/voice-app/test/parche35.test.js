@@ -29,7 +29,7 @@ const { runConversationLoop } = require('../lib/conversation-loop');
 const ID = '0b6f7a52-2f5c-4b7e-9a51-6c2d1e0f9a11';
 const FRASE = 'Mandar por WhatsApp a Aimar: «Llego tarde».';
 const HECHO = 'Hecho. Mandado a Aimar.';
-const OTRA_VEZ = 'Perdone, señor, no le he oído bien. ¿Lo hago? Diga sí o no.';
+const OTRA_VEZ = 'Perdone, señor, ¿sí o no?';
 
 // ── Lo que cuenta como sí ────────────────────────────────────────────────────
 test('35: un sí con relleno es un sí', function () {
