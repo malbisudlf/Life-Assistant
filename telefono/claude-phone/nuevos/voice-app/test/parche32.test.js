@@ -233,22 +233,22 @@ function detector() {
   return s;
 }
 
-test('saludo: tras decir «¿Sí?» y callar 450 ms, no espera más', async () => {
+test('saludo: tras decir «¿Sí?» y callar 350 ms (parche 43; eran 450), no espera más', async () => {
   const s = detector();
   const t0 = Date.now();
   setTimeout(() => { s._inSpeech = true; s._utteranceChunks = [Buffer.from('si')]; }, 100);
-  setTimeout(() => { s._silenceMs = 500; }, 300);
+  setTimeout(() => { s._silenceMs = 360; }, 300);
   const u = await esperarSaludo(s);
   assert.strictEqual(u.audio.toString(), 'si');
   assert.ok(Date.now() - t0 < 600, 'tardó ' + (Date.now() - t0) + ' ms');
 });
 
-test('saludo: si nadie habla en 2 s, se presenta sin esperar los 3', async () => {
+test('saludo: si nadie habla en 1,2 s (parche 43; eran 2), se presenta sin esperar los 3', async () => {
   const s = detector();
   const t0 = Date.now();
   assert.strictEqual(await esperarSaludo(s), null);
   const ms = Date.now() - t0;
-  assert.ok(ms >= 1950 && ms < 2400, 'tardó ' + ms + ' ms');
+  assert.ok(ms >= 1150 && ms < 1600, 'tardó ' + ms + ' ms');
 });
 
 test('saludo: si la frase se cierra sola, vale esa', async () => {

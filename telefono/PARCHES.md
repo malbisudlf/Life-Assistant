@@ -1985,6 +1985,46 @@ cada dos peticiones** al REST de la tele moría al instante con «socket hang up
 con `agent: false`. Con eso la lista sale con las 8 de siempre y «pon el tablero» abre la app a la
 primera. Suite: 200 de 200. Aplicado copiando `tele.js` (CRLF).
 
+## El parche 43: llamando a otros, preparado antes de marcar y sin silencio al descolgar
+
+Del 2026-11-09, aplicado ese día (`telefono/parche-43.diff`; vuelta atrás: imagen `antes-p43` y los
+`*.bak-20261109-antes-p43`). Mikel: al llamar a alguien, cuando lo coge, Jarvis tarda unos 3 s en
+hablar; si no está preparado, que se prepare primero y luego llame. **Sin probar aún en una llamada
+real.**
+
+**Lo que decían las llamadas del 2026-11-08:**
+
+| Llamada | Qué pasó al descolgar | De descolgar a hablar |
+|---|---|---|
+| 19:41, dijo «¿Quién?» | 1,4 s de voz, pero 3,3 s de audio contando el silencio de antes: pasó por locución (≥ 1,8 s) y se esperó a la transcripción para ver si era un buzón | 3,6 s |
+| 20:25, no dijo nada | Se esperaron los 2 s enteros de «nadie habla»; el otro colgó después | ~2,1 s, más la red |
+
+La presentación ya estaba entera antes de descolgar las dos veces; el guion, no: se pedía al
+descolgar y sus seis voces se generaban a la vez justo cuando había que hablar.
+
+**Lo que hace:**
+
+- **Preparado antes de marcar** (`prepararLlamada`, llamado desde `outbound-routes.js` antes de
+  registrar la línea): no se marca hasta tener la presentación **entera** (`esperarAcabada`, nueva
+  en `tts-service.js`) y el guion del backend con la voz de cada frase entera. Pregunta por el
+  guion cada 250 ms. Tope de 12 s (`PREPARAR_TOPE_MS`): si algo no llega, marca igual y el guion se
+  sigue pidiendo durante la llamada, como antes. Deja en el registro
+  `TERCERO: preparado en N ms (presentación entera, guion de N frases)`.
+- **El saludo cuenta la voz, no el audio** (`habladoMs`): la comprobación del buzón mira cuánto ha
+  hablado (`speechMs`), no cuánto audio hay con el pre-roll y el silencio de delante.
+- **Menos espera al descolgar:** si en 1,2 s no ha empezado a hablar se presenta (eran 2 s), y tras
+  su «¿Sí?» bastan 350 ms de silencio (eran 450).
+- **El barge-in sigue quitado** (parche 35, comprobado en la imagen que corría): cada frase con
+  `endpoint.play` y el oído cerrado. Un test más lo vuelve a comprobar.
+
+Con esto, la llamada de las 19:41 se habría presentado ~0,5 s después de su «¿Quién?», en vez de
+~1 s; la de las 20:25, a los 1,2 s en vez de los 2.
+
+**Tests:** `test/parche43.test.js` (11; contra el código de antes fallan 8, y pasan el del barge-in,
+el del buzón largo y el del guion que sigue pidiéndose, que son lo que no tenía que cambiar) y los dos
+de tiempos del saludo de `parche32.test.js`. Suite entera, 211 de 211 con `--test-concurrency=1`,
+dentro de la imagen y sin red.
+
 ## Lo que además NO está en el repositorio original
 
 - **El servicio de systemd** `claude-phone-api` (`/etc/systemd/system/`), que levanta el

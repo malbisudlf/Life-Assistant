@@ -1901,7 +1901,7 @@ index 14573a0..d285abb 100644
 +  quienContesta: quienContesta
  };
 diff --git a/voice-app/lib/outbound-routes.js b/voice-app/lib/outbound-routes.js
-index 1f93c9b..6f37d0f 100644
+index 1f93c9b..776eb39 100644
 --- a/voice-app/lib/outbound-routes.js
 +++ b/voice-app/lib/outbound-routes.js
 @@ -11,6 +11,8 @@ const logger = require('./logger');
@@ -1909,7 +1909,7 @@ index 1f93c9b..6f37d0f 100644
  const { initiateOutboundCall, playMessage, hangupCall } = require('./outbound-handler');
  const { runConversationLoop } = require('./conversation-loop');
 +// Parche 32: llamar a otras personas por la línea fija, con el backend de cerebro.
-+const { runConversacionTercero } = require('./conversacion-tercero');
++const { runConversacionTercero, prepararLlamada } = require('./conversacion-tercero');
  
  // Dependencies injected via setupRoutes()
  var srf = null;
@@ -2024,7 +2024,7 @@ index 1f93c9b..6f37d0f 100644
          logger.error('Conversation mode dependencies not ready', {
            audioForkServer: !!audioForkServer,
            whisperClient: !!whisperClient,
-@@ -212,26 +273,109 @@ router.post('/outbound-call', async function(req, res) {
+@@ -212,26 +273,113 @@ router.post('/outbound-call', async function(req, res) {
  
      // Continue asynchronously
      (async function() {
@@ -2041,6 +2041,19 @@ index 1f93c9b..6f37d0f 100644
        try {
          session.transition('DIALING');
  
++        // Parche 43: Jarvis se prepara antes de marcar (la presentación entera y el guion
++        // con su voz), no mientras suena: al descolgar no queda nada por generar. Antes de
++        // registrar la línea, que solo se tiene mientras dura una llamada.
++        var preparado = tercero
++          ? await prepararLlamada({
++              tercero: tercero,
++              apertura: message,
++              voiceId: (deviceConfig && deviceConfig.voiceId) ? deviceConfig.voiceId : null,
++              ttsService: ttsService,
++              log: function(m) { logger.info(m, { callId: callId }); }
++            })
++          : null;
++
 +        if (tercero) {
 +          // Parche 32: registrar la línea antes de marcar; se suelta al acabar (finally).
 +          try {
@@ -2051,17 +2064,6 @@ index 1f93c9b..6f37d0f 100644
 +            throw new Error('service_unavailable');
 +          }
 +        }
-+
-+        // La presentación se pide a la voz ya, mientras suena: al descolgar está lista y
-+        // no se pagan sus ~0,7-1,5 s. La voz en directo guarda la frase entera y la sirve
-+        // desde el principio cuando FreeSWITCH la pide (5 min de vida, de sobra para 30 s
-+        // de timbre). Si falla, la conversación la pide otra vez al descolgar.
-+        var aperturaUrl = tercero
-+          ? ttsService.generateSpeech(message, (deviceConfig && deviceConfig.voiceId) ? deviceConfig.voiceId : null).catch(function(e) {
-+              logger.warn('Presentación anticipada fallida', { callId: callId, error: e.message });
-+              return null;
-+            })
-+          : null;
 +
          var result = await initiateOutboundCall(srf, mediaServer, {
            to: to,
@@ -2092,7 +2094,9 @@ index 1f93c9b..6f37d0f 100644
 +            wsPort: wsPort,
 +            tercero: tercero,
 +            apertura: message,
-+            aperturaUrl: aperturaUrl,
++            aperturaUrl: preparado.aperturaUrl,
++            guion: preparado.guion,
++            guionListo: preparado.guionListo,
 +            voiceId: voiceId,
 +            onTurno: function(quien, texto) {
 +              session.turnCount++;
@@ -2136,7 +2140,7 @@ index 1f93c9b..6f37d0f 100644
          await playMessage(endpoint, message, { voiceId: voiceId });
  
          if (mode === 'announce') {
-@@ -247,7 +391,7 @@ router.post('/outbound-call', async function(req, res) {
+@@ -247,7 +395,7 @@ router.post('/outbound-call', async function(req, res) {
            session.transition('CONVERSING');
  
            try {
@@ -2145,7 +2149,7 @@ index 1f93c9b..6f37d0f 100644
                audioForkServer: audioForkServer,
                whisperClient: whisperClient,
                claudeBridge: claudeBridge,
-@@ -257,11 +401,19 @@ router.post('/outbound-call', async function(req, res) {
+@@ -257,11 +405,19 @@ router.post('/outbound-call', async function(req, res) {
                initialContext: message,
                context: context,           // NEW: pass structured context
                skipGreeting: true,
@@ -2167,7 +2171,7 @@ index 1f93c9b..6f37d0f 100644
  
            } catch (convError) {
              logger.error('Conversation loop error', {
-@@ -285,8 +437,22 @@ router.post('/outbound-call', async function(req, res) {
+@@ -285,8 +441,22 @@ router.post('/outbound-call', async function(req, res) {
          else if (error.message === 'no_answer') reason = 'no_answer';
          else if (error.message === 'not_found') reason = 'not_found';
          else if (error.message === 'service_unavailable') reason = 'service_unavailable';
@@ -2191,7 +2195,7 @@ index 1f93c9b..6f37d0f 100644
        }
      })();
  
-@@ -395,6 +561,7 @@ function setupRoutes(deps) {
+@@ -395,6 +565,7 @@ function setupRoutes(deps) {
    claudeBridge = deps.claudeBridge || null;
    ttsService = deps.ttsService || null;
    wsPort = deps.wsPort || 3001;
@@ -2680,7 +2684,7 @@ index 3fd7e7b..1b66ee5 100644
      } catch (e) {}
    } finally {
 diff --git a/voice-app/lib/tts-service.js b/voice-app/lib/tts-service.js
-index 234b7b5..28f4c43 100644
+index 234b7b5..27f884d 100644
 --- a/voice-app/lib/tts-service.js
 +++ b/voice-app/lib/tts-service.js
 @@ -1,12 +1,36 @@
@@ -2887,8 +2891,8 @@ index 234b7b5..28f4c43 100644
 +    },
 +    data: ssml(text, AZURE_SPEECH_VOICE)
 +  };
-+}
-+
+ }
+ 
 +// Aquí no hay marcado: el texto va como campo de un JSON.
 +function peticionFish(text) {
 +  const datos = { text: text, format: 'mp3', latency: FISH_AUDIO_LATENCIA };
@@ -2900,8 +2904,8 @@ index 234b7b5..28f4c43 100644
 +               'Content-Type': 'application/json' },
 +    data: datos
 +  };
- }
- 
++}
++
 +// Una voz con `peticion` y sin `sintetizar` se sintetiza entera igual, si no va en directo
 +for (const v of Object.keys(VOCES)) {
 +  if (!VOCES[v].sintetizar && VOCES[v].peticion) {
@@ -3087,11 +3091,7 @@ index 234b7b5..28f4c43 100644
 +  const huella = crypto.createHash('md5').update([FISH_AUDIO_MODEL, FISH_AUDIO_VOICE, text].join('|')).digest('hex').slice(0, 16);
 +  return 'fija-' + huella + '.mp3';
 +}
- 
--    // Return HTTP URL (assumes audio-temp is served via HTTP)
--    // Format: http://localhost:PORT/audio/filename.mp3
--    // The HTTP server setup is handled elsewhere
--    const audioUrl = `http://127.0.0.1:3000/audio-files/${filename}`;
++
 +async function prepararFrasesFijas(frases) {
 +  if (!FISH_AUDIO_API_KEY) return;
 +  fs.mkdirSync(DIR_FIJAS, { recursive: true });
@@ -3113,7 +3113,10 @@ index 234b7b5..28f4c43 100644
 +  logger.info('Frases fijas listas', { total: fijas.size, nuevas });
 +}
  
--    return audioUrl;
+-    // Return HTTP URL (assumes audio-temp is served via HTTP)
+-    // Format: http://localhost:PORT/audio/filename.mp3
+-    // The HTTP server setup is handled elsewhere
+-    const audioUrl = `http://127.0.0.1:3000/audio-files/${filename}`;
 +// ── Parche 34: la respuesta se sintetiza en cuanto Claude la tiene, aunque aún suene la
 +// frase de espera. El generateSpeech que venga después con ese texto se la encuentra.
 +const anticipadas = new Map();
@@ -3127,16 +3130,7 @@ index 234b7b5..28f4c43 100644
 +  if (reloj.unref) reloj.unref();
 +}
  
--  } catch (error) {
--    const latency = Date.now() - startTime;
--
--    logger.error('Speech generation failed', {
--      error: error.message,
--      latency,
--      textLength: text?.length,
--      responseStatus: error.response?.status,
--      responseData: error.response?.data?.toString()
--    });
+-    return audioUrl;
 +async function generateSpeech(text, voiceId = DEFAULT_VOICE_ID) {
 +  // Mirando el disco cada vez: que falte el fichero no puede costar una llamada.
 +  if (fijas.has(text) && fs.existsSync(path.join(DIR_FIJAS, ficheroFija(text)))) {
@@ -3150,14 +3144,16 @@ index 234b7b5..28f4c43 100644
 +  return generar(text, voiceId);
 +}
  
--    // Handle specific errors
--    if (error.response?.status === 401) {
--      throw new Error('ElevenLabs API authentication failed - check API key');
--    } else if (error.response?.status === 429) {
--      throw new Error('ElevenLabs API rate limit exceeded');
--    } else if (error.response?.status === 400) {
--      throw new Error('Invalid request to ElevenLabs API');
--    }
+-  } catch (error) {
+-    const latency = Date.now() - startTime;
+-
+-    logger.error('Speech generation failed', {
+-      error: error.message,
+-      latency,
+-      textLength: text?.length,
+-      responseStatus: error.response?.status,
+-      responseData: error.response?.data?.toString()
+-    });
 +async function generar(text, voiceId = DEFAULT_VOICE_ID) {
 +  const startTime = Date.now();
 +  const orden = ordenDeVoces().filter(function (v) { return VOCES[v].configurada(); });
@@ -3165,7 +3161,13 @@ index 234b7b5..28f4c43 100644
 +    throw new Error('TTS generation failed: no hay ninguna voz configurada (ELEVENLABS_API_KEY o AZURE_SPEECH_*)');
 +  }
  
--    throw new Error(`TTS generation failed: ${error.message}`);
+-    // Handle specific errors
+-    if (error.response?.status === 401) {
+-      throw new Error('ElevenLabs API authentication failed - check API key');
+-    } else if (error.response?.status === 429) {
+-      throw new Error('ElevenLabs API rate limit exceeded');
+-    } else if (error.response?.status === 400) {
+-      throw new Error('Invalid request to ElevenLabs API');
 +  // Las apartadas van al final, no fuera: si todas lo están, se prueban igual antes
 +  // que dejar la llamada muda.
 +  const ahora = Date.now();
@@ -3217,7 +3219,9 @@ index 234b7b5..28f4c43 100644
 +        responseData: cuerpoDelError(error),
 +        apartadaMs: pausa
 +      });
-+    }
+     }
+-
+-    throw new Error(`TTS generation failed: ${error.message}`);
    }
 +
 +  throw new Error(`TTS generation failed: ninguna voz ha podido (${ultimo && ultimo.message})`);
@@ -3233,7 +3237,7 @@ index 234b7b5..28f4c43 100644
          return;
        }
  
-@@ -197,13 +540,16 @@ async function getAvailableVoices() {
+@@ -197,13 +540,36 @@ async function getAvailableVoices() {
  // Initialize audio directory
  setAudioDir(audioDir);
  
@@ -3243,9 +3247,29 @@ index 234b7b5..28f4c43 100644
    cleanupOldFiles();
 -}, 30 * 60 * 1000);
 +}, 30 * 60 * 1000).unref();
++
++/**
++ * Parche 43: espera a que una frase en directo haya llegado ENTERA (true), o falle o pase
++ * `maxMs` (false). Para las URLs que no son en directo (un fichero ya escrito, una frase
++ * fija) no hay nada que esperar. Las llamadas a otros no marcan hasta tener así su
++ * presentación: lo que suene al descolgar ya está en casa.
++ */
++function esperarAcabada(url, maxMs) {
++  const m = /\/tts-stream\/([0-9a-f]+)\.mp3$/.exec(String(url || ''));
++  if (!m) return Promise.resolve(Boolean(url));
++  const d = directos.get(m[1]);
++  if (!d) return Promise.resolve(false);
++  if (d.acabado) return Promise.resolve(!d.error);
++  return new Promise(function (resolve) {
++    const alFin = function () { clearTimeout(reloj); resolve(!d.error); };
++    const reloj = setTimeout(function () { d.avisos.off('fin', alFin); resolve(false); }, maxMs || 10000);
++    d.avisos.once('fin', alFin);
++  });
++}
  
  module.exports = {
    generateSpeech,
++  esperarAcabada,
 +  prepararFrasesFijas,
 +  anticipar,
 +  servirEnDirecto,

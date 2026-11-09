@@ -14,10 +14,13 @@
  *     es media frase. Pero sin la espera de una frase normal (`esperarSaludo`): los 1,5 s
  *     de silencio que cierran un turno, más 4 s de tope, eran casi todo el retraso entre
  *     descolgar y oír algo (~4,8 s el 2026-11-01).
- *   - **Lo que se puede, por adelantado.** La presentación se genera mientras suena, el
- *     backend (Claude) prepara un guion con las respuestas probables y aquí se genera su
- *     voz mientras habla el otro (`prepararGuion`): si la respuesta es del guion, suena al
- *     instante. Y se transcribe con el modelo pequeño del oído (`conModeloRapido`).
+ *   - **Lo que se puede, por adelantado.** El backend (Claude) prepara un guion con las
+ *     respuestas probables y aquí se genera su voz (`prepararGuion`): si la respuesta es
+ *     del guion, suena al instante. Y se transcribe con el modelo pequeño del oído
+ *     (`conModeloRapido`).
+ *   - **Preparado antes de marcar (parche 43).** La presentación entera y el guion con su
+ *     voz, antes de que suene el teléfono del otro (`prepararLlamada`, en
+ *     outbound-routes.js): al descolgar no queda nada por generar.
  *   - Nada de lectura, confirmaciones ni escucha pasiva: aquí no hay nada de eso que hacer.
  *   - **Sin barge-in (parche 35).** Jarvis dice su frase entera, con el oído cerrado: lo
  *     que el otro diga encima no le corta ni cuenta como turno. Mikel lo quiso así
@@ -28,9 +31,13 @@ const { armarAnticipo, transcribirFrase } = require('./anticipo');
 
 // El saludo: tope total, lo que se espera a que empiece a hablar y el silencio que lo da
 // por dicho (un «¿Sí?» no necesita los 1,5 s de `endSilenceMs`).
+// Parche 43: 1,2 s y 350 ms (eran 2 s y 450). Mikel oía unos 3 s de silencio al descolgar
+// (2026-11-09). En la llamada del 2026-11-08 a las 20:25 nadie dijo nada: Jarvis esperó
+// los 2 s enteros y después el otro colgó. Quien coge dice su «¿Sí?» en menos de un
+// segundo; si a los 1,2 s no ha empezado, no lo va a decir.
 const ESPERA_SALUDO_MS = 3000;
-const SALUDO_NADIE_MS = 2000;
-const SALUDO_SILENCIO_MS = 450;
+const SALUDO_NADIE_MS = 1200;
+const SALUDO_SILENCIO_MS = 350;
 const SALUDO_SONDEO_MS = 50;
 // La voz mínima para que una frase cuente. La de siempre (350 ms, audio-fork.js) tiraba
 // un «sí» suelto de 300 ms (2026-11-01), y aquí un «sí» o un «vale» es justo la
@@ -98,6 +105,16 @@ function duracionMs(audio) {
 }
 
 /**
+ * Parche 43: cuánto ha HABLADO en el saludo, no cuánto audio hay. El audio lleva delante
+ * el pre-roll y el silencio de antes de hablar: un «¿Quién?» de 1,4 s de voz llegó con
+ * 3,3 s de audio (2026-11-08), pasó por locución y Jarvis esperó a la transcripción
+ * (~0,4 s más) antes de presentarse.
+ */
+function habladoMs(saludo) {
+  return saludo && typeof saludo.speechMs === 'number' ? saludo.speechMs : duracionMs(saludo && saludo.audio);
+}
+
+/**
  * Espera el «¿Sí?» de quien descuelga, sin la espera de un turno normal. Vuelve con
  * {audio} en cuanto, tras hablar, lleva SALUDO_SILENCIO_MS callado (o la frase se cierra
  * sola); con null si en SALUDO_NADIE_MS no ha empezado a hablar; y si a los
@@ -117,8 +134,10 @@ function esperarSaludo(session) {
       resolver(u || null);
     };
     const loDicho = function () {
-      return session._utteranceChunks && session._utteranceChunks.length
-        ? { audio: Buffer.concat(session._utteranceChunks) } : null;
+      if (!session._utteranceChunks || !session._utteranceChunks.length) return null;
+      const u = { audio: Buffer.concat(session._utteranceChunks) };
+      if (typeof session._speechBytes === 'number') u.speechMs = duracionMs({ length: session._speechBytes });
+      return u;
     };
     const alAcabar = function (u) { acabar(u); };
     session.on('utterance', alAcabar);
@@ -200,17 +219,18 @@ function conModeloRapido(whisperClient) {
 
 /**
  * Pide al backend las frases del guion y genera su voz ya, en `cache` (texto → promesa de
- * URL). Pregunta hasta que esté (`listo`) o pasen GUION_ESPERA_MS. Nunca lanza.
+ * URL). Pregunta hasta que esté (`listo`) o pasen `esperaMs` (GUION_ESPERA_MS). Nunca
+ * lanza. Vuelve con true si ya no hay nada más que esperar del backend, false si se cansó.
  */
-async function prepararGuion(o, cache, voiceId, log) {
+async function prepararGuion(o, cache, voiceId, log, esperaMs) {
   const fetchFn = o.fetch || fetch;
   const url = backendUrl() + '/telefono/tercero/' + encodeURIComponent(o.tercero) + '/guion';
-  const hasta = Date.now() + GUION_ESPERA_MS;
+  const hasta = Date.now() + (esperaMs || GUION_ESPERA_MS);
   while (Date.now() < hasta) {
     try {
       const r = await fetchFn(url, { headers: { 'X-Auth-Token': process.env.TELEFONO_TERCEROS_TOKEN || '' },
                                      signal: AbortSignal.timeout(3000) });
-      if (r.status === 404) return;
+      if (r.status === 404) return true;
       if (r.ok) {
         const d = await r.json();
         const frases = Array.isArray(d && d.frases) ? d.frases : [];
@@ -222,12 +242,67 @@ async function prepararGuion(o, cache, voiceId, log) {
         }
         if (frases.length || (d && d.listo)) {
           log('TERCERO: guion de ' + frases.length + ' frases, voz pedida por adelantado');
-          return;
+          return true;
         }
       }
     } catch (e) { /* el backend tarda o no está: se vuelve a preguntar */ }
     await new Promise(function (r) { setTimeout(r, o.guionSondeoMs || GUION_SONDEO_MS); });
   }
+  return false;
+}
+
+// Parche 43: lo más que se espera, antes de marcar, a tener la presentación y el guion con
+// su voz; y cada cuánto se pregunta entonces por el guion (aquí cada décima cuenta).
+const PREPARAR_TOPE_MS = 12000;
+const PREPARAR_SONDEO_MS = 250;
+
+/**
+ * Parche 43: Jarvis se prepara ANTES de marcar, no mientras suena. Mikel lo pidió así
+ * (2026-11-09): «si no está preparado para hablar, que primero se prepare y luego llame».
+ * Hasta ahora la presentación se pedía a la voz al marcar (casi siempre a tiempo, pero sin
+ * garantía) y el guion se pedía al descolgar, con seis voces generándose a la vez justo
+ * cuando había que hablar. Ahora se marca cuando:
+ *   - la presentación ha llegado ENTERA de la voz (`esperarAcabada`), y
+ *   - el backend tiene el guion (su Claude ya está abierto y pensado) y la voz de cada
+ *     frase ha llegado entera.
+ * Con PREPARAR_TOPE_MS de tope: si algo no llega, se marca igual con lo que haya (y el
+ * guion se sigue pidiendo durante la llamada, como antes). Nunca lanza.
+ * @returns {Promise<{aperturaUrl: Promise<string|null>, guion: Map, guionListo: boolean}>}
+ */
+async function prepararLlamada(o) {
+  const log = o.log || function () {};
+  const inicio = Date.now();
+  const voiceId = o.voiceId || null;
+  const tts = o.ttsService;
+  const tope = o.prepararTopeMs || PREPARAR_TOPE_MS;
+  const acabada = function (url) {
+    if (!url) return Promise.resolve(false);
+    return typeof tts.esperarAcabada === 'function' ? tts.esperarAcabada(url, tope) : Promise.resolve(true);
+  };
+  const aperturaUrl = Promise.resolve()
+    .then(function () { return tts.generateSpeech(o.apertura, voiceId); })
+    .catch(function (e) { log('TERCERO: presentación anticipada fallida (' + e.message + ')'); return null; });
+  const guion = new Map();
+  let guionListo = false;
+  let aperturaLista = false;
+  const trabajo = Promise.all([
+    aperturaUrl.then(acabada).then(function (ok) { aperturaLista = ok; }),
+    prepararGuion(Object.assign({}, o, { guionSondeoMs: o.guionSondeoMs || PREPARAR_SONDEO_MS }), guion, voiceId, log, tope)
+      .then(function (listo) {
+        guionListo = listo;
+        return Promise.all(Array.from(guion.values()).map(function (p) { return p.then(acabada); }));
+      })
+  ]).catch(function () {});
+  let reloj = null;
+  const aTiempo = await Promise.race([
+    trabajo.then(function () { return true; }),
+    new Promise(function (r) { reloj = setTimeout(function () { r(false); }, tope); })
+  ]);
+  clearTimeout(reloj);
+  log('TERCERO: preparado en ' + (Date.now() - inicio) + ' ms (presentación ' +
+      (aperturaLista ? 'entera' : 'SIN terminar') + ', guion de ' + guion.size + ' frases' +
+      (guionListo ? '' : ', SIN terminar') + ')' + (aTiempo ? '' : '; tope, marco igual'));
+  return { aperturaUrl: aperturaUrl, guion: guion, guionListo: guionListo };
 }
 
 /**
@@ -338,8 +413,10 @@ async function runConversacionTercero(endpoint, dialog, callId, o) {
   let desarmar = function () {};
   let fin = 'max_turns';
   const oido = conModeloRapido(o.whisperClient);
-  const guion = new Map();
-  prepararGuion(o, guion, voiceId, log);
+  // Parche 43: el guion ya viene preparado de antes de marcar (`prepararLlamada`); si no
+  // llegó a tiempo, se sigue pidiendo ahora, como antes.
+  const guion = o.guion instanceof Map ? o.guion : new Map();
+  if (!o.guionListo) prepararGuion(o, guion, voiceId, log);
 
   const decir = async function (texto, previa) {
     if (o.onTurno) o.onTurno('jarvis', texto);
@@ -379,7 +456,7 @@ async function runConversacionTercero(endpoint, dialog, callId, o) {
     let transcrito = null;
     if (saludo && activa) {
       transcrito = transcribirFrase(oido, saludo, log).catch(function () { return ''; });
-      if (saludo.larga || duracionMs(saludo.audio) >= SALUDO_LARGO_MS) {
+      if (saludo.larga || habladoMs(saludo) >= SALUDO_LARGO_MS) {
         const t = String(await Promise.race([transcrito, dormir(BUZON_TRANSCRIPCION_MS).then(function () { return ''; })]) || '');
         buzon = BUZON_RE.test(t);
         if (buzon && activa) {
@@ -504,4 +581,4 @@ async function runConversacionTercero(endpoint, dialog, callId, o) {
 }
 
 module.exports = { runConversacionTercero, preguntarAlBackend, esperarConsulta, esperarSaludo, esperarLocucion,
-                   esperarSilencio, prepararGuion, conModeloRapido, FRASES };
+                   esperarSilencio, prepararGuion, prepararLlamada, conModeloRapido, FRASES };

@@ -1,0 +1,529 @@
+--- a/voice-app/lib/conversacion-tercero.js
++++ b/voice-app/lib/conversacion-tercero.js
+@@ -14,10 +14,13 @@
+  *     es media frase. Pero sin la espera de una frase normal (`esperarSaludo`): los 1,5 s
+  *     de silencio que cierran un turno, más 4 s de tope, eran casi todo el retraso entre
+  *     descolgar y oír algo (~4,8 s el 2026-11-01).
+- *   - **Lo que se puede, por adelantado.** La presentación se genera mientras suena, el
+- *     backend (Claude) prepara un guion con las respuestas probables y aquí se genera su
+- *     voz mientras habla el otro (`prepararGuion`): si la respuesta es del guion, suena al
+- *     instante. Y se transcribe con el modelo pequeño del oído (`conModeloRapido`).
++ *   - **Lo que se puede, por adelantado.** El backend (Claude) prepara un guion con las
++ *     respuestas probables y aquí se genera su voz (`prepararGuion`): si la respuesta es
++ *     del guion, suena al instante. Y se transcribe con el modelo pequeño del oído
++ *     (`conModeloRapido`).
++ *   - **Preparado antes de marcar (parche 43).** La presentación entera y el guion con su
++ *     voz, antes de que suene el teléfono del otro (`prepararLlamada`, en
++ *     outbound-routes.js): al descolgar no queda nada por generar.
+  *   - Nada de lectura, confirmaciones ni escucha pasiva: aquí no hay nada de eso que hacer.
+  *   - **Sin barge-in (parche 35).** Jarvis dice su frase entera, con el oído cerrado: lo
+  *     que el otro diga encima no le corta ni cuenta como turno. Mikel lo quiso así
+@@ -28,9 +31,13 @@
+ 
+ // El saludo: tope total, lo que se espera a que empiece a hablar y el silencio que lo da
+ // por dicho (un «¿Sí?» no necesita los 1,5 s de `endSilenceMs`).
++// Parche 43: 1,2 s y 350 ms (eran 2 s y 450). Mikel oía unos 3 s de silencio al descolgar
++// (2026-11-09). En la llamada del 2026-11-08 a las 20:25 nadie dijo nada: Jarvis esperó
++// los 2 s enteros y después el otro colgó. Quien coge dice su «¿Sí?» en menos de un
++// segundo; si a los 1,2 s no ha empezado, no lo va a decir.
+ const ESPERA_SALUDO_MS = 3000;
+-const SALUDO_NADIE_MS = 2000;
+-const SALUDO_SILENCIO_MS = 450;
++const SALUDO_NADIE_MS = 1200;
++const SALUDO_SILENCIO_MS = 350;
+ const SALUDO_SONDEO_MS = 50;
+ // La voz mínima para que una frase cuente. La de siempre (350 ms, audio-fork.js) tiraba
+ // un «sí» suelto de 300 ms (2026-11-01), y aquí un «sí» o un «vale» es justo la
+@@ -98,6 +105,16 @@
+ }
+ 
+ /**
++ * Parche 43: cuánto ha HABLADO en el saludo, no cuánto audio hay. El audio lleva delante
++ * el pre-roll y el silencio de antes de hablar: un «¿Quién?» de 1,4 s de voz llegó con
++ * 3,3 s de audio (2026-11-08), pasó por locución y Jarvis esperó a la transcripción
++ * (~0,4 s más) antes de presentarse.
++ */
++function habladoMs(saludo) {
++  return saludo && typeof saludo.speechMs === 'number' ? saludo.speechMs : duracionMs(saludo && saludo.audio);
++}
++
++/**
+  * Espera el «¿Sí?» de quien descuelga, sin la espera de un turno normal. Vuelve con
+  * {audio} en cuanto, tras hablar, lleva SALUDO_SILENCIO_MS callado (o la frase se cierra
+  * sola); con null si en SALUDO_NADIE_MS no ha empezado a hablar; y si a los
+@@ -117,8 +134,10 @@
+       resolver(u || null);
+     };
+     const loDicho = function () {
+-      return session._utteranceChunks && session._utteranceChunks.length
+-        ? { audio: Buffer.concat(session._utteranceChunks) } : null;
++      if (!session._utteranceChunks || !session._utteranceChunks.length) return null;
++      const u = { audio: Buffer.concat(session._utteranceChunks) };
++      if (typeof session._speechBytes === 'number') u.speechMs = duracionMs({ length: session._speechBytes });
++      return u;
+     };
+     const alAcabar = function (u) { acabar(u); };
+     session.on('utterance', alAcabar);
+@@ -200,17 +219,18 @@
+ 
+ /**
+  * Pide al backend las frases del guion y genera su voz ya, en `cache` (texto → promesa de
+- * URL). Pregunta hasta que esté (`listo`) o pasen GUION_ESPERA_MS. Nunca lanza.
++ * URL). Pregunta hasta que esté (`listo`) o pasen `esperaMs` (GUION_ESPERA_MS). Nunca
++ * lanza. Vuelve con true si ya no hay nada más que esperar del backend, false si se cansó.
+  */
+-async function prepararGuion(o, cache, voiceId, log) {
++async function prepararGuion(o, cache, voiceId, log, esperaMs) {
+   const fetchFn = o.fetch || fetch;
+   const url = backendUrl() + '/telefono/tercero/' + encodeURIComponent(o.tercero) + '/guion';
+-  const hasta = Date.now() + GUION_ESPERA_MS;
++  const hasta = Date.now() + (esperaMs || GUION_ESPERA_MS);
+   while (Date.now() < hasta) {
+     try {
+       const r = await fetchFn(url, { headers: { 'X-Auth-Token': process.env.TELEFONO_TERCEROS_TOKEN || '' },
+                                      signal: AbortSignal.timeout(3000) });
+-      if (r.status === 404) return;
++      if (r.status === 404) return true;
+       if (r.ok) {
+         const d = await r.json();
+         const frases = Array.isArray(d && d.frases) ? d.frases : [];
+@@ -222,12 +242,67 @@
+         }
+         if (frases.length || (d && d.listo)) {
+           log('TERCERO: guion de ' + frases.length + ' frases, voz pedida por adelantado');
+-          return;
++          return true;
+         }
+       }
+     } catch (e) { /* el backend tarda o no está: se vuelve a preguntar */ }
+     await new Promise(function (r) { setTimeout(r, o.guionSondeoMs || GUION_SONDEO_MS); });
+   }
++  return false;
++}
++
++// Parche 43: lo más que se espera, antes de marcar, a tener la presentación y el guion con
++// su voz; y cada cuánto se pregunta entonces por el guion (aquí cada décima cuenta).
++const PREPARAR_TOPE_MS = 12000;
++const PREPARAR_SONDEO_MS = 250;
++
++/**
++ * Parche 43: Jarvis se prepara ANTES de marcar, no mientras suena. Mikel lo pidió así
++ * (2026-11-09): «si no está preparado para hablar, que primero se prepare y luego llame».
++ * Hasta ahora la presentación se pedía a la voz al marcar (casi siempre a tiempo, pero sin
++ * garantía) y el guion se pedía al descolgar, con seis voces generándose a la vez justo
++ * cuando había que hablar. Ahora se marca cuando:
++ *   - la presentación ha llegado ENTERA de la voz (`esperarAcabada`), y
++ *   - el backend tiene el guion (su Claude ya está abierto y pensado) y la voz de cada
++ *     frase ha llegado entera.
++ * Con PREPARAR_TOPE_MS de tope: si algo no llega, se marca igual con lo que haya (y el
++ * guion se sigue pidiendo durante la llamada, como antes). Nunca lanza.
++ * @returns {Promise<{aperturaUrl: Promise<string|null>, guion: Map, guionListo: boolean}>}
++ */
++async function prepararLlamada(o) {
++  const log = o.log || function () {};
++  const inicio = Date.now();
++  const voiceId = o.voiceId || null;
++  const tts = o.ttsService;
++  const tope = o.prepararTopeMs || PREPARAR_TOPE_MS;
++  const acabada = function (url) {
++    if (!url) return Promise.resolve(false);
++    return typeof tts.esperarAcabada === 'function' ? tts.esperarAcabada(url, tope) : Promise.resolve(true);
++  };
++  const aperturaUrl = Promise.resolve()
++    .then(function () { return tts.generateSpeech(o.apertura, voiceId); })
++    .catch(function (e) { log('TERCERO: presentación anticipada fallida (' + e.message + ')'); return null; });
++  const guion = new Map();
++  let guionListo = false;
++  let aperturaLista = false;
++  const trabajo = Promise.all([
++    aperturaUrl.then(acabada).then(function (ok) { aperturaLista = ok; }),
++    prepararGuion(Object.assign({}, o, { guionSondeoMs: o.guionSondeoMs || PREPARAR_SONDEO_MS }), guion, voiceId, log, tope)
++      .then(function (listo) {
++        guionListo = listo;
++        return Promise.all(Array.from(guion.values()).map(function (p) { return p.then(acabada); }));
++      })
++  ]).catch(function () {});
++  let reloj = null;
++  const aTiempo = await Promise.race([
++    trabajo.then(function () { return true; }),
++    new Promise(function (r) { reloj = setTimeout(function () { r(false); }, tope); })
++  ]);
++  clearTimeout(reloj);
++  log('TERCERO: preparado en ' + (Date.now() - inicio) + ' ms (presentación ' +
++      (aperturaLista ? 'entera' : 'SIN terminar') + ', guion de ' + guion.size + ' frases' +
++      (guionListo ? '' : ', SIN terminar') + ')' + (aTiempo ? '' : '; tope, marco igual'));
++  return { aperturaUrl: aperturaUrl, guion: guion, guionListo: guionListo };
+ }
+ 
+ /**
+@@ -338,8 +413,10 @@
+   let desarmar = function () {};
+   let fin = 'max_turns';
+   const oido = conModeloRapido(o.whisperClient);
+-  const guion = new Map();
+-  prepararGuion(o, guion, voiceId, log);
++  // Parche 43: el guion ya viene preparado de antes de marcar (`prepararLlamada`); si no
++  // llegó a tiempo, se sigue pidiendo ahora, como antes.
++  const guion = o.guion instanceof Map ? o.guion : new Map();
++  if (!o.guionListo) prepararGuion(o, guion, voiceId, log);
+ 
+   const decir = async function (texto, previa) {
+     if (o.onTurno) o.onTurno('jarvis', texto);
+@@ -379,7 +456,7 @@
+     let transcrito = null;
+     if (saludo && activa) {
+       transcrito = transcribirFrase(oido, saludo, log).catch(function () { return ''; });
+-      if (saludo.larga || duracionMs(saludo.audio) >= SALUDO_LARGO_MS) {
++      if (saludo.larga || habladoMs(saludo) >= SALUDO_LARGO_MS) {
+         const t = String(await Promise.race([transcrito, dormir(BUZON_TRANSCRIPCION_MS).then(function () { return ''; })]) || '');
+         buzon = BUZON_RE.test(t);
+         if (buzon && activa) {
+@@ -504,4 +581,4 @@
+ }
+ 
+ module.exports = { runConversacionTercero, preguntarAlBackend, esperarConsulta, esperarSaludo, esperarLocucion,
+-                   esperarSilencio, prepararGuion, conModeloRapido, FRASES };
++                   esperarSilencio, prepararGuion, prepararLlamada, conModeloRapido, FRASES };
+--- a/voice-app/lib/outbound-routes.js
++++ b/voice-app/lib/outbound-routes.js
+@@ -12,7 +12,7 @@
+ const { initiateOutboundCall, playMessage, hangupCall } = require('./outbound-handler');
+ const { runConversationLoop } = require('./conversation-loop');
+ // Parche 32: llamar a otras personas por la línea fija, con el backend de cerebro.
+-const { runConversacionTercero } = require('./conversacion-tercero');
++const { runConversacionTercero, prepararLlamada } = require('./conversacion-tercero');
+ 
+ // Dependencies injected via setupRoutes()
+ var srf = null;
+@@ -286,6 +286,19 @@
+       try {
+         session.transition('DIALING');
+ 
++        // Parche 43: Jarvis se prepara antes de marcar (la presentación entera y el guion
++        // con su voz), no mientras suena: al descolgar no queda nada por generar. Antes de
++        // registrar la línea, que solo se tiene mientras dura una llamada.
++        var preparado = tercero
++          ? await prepararLlamada({
++              tercero: tercero,
++              apertura: message,
++              voiceId: (deviceConfig && deviceConfig.voiceId) ? deviceConfig.voiceId : null,
++              ttsService: ttsService,
++              log: function(m) { logger.info(m, { callId: callId }); }
++            })
++          : null;
++
+         if (tercero) {
+           // Parche 32: registrar la línea antes de marcar; se suelta al acabar (finally).
+           try {
+@@ -297,17 +310,6 @@
+           }
+         }
+ 
+-        // La presentación se pide a la voz ya, mientras suena: al descolgar está lista y
+-        // no se pagan sus ~0,7-1,5 s. La voz en directo guarda la frase entera y la sirve
+-        // desde el principio cuando FreeSWITCH la pide (5 min de vida, de sobra para 30 s
+-        // de timbre). Si falla, la conversación la pide otra vez al descolgar.
+-        var aperturaUrl = tercero
+-          ? ttsService.generateSpeech(message, (deviceConfig && deviceConfig.voiceId) ? deviceConfig.voiceId : null).catch(function(e) {
+-              logger.warn('Presentación anticipada fallida', { callId: callId, error: e.message });
+-              return null;
+-            })
+-          : null;
+-
+         var result = await initiateOutboundCall(srf, mediaServer, {
+           to: to,
+           message: message,
+@@ -336,7 +338,9 @@
+             wsPort: wsPort,
+             tercero: tercero,
+             apertura: message,
+-            aperturaUrl: aperturaUrl,
++            aperturaUrl: preparado.aperturaUrl,
++            guion: preparado.guion,
++            guionListo: preparado.guionListo,
+             voiceId: voiceId,
+             onTurno: function(quien, texto) {
+               session.turnCount++;
+--- a/voice-app/lib/tts-service.js
++++ b/voice-app/lib/tts-service.js
+@@ -545,8 +545,28 @@
+   cleanupOldFiles();
+ }, 30 * 60 * 1000).unref();
+ 
++/**
++ * Parche 43: espera a que una frase en directo haya llegado ENTERA (true), o falle o pase
++ * `maxMs` (false). Para las URLs que no son en directo (un fichero ya escrito, una frase
++ * fija) no hay nada que esperar. Las llamadas a otros no marcan hasta tener así su
++ * presentación: lo que suene al descolgar ya está en casa.
++ */
++function esperarAcabada(url, maxMs) {
++  const m = /\/tts-stream\/([0-9a-f]+)\.mp3$/.exec(String(url || ''));
++  if (!m) return Promise.resolve(Boolean(url));
++  const d = directos.get(m[1]);
++  if (!d) return Promise.resolve(false);
++  if (d.acabado) return Promise.resolve(!d.error);
++  return new Promise(function (resolve) {
++    const alFin = function () { clearTimeout(reloj); resolve(!d.error); };
++    const reloj = setTimeout(function () { d.avisos.off('fin', alFin); resolve(false); }, maxMs || 10000);
++    d.avisos.once('fin', alFin);
++  });
++}
++
+ module.exports = {
+   generateSpeech,
++  esperarAcabada,
+   prepararFrasesFijas,
+   anticipar,
+   servirEnDirecto,
+--- a/voice-app/test/parche32.test.js
++++ b/voice-app/test/parche32.test.js
+@@ -233,22 +233,22 @@
+   return s;
+ }
+ 
+-test('saludo: tras decir «¿Sí?» y callar 450 ms, no espera más', async () => {
++test('saludo: tras decir «¿Sí?» y callar 350 ms (parche 43; eran 450), no espera más', async () => {
+   const s = detector();
+   const t0 = Date.now();
+   setTimeout(() => { s._inSpeech = true; s._utteranceChunks = [Buffer.from('si')]; }, 100);
+-  setTimeout(() => { s._silenceMs = 500; }, 300);
++  setTimeout(() => { s._silenceMs = 360; }, 300);
+   const u = await esperarSaludo(s);
+   assert.strictEqual(u.audio.toString(), 'si');
+   assert.ok(Date.now() - t0 < 600, 'tardó ' + (Date.now() - t0) + ' ms');
+ });
+ 
+-test('saludo: si nadie habla en 2 s, se presenta sin esperar los 3', async () => {
++test('saludo: si nadie habla en 1,2 s (parche 43; eran 2), se presenta sin esperar los 3', async () => {
+   const s = detector();
+   const t0 = Date.now();
+   assert.strictEqual(await esperarSaludo(s), null);
+   const ms = Date.now() - t0;
+-  assert.ok(ms >= 1950 && ms < 2400, 'tardó ' + ms + ' ms');
++  assert.ok(ms >= 1150 && ms < 1600, 'tardó ' + ms + ' ms');
+ });
+ 
+ test('saludo: si la frase se cierra sola, vale esa', async () => {
+--- a/voice-app/test/parche43.test.js
++++ b/voice-app/test/parche43.test.js
+@@ -0,0 +1,220 @@
++/**
++ * Parche 43: en las llamadas a otros, Jarvis se prepara antes de marcar y habla antes al
++ * descolgar. Y sigue sin barge-in (parche 35).
++ *
++ * La voz, el oído y el backend son dobles: `node --test test/parche43.test.js`, dentro de la
++ * imagen y sin red.
++ */
++'use strict';
++
++const test = require('node:test');
++const assert = require('node:assert');
++const { EventEmitter } = require('node:events');
++
++for (const nivel of ['log', 'warn', 'error', 'info']) console[nivel] = function () {};
++
++const { runConversacionTercero, prepararLlamada, esperarSaludo } = require('../lib/conversacion-tercero');
++
++const TID = '11111111-2222-3333-4444-555555555555';
++const APERTURA = 'Hola, Erik. Soy Jarvis, el asistente de Mikel. ¿Comes hoy con él?';
++
++function dormir(ms) { return new Promise((r) => setTimeout(r, ms)); }
++
++/** Una voz falsa: la URL llega enseguida y el audio entero, `enteraMs` después. */
++function vozFalsa(enteraMs) {
++  const acabadas = new Set();
++  const pedidas = [];
++  return {
++    pedidas,
++    acabadas,
++    generateSpeech: async (t) => {
++      pedidas.push(t);
++      const url = 'tts:' + t;
++      setTimeout(() => acabadas.add(url), enteraMs);
++      return url;
++    },
++    esperarAcabada: async (url, maxMs) => {
++      const hasta = Date.now() + maxMs;
++      while (!acabadas.has(url) && Date.now() < hasta) await dormir(5);
++      return acabadas.has(url);
++    }
++  };
++}
++
++/** El backend del guion: `listoTras` peticiones sin guion y luego el guion entero. */
++function backendGuion(frases, listoTras) {
++  let veces = 0;
++  const fn = async (url) => {
++    assert.ok(url.endsWith('/telefono/tercero/' + TID + '/guion'), url);
++    veces++;
++    if (veces <= listoTras) return { ok: true, status: 200, json: async () => ({ frases: [], listo: false }) };
++    return { ok: true, status: 200, json: async () => ({ frases, listo: true }) };
++  };
++  fn.veces = () => veces;
++  return fn;
++}
++
++// ── Antes de marcar ──────────────────────────────────────────────────────────
++test('no vuelve hasta tener la presentación entera y el guion con su voz', async () => {
++  const voz = vozFalsa(80);
++  const fetch = backendGuion(['Perfecto, se lo digo.', 'Vale, gracias.'], 2);
++  const t0 = Date.now();
++  const p = await prepararLlamada({ tercero: TID, apertura: APERTURA, ttsService: voz, fetch, guionSondeoMs: 10 });
++  const ms = Date.now() - t0;
++  assert.strictEqual(await p.aperturaUrl, 'tts:' + APERTURA);
++  assert.ok(voz.acabadas.has('tts:' + APERTURA), 'la presentación no estaba entera');
++  assert.strictEqual(p.guionListo, true);
++  assert.deepStrictEqual(Array.from(p.guion.keys()), ['Perfecto, se lo digo.', 'Vale, gracias.']);
++  for (const f of p.guion.keys()) assert.ok(voz.acabadas.has('tts:' + f), 'sin terminar: ' + f);
++  assert.strictEqual(fetch.veces(), 3);
++  assert.ok(ms >= 80, 'volvió antes de tener la voz: ' + ms + ' ms');
++});
++
++test('si el backend no tiene el guion a tiempo, marca igual al tope y con la presentación', async () => {
++  const voz = vozFalsa(10);
++  const t0 = Date.now();
++  const p = await prepararLlamada({ tercero: TID, apertura: APERTURA, ttsService: voz,
++                                    fetch: backendGuion([], 1e9), guionSondeoMs: 10, prepararTopeMs: 200 });
++  const ms = Date.now() - t0;
++  assert.ok(ms >= 190 && ms < 600, 'tardó ' + ms + ' ms');
++  assert.strictEqual(p.guionListo, false);
++  assert.strictEqual(await p.aperturaUrl, 'tts:' + APERTURA);
++});
++
++test('si la voz falla, no lanza: la presentación queda en null y se pedirá al descolgar', async () => {
++  const p = await prepararLlamada({
++    tercero: TID, apertura: APERTURA, prepararTopeMs: 300,
++    ttsService: { generateSpeech: async () => { throw new Error('sin voz'); } },
++    fetch: backendGuion([], 0)
++  });
++  assert.strictEqual(await p.aperturaUrl, null);
++  assert.strictEqual(p.guionListo, true);
++});
++
++test('sin esperarAcabada (voz que escribe ficheros), vale con tener la URL', async () => {
++  const p = await prepararLlamada({ tercero: TID, apertura: APERTURA, prepararTopeMs: 300,
++                                    ttsService: { generateSpeech: async (t) => 'http:' + t },
++                                    fetch: backendGuion(['Vale.'], 0) });
++  assert.strictEqual(await p.aperturaUrl, 'http:' + APERTURA);
++  assert.strictEqual(await p.guion.get('Vale.'), 'http:Vale.');
++});
++
++// ── Al descolgar ─────────────────────────────────────────────────────────────
++function escena(oido, backend) {
++  const dichos = [];
++  const sesion = new EventEmitter();
++  const cola = oido.slice();
++  sesion.setCaptureEnabled = () => {};
++  sesion.waitForUtterance = async () => {
++    const t = cola.length ? cola.shift() : null;
++    if (t === null) throw new Error('timeout');
++    return { audio: Buffer.from(t) };
++  };
++  const pedidosGuion = [];
++  const o = {
++    audioForkServer: { expectSession: async () => sesion, cancelExpectation() {} },
++    whisperClient: { transcribe: async (audio) => audio.toString() },
++    ttsService: { generateSpeech: async (t) => 'tts:' + t },
++    wsPort: 3001,
++    tercero: TID,
++    apertura: APERTURA,
++    esperarSaludo: async () => null,
++    fetch: async (url) => {
++      if (url.endsWith('/guion')) {
++        pedidosGuion.push(url);
++        return { ok: true, status: 200, json: async () => ({ frases: [], listo: true }) };
++      }
++      const r = backend.shift();
++      return { ok: true, status: 200, json: async () => r };
++    }
++  };
++  const endpoint = { async forkAudioStart() {}, async forkAudioStop() {},
++                     async play(url) { dichos.push(url.replace('tts:', '')); } };
++  return { o, endpoint, dialog: new EventEmitter(), dichos, pedidosGuion, sesion };
++}
++
++test('con el guion ya preparado, no se vuelve a pedir al descolgar y suena su voz', async () => {
++  const e = escena(['A las dos'], [{ decir: 'Perfecto, se lo digo.', colgar: true }]);
++  e.o.guion = new Map([['Perfecto, se lo digo.', Promise.resolve('tts:PREPARADA')]]);
++  e.o.guionListo = true;
++  e.o.aperturaUrl = Promise.resolve('tts:APERTURA PREPARADA');
++  const r = await runConversacionTercero(e.endpoint, e.dialog, 'c1', e.o);
++  assert.strictEqual(r.endReason, 'goodbye');
++  assert.deepStrictEqual(e.pedidosGuion, []);
++  assert.deepStrictEqual(e.dichos, ['APERTURA PREPARADA', 'PREPARADA']);
++});
++
++test('si el guion no llegó antes de marcar, se sigue pidiendo durante la llamada', async () => {
++  const e = escena(['A las dos'], [{ decir: 'Vale.', colgar: true }]);
++  e.o.guion = new Map();
++  e.o.guionListo = false;
++  await runConversacionTercero(e.endpoint, e.dialog, 'c1', e.o);
++  assert.ok(e.pedidosGuion.length >= 1);
++});
++
++test('un «¿Quién?» corto con silencio delante no se toma por buzón: se presenta sin esperar al oído', async () => {
++  // La llamada del 2026-11-08 a las 19:41: 3,3 s de audio, 1,4 s de voz.
++  const e = escena([], []);
++  e.o.esperarSaludo = async () => ({ audio: Buffer.alloc(105600), speechMs: 1400 });
++  let transcribiendo = 0;
++  e.o.whisperClient = { transcribe: async () => { transcribiendo++; await dormir(800); return '¿Quién?'; } };
++  let alPresentarse = null;
++  const t0 = Date.now();
++  e.endpoint.play = async (url) => { if (alPresentarse === null) alPresentarse = Date.now() - t0; e.dichos.push(url); };
++  await runConversacionTercero(e.endpoint, e.dialog, 'c1', e.o);
++  assert.ok(transcribiendo >= 1, 'el saludo se transcribe igual, de fondo');
++  assert.ok(alPresentarse !== null && alPresentarse < 300, 'se presentó a los ' + alPresentarse + ' ms');
++});
++
++test('un saludo largo de verdad (mucha voz) sí se mira antes por si es un buzón', async () => {
++  const e = escena([], []);
++  e.o.esperarSaludo = async () => ({ audio: Buffer.alloc(105600), speechMs: 2600 });
++  e.o.whisperClient = { transcribe: async () => { await dormir(150); return 'Deje su mensaje después de la señal'; } };
++  let pitido = false;
++  e.o.esperarSilencio = async () => { pitido = true; };
++  const r = await runConversacionTercero(e.endpoint, e.dialog, 'c1', e.o);
++  assert.ok(pitido);
++  assert.strictEqual(r.endReason, 'voicemail');
++});
++
++test('saludo: lo que devuelve el detector lleva la voz que hubo, no solo el audio', async () => {
++  const s = new EventEmitter();
++  s._inSpeech = false; s._silenceMs = 0; s._utteranceChunks = []; s._speechBytes = 0;
++  setTimeout(() => {
++    s._inSpeech = true;
++    s._utteranceChunks = [Buffer.alloc(64000)];   // 2 s de audio
++    s._speechBytes = 16000;                       // medio segundo de voz
++  }, 50);
++  setTimeout(() => { s._silenceMs = 400; }, 150);
++  const u = await esperarSaludo(s);
++  assert.strictEqual(u.speechMs, 500);
++  assert.strictEqual(u.audio.length, 64000);
++});
++
++// ── Sin barge-in (parche 35), comprobado otra vez ────────────────────────────
++test('Jarvis no se deja cortar: cada frase suena entera con el oído cerrado', async () => {
++  const e = escena(['Sí', 'Vale'], [{ decir: '¿A qué hora?' }, { decir: 'Hecho. ¡Adiós!', colgar: true }]);
++  let captura = false;
++  let armados = 0;
++  const alHablar = [];
++  const original = e.o.audioForkServer.expectSession;
++  e.o.audioForkServer.expectSession = async () => {
++    const s = await original();
++    s.setCaptureEnabled = (v) => { captura = v; };
++    s.armarBargeIn = () => { armados++; };
++    return s;
++  };
++  e.endpoint.play = async (url) => { alHablar.push(captura); e.dichos.push(url); };
++  await runConversacionTercero(e.endpoint, e.dialog, 'c1', e.o);
++  assert.strictEqual(armados, 0);
++  assert.strictEqual(alHablar.length, 3);
++  assert.ok(alHablar.every((abierto) => abierto === false), JSON.stringify(alHablar));
++});
++
++// ── La voz: esperar a que una frase en directo haya llegado entera ───────────
++test('esperarAcabada: un fichero ya escrito no se espera; un directo que no existe, no vale', async () => {
++  const tts = require('../lib/tts-service');
++  assert.strictEqual(await tts.esperarAcabada('http://127.0.0.1:3000/audio-files/x.mp3', 50), true);
++  assert.strictEqual(await tts.esperarAcabada(null, 50), false);
++  assert.strictEqual(await tts.esperarAcabada('shout://127.0.0.1:3000/tts-stream/0123456789abcdef.mp3', 50), false);
++});
