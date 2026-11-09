@@ -119,10 +119,11 @@ test('Jarvis consulta la agenda y deja una acción por confirmar', async ({ page
   await expect(page.getByText('agenda', { exact: true })).toBeVisible()
 
   // Camino 2: acción que NO se ejecuta sola. Tiene que aparecer el botón de confirmar
-  // con la descripción construida a partir de los argumentos reales.
-  await entrada.fill('apunta el dentista')
+  // con la descripción de lo que se aprueba. Desde el 2026-11-08 crear una cita ya no se
+  // confirma; cobrar el entrenamiento sí (dinero, y deshacerlo es ir a Supabase a mano).
+  await entrada.fill('cobra las sesiones del entrenamiento')
   await entrada.press('Enter')
-  await expect(page.getByText(/Crear "Dentista" el \d{2}\/\d{2}\/\d{4} a las 17:00/)).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByText('Marcar como cobradas las sesiones pendientes de entrenamiento')).toBeVisible({ timeout: 15_000 })
   await expect(page.getByRole('button', { name: 'Confirmar' })).toBeVisible()
 
   expect(page.erroresDeNavegador).toEqual([])
