@@ -100,7 +100,10 @@ class TestInvitaciones:
         monkeypatch.setattr(main, "get_events", lambda credentials=None: {"events": [
             self._ev("Jarvis, pon una alarma a las 4:00", False), self._ev("Cena con Aimar", False)]})
         monkeypatch.setattr(main, "get_class_events", lambda credentials=None: {"events": []})
-        texto = " ".join(main._contexto_agenda(datetime.now(main.LOCAL_TZ)))
+        # A mediodía, no «ahora»: los eventos de `_ev` son a las 23:30 de hoy, y pasada esa
+        # hora ya no son «lo que queda de hoy». El CI de las 23:51 del 2026-11-09 falló por eso.
+        mediodia = datetime.now(main.LOCAL_TZ).replace(hour=12, minute=0, second=0, microsecond=0)
+        texto = " ".join(main._contexto_agenda(mediodia))
         assert "alarma a las 4" not in texto and "Sala 1" in texto
         assert main._TITULO_INVITACION_OCULTO in texto and "Cena con Aimar" in texto
 
