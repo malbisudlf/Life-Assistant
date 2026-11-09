@@ -1,0 +1,11 @@
+[Unit]
+Description=Gemelo de la casa: el archivo, cada noche
+
+[Timer]
+# Home Assistant borra a los ~30 días: con una pasada diaria no se pierde nada aunque
+# caja esté apagada tres semanas.
+OnCalendar=*-*-* 04:20:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

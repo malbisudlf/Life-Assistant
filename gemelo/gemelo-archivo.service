@@ -1,0 +1,12 @@
+# La memoria del gemelo de la casa (docs/GEMELO.md). Servicio de USUARIO en caja:
+#   cp gemelo/gemelo-archivo.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now gemelo-archivo.timer
+[Unit]
+Description=Gemelo de la casa: copiar el histórico de Home Assistant
+
+[Service]
+Type=oneshot
+# Solo lee de Home Assistant. El token es el del backend (~/stack/backend.env).
+ExecStart=/usr/bin/python3 %h/stack/Life-Assistant/gemelo/gemelo.py archivar
+TimeoutStartSec=1800
+Nice=10

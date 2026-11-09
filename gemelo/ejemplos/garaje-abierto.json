@@ -1,0 +1,12 @@
+{
+  "id": "garaje-abierto-de-noche",
+  "descripcion": "Avisar si el garaje lleva diez minutos abierto, de noche y sin nadie en casa",
+  "cuando": { "entidad": "binary_sensor.puerta_garaje", "pasa_a": "on", "de": "off", "durante_min": 10 },
+  "si": [
+    { "entidad": "device_tracker.movil", "es": "not_home" },
+    { "entre": ["22:00", "07:00"] }
+  ],
+  "espera_min": 30,
+  "en_falso_si": { "entidad": "binary_sensor.puerta_garaje", "pasa_a": "off", "antes_de_min": 2 },
+  "entonces": { "avisar": "El garaje lleva diez minutos abierto" }
+}

@@ -239,6 +239,7 @@ arquitectura, invariantes del backend, despliegue y convenciones. Lo demás:
 | `docs/TESTS.md` | Antes de escribir tests: cómo está montado cada suite y sus trampas conocidas |
 | `docs/EVALS.md` | Las evals de Jarvis: cuánto acierta eligiendo herramienta, contra la API real. Qué mide, cómo se corre, qué cuesta y por qué NO vive en `tests/backend` |
 | `docs/SIMULADOR.md` | El simulador de llamadas (`telefono/simulador/`): el cerebro real del teléfono contra un backend de mentira, para probar un cambio del RUNBOOK o del modelo sin abrir puertas ni mandar mensajes. Y el repaso nocturno, que lee las llamadas del día en `caja`, marca dónde rozó y las deja como casos. **Nada de eso sale de `caja`**: el repositorio es público |
+| `docs/GEMELO.md` | El gemelo de la casa (`gemelo/`): un archivo propio del histórico de Home Assistant en `caja`, un reproductor que dice cuántas veces habría saltado una regla (y cuántas en falso) y un buscador de rutinas. **Solo lee, deja fuera a la familia y no sale de `caja`** |
 | `docs/COPIA_SEGURIDAD.md` | La copia de seguridad de Supabase: qué tablas se copian y cuáles no, por qué el volcado nace cifrado (el repositorio es público), los secrets del workflow y **cómo se restaura** |
 | `docs/BUGS_HISTORICOS.md` | **Antes de dar por nuevo un fallo raro.** Cada bug con su moraleja; no los reintroduzcas |
 | `docs/HOME_ASSISTANT_JARVIS.md` | El YAML que va instalado en Home Assistant |
