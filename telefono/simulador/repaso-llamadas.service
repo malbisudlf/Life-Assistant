@@ -1,0 +1,13 @@
+# El repaso nocturno de las llamadas (docs/SIMULADOR.md). Servicio de USUARIO en caja:
+#   cp telefono/simulador/repaso-llamadas.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now repaso-llamadas.timer
+[Unit]
+Description=Jarvis: repaso de las llamadas del día
+
+[Service]
+Type=oneshot
+# El repositorio que despliega desplegar.sh: el repaso es siempre el de la versión desplegada.
+ExecStart=/usr/bin/node %h/stack/Life-Assistant/telefono/simulador/repasar.js --pensar --avisar
+# Una sesión de Claude como mucho, y solo si hubo roces: con esto no se queda colgado.
+TimeoutStartSec=600
+Nice=10

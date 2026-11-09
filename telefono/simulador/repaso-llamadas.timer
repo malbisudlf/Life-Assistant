@@ -1,0 +1,11 @@
+[Unit]
+Description=Jarvis: repaso de las llamadas, de madrugada
+
+[Timer]
+# Después de la última llamada razonable del día y antes del parte de la mañana.
+OnCalendar=*-*-* 05:10:00
+# Si caja estaba apagada a esa hora, al encenderse.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

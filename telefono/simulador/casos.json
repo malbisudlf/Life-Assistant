@@ -1,0 +1,85 @@
+{
+  "_": "Casos del simulador de llamadas (docs/SIMULADOR.md). Todo lo de aquí es inventado: el repositorio es público. Los casos sacados de llamadas de verdad viven en caja, fuera del repositorio.",
+  "casos": [
+    {
+      "id": "garaje-abrir-si",
+      "turnos": ["Jarvis, abre la puerta del garaje", "sí"],
+      "frases": { "garaje": "Abrir la puerta del garaje (su móvil está a 40 m de casa)." },
+      "preguntas": { "garaje": "¿Abro la puerta del garaje?" },
+      "espera": { "propone": "garaje", "confirmado": true, "argumentos": { "garaje": { "accion": "abrir" } },
+                  "sin_herramientas": ["casa_ordenar"] }
+    },
+    {
+      "id": "garaje-cerrar-no",
+      "turnos": ["cierra el garaje", "no, déjalo"],
+      "preguntas": { "garaje": "¿Cierro la puerta del garaje?" },
+      "espera": { "propone": "garaje", "confirmado": false, "argumentos": { "garaje": { "accion": "cerrar" } } }
+    },
+    {
+      "id": "garaje-si-con-relleno",
+      "turnos": ["abre el garaje", "sí, venga, ábrelo ya"],
+      "espera": { "propone": "garaje" }
+    },
+    {
+      "id": "agenda-del-contexto",
+      "contexto": "Hoy le queda: 18:00 Pádel con Unai. Mañana: 10:00 Dentista; 16:30 Tutoría de proyecto. Tiempo: 12 grados y lluvia. Está en casa.",
+      "turnos": ["¿qué tengo mañana?"],
+      "espera": { "dice": ["dentista", "tutor[ií]a"], "no_dice": ["p[aá]del"] }
+    },
+    {
+      "id": "agenda-outlook-caido",
+      "contexto": "Tiempo: 12 grados y lluvia. Está en casa.",
+      "mundo": { "agenda": { "_error": "Outlook no responde ahora mismo." } },
+      "turnos": ["¿qué tengo el viernes?"],
+      "espera": { "herramientas": ["agenda"], "no_dice": ["no tiene nada", "est[aá] libre", "agenda vac[ií]a"] }
+    },
+    {
+      "id": "whatsapp-enviar",
+      "mundo": { "whatsapp_chats": { "ok": true, "resultados": [{ "chat": "34600000001@c.us", "nombre": "Ane", "grupo": false }] } },
+      "frases": { "whatsapp_enviar": "Mandar por WhatsApp a Ane: «Llego en diez minutos»." },
+      "preguntas": { "whatsapp_enviar": "¿Mando por WhatsApp a Ane: «Llego en diez minutos»?" },
+      "turnos": ["dile a Ane por WhatsApp que llego en diez minutos", "sí"],
+      "espera": { "herramientas": ["whatsapp_chats"], "propone": "whatsapp_enviar", "confirmado": true,
+                  "argumentos": { "whatsapp_enviar": { "texto": "diez minutos" } } }
+    },
+    {
+      "id": "whatsapp-si-pero",
+      "mundo": { "whatsapp_chats": { "ok": true, "resultados": [{ "chat": "34600000001@c.us", "nombre": "Ane", "grupo": false }] } },
+      "turnos": ["dile a Ane por WhatsApp que llego en diez minutos", "sí, pero pon quince"],
+      "espera": { "propone": "whatsapp_enviar", "confirmado": false,
+                  "argumentos": { "whatsapp_enviar": { "texto": "quince" } } }
+    },
+    {
+      "id": "recordatorio-directo",
+      "turnos": ["recuérdame mañana a las nueve que llame al banco"],
+      "espera": { "herramientas": ["recordarme"], "no_dice": ["confirm", "¿lo hago"] }
+    },
+    {
+      "id": "idea-directa",
+      "turnos": ["apunta una idea: probar el simulador de llamadas con ruido"],
+      "espera": { "herramientas": ["guardar_idea"] }
+    },
+    {
+      "id": "luz-coche",
+      "modo": "coche",
+      "mundo": { "casa_dispositivos": { "ok": true, "dispositivos": [{ "entidad": "light.salon", "nombre": "Luz del salón", "zona": "Salón", "estado": "off" }] },
+                 "casa_leer": { "ok": true, "entidad": "light.salon", "nombre": "Luz del salón", "estado": "off" },
+                 "casa_ordenar": { "ok": true, "entidad": "light.salon", "estado": "on" } },
+      "turnos": ["Jarvis, enciende la luz del salón"],
+      "espera": { "herramientas": ["casa_ordenar"], "max_palabras": 25 }
+    },
+    {
+      "id": "peli-en-la-tele",
+      "mundo": { "jellyfin_buscar": { "ok": true, "resultados": [{ "id": "a1b2c3", "titulo": "Interstellar", "anio": 2014, "tipo": "película" }] },
+                 "jellyfin_reproducir": { "ok": true, "reproduciendo": "Interstellar (2014)", "en": "Tele de la sala" } },
+      "turnos": ["pon Interstellar en la tele"],
+      "espera": { "herramientas": ["jellyfin_buscar", "jellyfin_reproducir"], "dice": ["interstellar"] }
+    },
+    {
+      "id": "se-repite-con-ruido",
+      "ruido": "malo",
+      "turnos": ["Jarvis, recuérdame a las ocho sacar la basura", "que me recuerdes a las ocho sacar la basura"],
+      "espera": { "herramientas": ["recordarme"] }
+    }
+  ]
+}
