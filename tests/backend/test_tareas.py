@@ -144,8 +144,8 @@ class TestCrear:
 
 
 class TestJarvis:
-    def test_crear_pide_confirmacion(self):
-        assert main._JARVIS_HERRAMIENTAS["crear_tarea"]["confirmar"] is True
+    def test_crear_es_directa(self):
+        assert main._JARVIS_HERRAMIENTAS["crear_tarea"]["confirmar"] is False
         assert main._JARVIS_HERRAMIENTAS["tareas"]["confirmar"] is False
 
     def test_solo_se_anuncian_encendidas(self, monkeypatch):

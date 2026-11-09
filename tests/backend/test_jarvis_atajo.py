@@ -110,15 +110,14 @@ class TestAtajoTurno:
         cabeceras = _con_token(monkeypatch)
 
         def _no_llamar(*a, **k):
-            raise AssertionError("no debería crearse el evento sin confirmar")
+            raise AssertionError("no debería borrarse la nota sin confirmar")
 
-        monkeypatch.setattr(main, "create_event", _no_llamar)
+        monkeypatch.setitem(main._JARVIS_HERRAMIENTAS["borrar_idea"], "fn", _no_llamar)
         _con_modelo(monkeypatch, [
-            _mensaje(tool_calls=[_llamada("crear_evento",
-                                          {"titulo": "Dentista", "fecha": "2026-09-01"})]),
-            _mensaje("Te lo apunto."),
+            _mensaje(tool_calls=[_llamada("borrar_idea", {"idea_id": "11111111-1111-1111-1111-111111111111"})]),
+            _mensaje("Te la borro."),
         ])
-        r = client.post("/jarvis/atajo", json={"mensaje": "apunta dentista el 1"},
+        r = client.post("/jarvis/atajo", json={"mensaje": "borra la nota del dentista"},
                         headers=cabeceras)
         datos = r.json()
         assert datos["pendiente"] is True

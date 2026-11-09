@@ -843,9 +843,11 @@ class TestReglasQueProponeJarvis(_Reglas):
         guardado = mock_requests.called("POST", "reglas_usuario")[0][2]["json"]["parametros"]
         assert "ejecutar_esto" not in guardado
 
-    def test_el_alta_pasa_por_el_boton_de_confirmar(self):
-        """Mismo patrón que mcp_conectar: el modelo propone, el usuario aprueba."""
-        assert main._JARVIS_HERRAMIENTAS["proponer_regla"]["confirmar"] is True
+    def test_el_alta_es_directa(self):
+        """Desde el 2026-11-08: una regla solo avisa, sale de una plantilla cerrada y se
+        quita con quitar_regla. Tras leer algo ajeno sigue sin poder crearse sola."""
+        assert main._JARVIS_HERRAMIENTAS["proponer_regla"]["confirmar"] is False
+        assert "proponer_regla" in main._AJENO_NI_CON_BOTON
 
     def test_la_plantilla_de_dia_dispara_su_dia(self, mock_requests):
         lunes = datetime(2026, 8, 17, 10, 0, tzinfo=main.LOCAL_TZ)   # es lunes

@@ -412,10 +412,8 @@ class _ModeloSimulado:
         if "tools" not in kwargs or any(m.get("role") == "tool" for m in mensajes):
             return self._texto("Hoy tienes el Evento de prueba E2E.")
         ultimo = next((m.get("content") or "" for m in reversed(mensajes) if m.get("role") == "user"), "")
-        if "dentista" in ultimo.lower():
-            return self._herramienta("crear_evento", {
-                "titulo": "Dentista", "fecha": _dia(1), "hora_inicio": "17:00",
-            })
+        if "cobra" in ultimo.lower():
+            return self._herramienta("cobrar_entrenamiento", {})
         return self._herramienta("agenda", {"dias": 1})
 
 

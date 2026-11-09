@@ -266,24 +266,32 @@ class TestPorTelefono:
                            json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                                  "params": {"name": nombre, "arguments": argumentos}}).json()
 
-    def test_crear_un_evento_va_al_movil_y_no_se_hace(self, client, mock_requests, movil,
-                                                       hechas):
-        mock_requests.add("POST", "jarvis_preguntas", FakeResponse({}, 201))
+    def test_crear_un_evento_se_hace_al_momento(self, client, mock_requests, movil, hechas):
+        """Desde el 2026-11-08 crear un evento suyo no se confirma, tampoco por teléfono."""
         r = self._llamar(client, "crear_evento", {"titulo": "Dentista", "fecha": "2026-10-14",
                                                   "hora_inicio": "10:00"})
-        texto = r["result"]["content"][0]["text"]
-        assert "pendiente_en_el_movil" in texto and hechas == []
-        assert main._avisos_movil[0]["titulo"] == "📅 ¿Lo hago?"
+        assert "pendiente_en_el_movil" not in r["result"]["content"][0]["text"]
+        assert hechas and main._avisos_movil == []
 
-    def test_borrar_un_evento_tambien_va_al_movil(self, client, mock_requests, movil,
-                                                  hechas, monkeypatch):
+    def test_borrar_una_reunion_con_gente_va_al_movil(self, client, mock_requests, movil,
+                                                      hechas, monkeypatch):
         monkeypatch.setattr(main, "_evento_graph", lambda i: {
-            "titulo": "Fisio", "inicio": "2026-10-14T10:00", "todo_el_dia": False,
-            "invitados": 0})
+            "titulo": "Comité", "inicio": "2026-10-14T10:00", "todo_el_dia": False,
+            "invitados": 3})
         mock_requests.add("POST", "jarvis_preguntas", FakeResponse({}, 201))
         r = self._llamar(client, "borrar_evento", {"evento_id": "x"})
         assert "pendiente_en_el_movil" in r["result"]["content"][0]["text"] and hechas == []
-        assert main._avisos_movil[0]["texto"] == "Borrar «Fisio» (mañana a las 10:00)."
+        assert main._avisos_movil[0]["titulo"] == "📅 ¿Lo hago?"
+        assert "cancelación a 3 invitados" in main._avisos_movil[0]["texto"]
+
+    def test_borrar_un_evento_solo_suyo_se_hace_al_momento(self, client, mock_requests, movil,
+                                                           hechas, monkeypatch):
+        monkeypatch.setattr(main, "_evento_graph", lambda i: {
+            "titulo": "Fisio", "inicio": "2026-10-14T10:00", "todo_el_dia": False,
+            "invitados": 0})
+        r = self._llamar(client, "borrar_evento", {"evento_id": "x"})
+        assert "pendiente_en_el_movil" not in r["result"]["content"][0]["text"]
+        assert hechas and main._avisos_movil == []
 
     def test_cobrar_sigue_sin_existir_por_telefono(self, client, mock_requests, movil,
                                                    hechas):
@@ -297,7 +305,10 @@ class TestPorTelefono:
 
     def test_el_catalogo_le_dice_que_se_confirma_hablando(self):
         por_nombre = {t["name"]: t for t in main._mcp_servidor_tools_list()}
-        assert "linea_para_la_llamada" in por_nombre["crear_evento"]["description"]
+        assert "linea_para_la_llamada" in por_nombre["borrar_idea"]["description"]
+        assert "linea_para_la_llamada" in por_nombre["editar_evento"]["description"]
+        # Lo que se volvió directo el 2026-11-08 ya no lo dice: se hace al momento.
+        assert "linea_para_la_llamada" not in por_nombre["crear_evento"]["description"]
         assert "linea_para_la_llamada" not in por_nombre["agenda"]["description"]
 
 

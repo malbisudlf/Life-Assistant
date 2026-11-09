@@ -115,16 +115,16 @@ class TestJarvisVoz:
 
     def test_lo_que_solo_se_propone_no_se_anuncia_como_trabajo(
             self, client, auth_headers, monkeypatch, mock_requests):
-        """Crear un evento no se ejecuta: se propone. Decir 'voy con el calendario' ahí
-        sería anunciar algo que no está pasando."""
+        """Borrar una nota no se ejecuta: se propone. Decir 'voy con ello' ahí sería
+        anunciar algo que no está pasando."""
         _con_modelo(monkeypatch, [
-            _mensaje(tool_calls=[_llamada("crear_evento", {"titulo": "Cita", "fecha": "2026-09-01"})]),
-            _mensaje("Cuando lo confirmes, lo creo."),
+            _mensaje(tool_calls=[_llamada("borrar_idea", {"idea_id": "11111111-1111-1111-1111-111111111111"})]),
+            _mensaje("Cuando lo confirmes, la borro."),
         ])
-        r = client.post("/jarvis/voz", json={"mensaje": "apuntame una cita"}, headers=auth_headers)
+        r = client.post("/jarvis/voz", json={"mensaje": "borra esa nota"}, headers=auth_headers)
         eventos = _eventos(r)
         assert _sin_texto(eventos) == ["fin"]
-        assert eventos[-1][1]["pendiente"]["herramienta"] == "crear_evento"
+        assert eventos[-1][1]["pendiente"]["herramienta"] == "borrar_idea"
 
     def test_pide_el_prompt_de_voz_aunque_el_cliente_no_lo_diga(
             self, client, auth_headers, monkeypatch, mock_requests):

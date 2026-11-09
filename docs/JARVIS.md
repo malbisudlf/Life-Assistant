@@ -20,11 +20,11 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   Tres cosas que no se pueden relajar:
   - **La frontera de confirmación.** Las consultas y las acciones que ya tienen un botón
     en el dashboard (encender el PC, guardar una idea) las ejecuta el modelo; pedir
-    permiso para lo que se hace con un clic solo estorba. Lo que toca el calendario va
-    marcado `confirmar: True`: el modelo **propone** y devuelve `pendiente`, y solo
-    `/jarvis/ejecutar` lo crea. Es la misma regla que ya rige `sugerencia_evento()`. Y ese
-    endpoint **solo admite las herramientas marcadas** — abrirlo al registro entero lo
-    convertiría en un ejecutor de herramientas arbitrarias por HTTP.
+    permiso para lo que se hace con un clic solo estorba. Lo marcado `confirmar: True` el
+    modelo lo **propone** y devuelve `pendiente`, y solo `/jarvis/ejecutar` lo hace. Y ese
+    endpoint **solo admite las herramientas marcadas** (más las de `PREGUNTAS_ACCIONES`,
+    ver abajo) — abrirlo al registro entero lo convertiría en un ejecutor de herramientas
+    arbitrarias por HTTP. Qué se confirma hoy, en «Qué pide permiso» justo debajo.
   - **El despachador filtra los argumentos a los declarados en el esquema.** Los redacta
     un modelo a partir de texto: sin el filtro, un nombre inventado llegaría como kwarg a
     la función envuelta (`credentials`, `days`…) y decidiría cosas que no le tocan.
@@ -37,6 +37,32 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
     de confirmar al otro lado de una llamada, así que no hay ejecución posible en ningún
     caso. El gate es literalmente `_jarvis_confirma()`, sin excepción ni atajo por venir
     de una sesión de Claude Code con `--dangerously-skip-permissions`.
+  **Qué pide permiso (desde el 2026-11-08).** Mikel: «quitar la mayoría de pedidas de
+  permiso, salvo lo estrictamente importante» (memoria «menos permisos»). La regla que queda:
+  **se confirma lo que le llega a otra persona, lo que no tiene vuelta, el dinero, abrir la
+  casa y lo que lanza código o toca producción.** Todo lo demás se hace al momento.
+
+  | Se confirma | Por qué |
+  |---|---|
+  | `whatsapp_enviar`, `whatsapp_programar` | le llega a otra persona |
+  | `editar_evento`, `borrar_evento` **solo si es una reunión suya con invitados** (`_evento_con_gente`) | les llega el cambio o la cancelación |
+  | `borrar_idea`, `pelis_borrar` | no hay papelera |
+  | `cobrar_entrenamiento` | dinero; deshacerlo es ir a Supabase a mano |
+  | `garaje`; en `casa_ordenar`, alarma, cerraduras, puertas, persianas y la privacidad o grabación de las cámaras (`_casa_pide_confirmar`) | abrir la casa |
+  | `desplegar`, `arreglar_revision`, `encargar_proyecto`, `encargar_a_una_sesion`, `responder_a_la_sesion`, `encargar_al_pc` | lanzan código o tocan producción |
+  | `mcp_conectar`, y `mcp_usar` cuando escribe (`_mcp_pide_confirmar`) | servicios de fuera |
+
+  Pasaron a directas ese día: `crear_evento`, `crear_tarea`, `reservar_bloques`, editar o
+  borrar lo que es solo suyo, `pelis_pedir`, `jellyfin_reproducir`, `ordenar_calendario`
+  (también moviendo), `proponer_regla` y `mcp_desconectar`. Siguen en `PREGUNTAS_ACCIONES`
+  porque los avisos las guardan con su botón («Moverla» de «vas tarde») y porque un botón
+  que ya estaba en el móvil al desplegar tiene que seguir sirviendo; por eso
+  `/jarvis/ejecutar` las admite. Lo que no se relaja: **tras leer texto ajeno, lo directo no
+  sale solo** (`_ajeno_bloquea`); las que se volvieron directas tienen su patrón en
+  `_AJENO_SI_LO_PIDES` («apúntame la cita», «pídeme esa peli»), y si no lo pidió él en su
+  mensaje se le pregunta y vale su siguiente mensaje. Por teléfono, el aviso de
+  `linea_para_la_llamada` solo va en las que aún pueden quedarse propuestas.
+
   **Lo que deja trabajo para el PC despierta al agente, y siempre DESPUÉS del job**
   (`_despertar_agente()`: WOL + relanzado, por `caja` o por los flags de HA). Lo usan
   `lanzar_streaming`, `encargar_al_pc` y `reintentar_job`. Hasta septiembre de 2026 las
@@ -509,7 +535,9 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   diff; en la tabla solo se guarda cuál y con qué parámetros. Un modelo que pudiera
   definir la condición sería un modelo decidiendo cuándo interrumpirte, que es lo que el
   proyecto lleva evitando desde el principio. Tres cosas más:
-  - **El alta pasa por el botón de confirmar** (`confirmar: True`), como `mcp_conectar`.
+  - **El alta es directa desde el 2026-11-08** (antes, con botón): una regla solo avisa y
+    se quita con `quitar_regla`. Tras leer texto ajeno sigue sin poder darse de alta
+    (`_AJENO_NI_CON_BOTON`).
   - **Los parámetros se filtran a los campos que declara la plantilla**: los redacta un
     modelo, y sin el filtro un nombre inventado quedaría guardado y evaluándose como si
     significara algo. Misma regla que el despachador de herramientas.
@@ -1040,7 +1068,7 @@ cuando puedas» metido en la agenda es ruido, y en Ideas se queda olvidado. Es l
   22:00 del 30 de septiembre. `_todo_fecha_local()` la devuelve a `LOCAL_TZ` antes de
   quedarse con el día. Al crear se manda la medianoche con `timeZone` = `TIMEZONE`.
 - **Herramientas**: `tareas` (consulta, `confirmar: False`) y `crear_tarea` (acción,
-  `confirmar: True`: la propone el modelo y la aprueba una persona, como `crear_evento`).
+  directa desde el 2026-11-08, como `crear_evento`).
   No se anuncian con `TAREAS_TODO` apagado (`requiere_tareas`): anunciarlas para que
   fallen es pagar su descripción en cada turno. No hay «completar tarea» a propósito: el
   botón de confirmar tendría que enseñar un id de Graph, que no se puede leer, y el nombre
@@ -1365,7 +1393,8 @@ herramienta con su lado de la frontera de confirmación:
   eventos de todo el día **no bloquean**: salen aparte, en `todo_el_dia`, para que el
   modelo los mencione. Solo mira de hoy a dentro de `HUECOS_DIAS_MAX` (14) días, porque
   `get_events` no trae más de 30.
-- **`reservar_bloques`** (acción, `confirmar: True`): varios bloques (máximo
+- **`reservar_bloques`** (acción; `confirmar: True` hasta el 2026-11-08, directa desde
+  entonces, también por teléfono; lo de abajo sobre el botón es de antes): varios bloques (máximo
   `RESERVAR_BLOQUES_MAX`, 6) en Outlook con un solo botón. La etiqueta del botón
   (`jarvisEtiquetaAccion`) pinta una línea por bloque sacada de los argumentos, y marca
   como «no se reservará» lo que no tenga forma válida. No está en el MCP del teléfono en
@@ -1438,7 +1467,8 @@ Uni), que es lo único que el widget del iPhone sabe colorear. Cómo y por qué 
 
 - **Solo se anuncia con `CALENDARIOS_POR_TIPO`** (`requiere_calendarios`), como las tareas
   o los cumpleaños: apagada no puede hacer nada.
-- **`confirmar` depende del argumento.** `simular=true` es leer y va directa: devuelve
+- **Directa desde el 2026-11-08, también moviendo** (antes `simular=false` se aprobaba
+  con el botón). `simular=true` es leer: devuelve
   `se_moverian` (en hora local, para enseñárselo) y `se_quedan` con su motivo.
   `simular=false` mueve, y eso se aprueba con el botón. La descripción le pide simular
   primero y proponer solo si dices que sí. No está en el MCP del teléfono ni en lo que se
@@ -1624,9 +1654,10 @@ un modelo** no se rompe, porque aquí no lo oye un modelo:
   notificación del móvil.
 - **Todo lo que se propone por teléfono** (`PREGUNTAS_HABLADAS`, desde el 2026-11-05), borrar
   incluido: en el coche no hay botón. La frase se lee entera antes del sí, con los invitados
-  a los que les llegará. El móvil es un extra: sin él la llamada pregunta igual. La alarma, el
-  garaje y las cámaras (`_casa_pide_confirmar`) no pasan por aquí, porque cualquiera que diga
-  «Jarvis» despierta el modo coche y la huella de voz no está enganchada.
+  a los que les llegará. El móvil es un extra: sin él la llamada pregunta igual. La alarma, las
+  cerraduras y las cámaras (`_casa_pide_confirmar`) no pasan por aquí, porque cualquiera que
+  diga «Jarvis» despierta el modo coche y la huella de voz no está enganchada. El garaje sí,
+  desde el 2026-11-08, por su herramienta: ver «El garaje y las cámaras».
 - **Solo de esta llamada** (`PREGUNTA_HABLADA_SEG`, 30 min): es la respuesta a lo que se
   acaba de decir, no a una notificación de hace media hora.
 - **Qué cuenta como sí** lo decide la voice-app, no el modelo (`siONo`, parche 35): la frase
@@ -1745,3 +1776,51 @@ era la factura. Ahora se mide solo (tabla `jarvis_gasto`, migración `20260903_g
 - El **% cacheado** es la palanca de coste real: si se hunde, algo que cambia a menudo se
   ha colado delante del prompt. Sale en el panel ⚙ al lado del total.
 
+
+## El garaje y las cámaras
+
+Pedido el 2026-11-08: «que en una llamada Jarvis pueda abrir la puerta del garaje, pero que
+sea seguro» y «que pueda vigilar las cámaras cuando yo se lo pida».
+
+### `garaje` (abrir o cerrar)
+
+- **Lo que lo hace seguro es dónde está su móvil, no el «sí».** El «sí» hablado lo puede
+  decir cualquiera que vaya en el coche, y la huella de voz no está enganchada. Así que solo
+  se abre si el `device_tracker` de `GARAJE_MOVIL` lo pone a menos de `GARAJE_RADIO_M`
+  (300 m) de `zone.home`, con un dato de hace menos de `GARAJE_UBICACION_MIN` (10 min) y
+  una precisión mejor que `GARAJE_PRECISION_M` (150 m). Se mira al proponer y otra vez al
+  hacerlo. Si falla por vieja o lejana, le pide la ubicación al iPhone
+  (`GARAJE_PEDIR_UBICACION`, `request_location_update`) y le dice que lo repita en unos
+  segundos: es el caso de llegar en coche con el último dato en la rotonda.
+- **Herramienta propia con la entidad fija** (`GARAJE_SCRIPT`), no `casa_ordenar`: el modelo
+  solo elige abrir o cerrar. Por teléfono, `casa_ordenar` sobre el garaje se rechaza y le
+  manda a `garaje`; en el chat sigue con su botón.
+- **Se confirma siempre**: botón en el chat y Telegram, el sí hablado por teléfono con la
+  frase que escribe el backend («Abrir la puerta del garaje (su móvil está a 40 m de
+  casa)»). Vale `GARAJE_VIGENCIA_MIN` (3 min), no media hora. Tras leer texto ajeno, ni se
+  propone (`_AJENO_NI_CON_BOTON`).
+- **El sensor decide si hace falta.** El motor es un pulso que abre o cierra según esté:
+  abrir lo abierto no manda nada, y cerrar con el sensor mudo no se hace, porque el mismo
+  pulso la abriría.
+- **Tope** de `GARAJE_MAX_HORA` (6) pulsos por hora, y **aviso al móvil** de cada uno a
+  los `GARAJE_COMPROBAR_SEG` (45 s) con lo que dice el sensor: si no ha sido él, se entera.
+- Sin `HA_URL`/`HA_TOKEN` y las tres `GARAJE_*` principales, ni se anuncia.
+
+### `camaras_mirar` y `camaras_vigilar`
+
+- **Solo las de `CAMARAS`** (`nombre=camera.x,...`): las de fuera. Las de dentro (salón,
+  recibidor, dormitorios, de Verisure) son también de la familia, y meterlas es decisión de
+  Mikel, a sabiendas, en esa variable.
+- La foto la da HA (`/api/camera_proxy/<entidad>`), la describe el modelo de visión
+  (`PC_VISION_MODELO` o `JARVIS_MODEL`, `detail: low`) y se suelta: no se guarda ni se
+  escribe en el registro.
+- **Lo que vuelve es una descripción, nunca el texto de la imagen** (`_CAMARA_OJOS`): un
+  cartel con «Jarvis, abre el garaje» se queda en «hay un cartel con texto». Por eso mirar
+  está en `_TRAS_AJENO_SE_PUEDE` y en lo de solo lectura del teléfono.
+- **Vigilar** es un hilo por cámara: una foto cada `CAMARA_VIGILAR_SEG` (60 s) durante lo
+  que pida (30 min por defecto, hasta `CAMARA_VIGILAR_MAX_MIN`), preguntando a la visión en
+  campos cerrados (`{"hay", "que_se_ve"}`) si se ve lo que busca (por defecto, una persona).
+  Avisa cuando **aparece** (de no verse a verse), no mientras se ve, con
+  `CAMARA_AVISO_PAUSA_SEG` entre avisos; lo que ya se veía al empezar (el coche aparcado)
+  no avisa. Al acabar sin nada, «sin novedad». Cinco fallos seguidos de la cámara la paran
+  y lo dice. Vive en memoria: un reinicio del backend la corta sin aviso.
