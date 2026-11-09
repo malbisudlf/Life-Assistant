@@ -724,10 +724,31 @@ except Exception:
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "15"))
 
 
+# Graph responde 429 `ApplicationThrottled` («over its MailboxConcurrency limit») cuando
+# una misma petición del dashboard encadena varias lecturas seguidas al buzón (calendario
+# por defecto + Deporte + Uni + listado de calendarios). Es transitorio y Graph dice
+# cuánto esperar en `Retry-After`: reintentar una vez o dos, con espera acotada para no
+# retener un hilo del pool, evita que un pico se vea como «No se pudo consultar Outlook».
+GRAPH_REINTENTOS    = 2
+GRAPH_ESPERA_MAX    = 4.0
+
+
 class _SesionConTimeout(requests.Session):
     def request(self, method, url, **kwargs):
         kwargs.setdefault("timeout", HTTP_TIMEOUT)
-        return super().request(method, url, **kwargs)
+        # Solo lecturas (GET): reintentar un POST podría duplicar un evento.
+        es_graph = str(method).upper() == "GET" and str(url).startswith("https://graph.microsoft.com/")
+        r = super().request(method, url, **kwargs)
+        for intento in range(GRAPH_REINTENTOS if es_graph else 0):
+            if r.status_code != 429:
+                break
+            try:
+                espera = float(r.headers.get("Retry-After", ""))
+            except (TypeError, ValueError):
+                espera = 1.0 * (intento + 1)
+            time.sleep(min(max(espera, 0.5), GRAPH_ESPERA_MAX))
+            r = super().request(method, url, **kwargs)
+        return r
 
 
 http = _SesionConTimeout()
