@@ -119,11 +119,18 @@ Dos herramientas de Jarvis, que solo existen con `TERCEROS_LLAMADAS=1`:
 3. **Solo números de persona en España** (`_tel_llamable`): móviles (6, 71-74) y fijos
    geográficos (81-88, 91-98). Fuera 112, 016, 118xx, 70x y los 80x/90x de tarificación
    especial, tanto al apuntar como al llamar, y otra vez en la voice-app.
-4. **Se presenta como lo que es.** La primera frase la escribe el backend, no el modelo:
-   «Hola, Erik. Soy Jarvis, el asistente de Mikel.», para que no dependa de que el modelo
-   se acuerde. Si le preguntan si es una máquina, dice que sí. No cuenta de ti nada que no
-   le hayas dado en `contexto` y no se compromete a nada fuera del encargo («se lo digo a
-   Mikel»).
+4. **No se presenta, y no miente** (desde el 2026-11-10; hasta entonces empezaba con
+   «Hola, Erik. Soy Jarvis, el asistente de Mikel.»). Mikel, tras la primera prueba: «no me
+   gusta que diga que es el asistente; que no se presente, que pida mesa para 4 a nombre de
+   Mikel». La llamada empieza con un saludo que pone el backend («Hola, buenas tardes.») y
+   el `mensaje`, que es quien dice de parte de quién: «Quería reservar una mesa para cuatro
+   para mañana a las nueve, a nombre de Mikel.» Como cuando alguien llama para reservar a
+   nombre de otro. Lo que no se negocia, y está en el prompt de la llamada: **nunca dice
+   ser Mikel**; si le preguntan quién es, llama de parte de Mikel; y **si le preguntan si
+   es una persona o una máquina, dice la verdad**: es su asistente, una inteligencia
+   artificial. No cuenta de ti nada que no le hayas dado en `contexto` y no se compromete a
+   nada fuera del encargo («se lo digo a Mikel»). Con `TERCEROS_SE_PRESENTA=1`, la
+   presentación de antes. A ti («llámame») te sigue diciendo que es Jarvis.
 5. **No se graba.** El audio no se guarda en ningún sitio, y la transcripción vive en la
    memoria del backend (las últimas 20 llamadas). Lo que queda es el aviso con el resumen.
 6. **Frenos**: nace apagado; entre las 9:00 y las 22:00 (`TERCEROS_DESDE/HASTA`); una a la
@@ -141,9 +148,9 @@ elegida por él entre tres muestras). El backend la manda en el cuerpo de la lla
 (`voz`) y la voice-app la usa solo en esa: Jarvis sigue hablándole a él con la suya,
 también en «llámame» y al devolverle la llamada.
 
-**Cambia la voz, no lo que dice.** La regla 4 sigue igual: se presenta como «Jarvis, el
-asistente de Mikel» y, si le preguntan si es una máquina, dice que sí. Una voz natural
-sirve para que no cuelguen antes de escuchar, no para hacerse pasar por una persona.
+**La voz no cambia la regla 4**: no se presenta, pero no dice ser Mikel y, si le
+preguntan si es una máquina, dice que sí. Una voz natural sirve para que no cuelguen
+antes de escuchar, no para hacerse pasar por una persona.
 
 Si Azure falla a media llamada, la frase sale con la voz de siempre antes que dejar la
 línea muda. Sin `TERCEROS_VOZ`, todo como antes.
@@ -165,7 +172,14 @@ El backend te la manda al móvil por «preguntas al móvil» (`_j_mandar_notific
 solo apunta), contesta `esperar: true` y la voice-app (parche 39) le dice al otro «Un segundo,
 que se lo consulto a Mikel», le pone música y pregunta a `GET /telefono/tercero/{id}/consulta`
 cada 2 s, con un «sigo aquí» cada 30. Lo que pulses entra como «[Mikel contesta: Sí]» y la
-llamada sigue. Sin respuesta en `TERCEROS_CONSULTA_SEG` (90), sigue con «no contesta ahora»
+llamada sigue. **La pregunta te llega al momento** (`_adelantar_aviso`, 2026-11-10): lo
+normal es que un aviso espere a que Home Assistant pase a recogerlo, cada 30 s, y en la
+primera prueba esa espera fueron 16 s con el otro al teléfono. Con Home Assistant en
+directo, el backend la manda él a tu móvil (`MOVIL_NOTIFY`, o el de
+`GARAJE_PEDIR_UBICACION`) como *time-sensitive* y la quita de la cola; si no puede, sale por
+la cola como antes. Y para que haga falta consultar menos, el margen que des al encargarlo
+(«si no hay a las nueve, a las nueve y media vale») va en `contexto`.
+Sin respuesta en `TERCEROS_CONSULTA_SEG` (90), sigue con «no contesta ahora»
 y el modelo se despide. Como mucho `TERCEROS_CONSULTAS_MAX` (2) por llamada, y solo si el
 móvil recoge avisos: por correo no hay botón, así que entonces se despide y te deja la
 pregunta en el resultado.

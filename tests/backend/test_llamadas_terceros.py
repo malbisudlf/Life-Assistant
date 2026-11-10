@@ -130,8 +130,9 @@ class TestLlamar:
         cuerpo = kw["json"]
         assert cuerpo["to"] == "+34600111222"
         assert cuerpo["linea"] == "o2" and cuerpo["mode"] == "tercero"
-        # Se le saluda por el nombre de pila, no por «Erik Uni».
-        assert cuerpo["message"].startswith("Hola, Erik. Soy Jarvis, el asistente de Mikel.")
+        # Sin presentarse (2026-11-10): un saludo y el encargo, que dice de parte de quién.
+        assert cuerpo["message"].startswith("Hola, buenos días. Me pide que te pregunte")
+        assert "Jarvis" not in cuerpo["message"] and "asistente" not in cuerpo["message"]
         assert "si comes hoy" in cuerpo["message"]
         mision = main._terceros[cuerpo["tercero"]]
         assert mision["call_id"] == "llamada-1" and mision["estado"] == "llamando"
@@ -146,7 +147,7 @@ class TestLlamar:
         assert _llamar(nombre="Erika Ruiz")["ok"] is True
         _, _, kw = terceros.called("POST", "/api/outbound-call")[0]
         assert kw["json"]["to"] == "+34944111222"
-        assert kw["json"]["message"].startswith("Hola, Erika.")
+        assert kw["json"]["message"].startswith("Hola, buenos días.")
 
     def test_desconocido_no_se_llama(self, terceros):
         r = _llamar(nombre="Aimar")
@@ -187,6 +188,8 @@ class TestLlamar:
     def test_apodo_lleva_a_una_ficha_y_saluda_por_su_nombre(self, terceros, monkeypatch):
         monkeypatch.setattr(main, "TERCEROS_APODOS",
                             {"erika": {"contacto": "Erik Uni", "saludo": "Eri"}, "el primo": "Erika Ruiz"})
+        # El saludo por su nombre solo se oye con la presentación de antes.
+        monkeypatch.setattr(main, "TERCEROS_SE_PRESENTA", True)
         r = _llamar(nombre="Érika")
         assert r["ok"] is True and r["llamando_a"] == "Erik Uni"
         _, _, kw = terceros.called("POST", "/api/outbound-call")[0]

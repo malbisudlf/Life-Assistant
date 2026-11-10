@@ -59,7 +59,8 @@ ejecuta el botón «Sí, llama».
 
 1. **Cada intento es una llamada a terceros, con todas sus reglas.** Solo a un contacto
    guardado y por su nombre (nunca un número), un modelo sin herramientas al otro lado, y
-   presentándose como el asistente de Mikel. En la tabla se guarda el **nombre** del
+   sin presentarse pero sin mentir: pide las cosas a nombre de Mikel y, si le preguntan si
+   es una máquina, dice que sí. En la tabla se guarda el **nombre** del
    contacto, no su teléfono: se busca otra vez en cada llamada.
 2. **Insistir se pregunta.** La primera llamada la pediste tú. Antes de cada una de las
    siguientes llega «¿Vuelvo a llamar ahora?» con tres botones: *Sí, llama* (llama en el
@@ -106,4 +107,7 @@ ejecuta el botón «Sí, llama».
 - **No espera en una centralita** («pulse 1 para citas»): no marca tonos. Con un menú así,
   la llamada acaba sin hablar con nadie y cuenta como intento.
 - **No lleva varios asuntos en una llamada** ni llama a dos personas por el mismo recado.
-- **No se ha probado todavía con una llamada de verdad**: lo probado son sus 36 tests.
+- **Probado con una llamada de verdad el 2026-11-10** (Mikel haciendo de restaurante):
+  pidió mesa para cuatro a las 21:00, le ofrecieron las 21:30, se lo consultó a Mikel sin
+  colgar y cerró el recado a la primera. Lo que esa prueba no tocó: insistir cuando no lo
+  cogen, y el «llame mañana».

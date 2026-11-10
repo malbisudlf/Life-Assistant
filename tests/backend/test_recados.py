@@ -380,8 +380,9 @@ class TestLaLlamadaDeVerdad:
         main._j_llamar_a_alguien("clínica", "Llamo para pedir cita.", "una cita")
         cuerpo = self._cuerpo(linea)
         assert cuerpo["voz"] == "azure:es-ES-Tristan:DragonHDLatestNeural"
-        # La voz cambia; lo que dice, no: se presenta como lo que es.
-        assert cuerpo["message"].startswith("Hola, Clínica. Soy Jarvis, el asistente de Mikel.")
+        # Ni se presenta ni saluda a «Clínica»: un saludo y el encargo.
+        assert cuerpo["message"].startswith("Hola, buen") and cuerpo["message"].endswith("Llamo para pedir cita.")
+        assert "Jarvis" not in cuerpo["message"] and "Clínica" not in cuerpo["message"]
         main._terceros.clear()
         main._j_llamar_a_alguien("yo", "Prueba de la línea.", "probar")
         assert "voz" not in self._cuerpo(linea)
@@ -413,6 +414,84 @@ class TestLaLlamadaDeVerdad:
         monkeypatch.setattr(main, "_recado_tras_llamada", roto)
         main._recado_tras_llamada_seguro({"recado": "r-1", "nombre": "Clínica Dental Ibai"}, "No lo ha cogido.")
         assert avisos == [("📞 Clínica Dental Ibai", "No lo ha cogido.")]
+
+
+class TestSinPresentarse:
+    """2026-11-10: «que no se presente, que pida mesa para 4 a nombre de Mikel»."""
+
+    MISION = {"nombre": "Restaurante Prueba", "apertura": "Hola, buenas tardes. Quería reservar.",
+              "objetivo": "una mesa", "contexto": ""}
+
+    @pytest.mark.parametrize("hora, saludo", [(9, "buenos días"), (16, "buenas tardes"), (21, "buenas noches")])
+    def test_el_saludo_va_con_la_hora(self, monkeypatch, hora, saludo):
+        monkeypatch.setattr(main, "_ahora_local", lambda: datetime(2026, 11, 10, hora, 0, tzinfo=main.LOCAL_TZ))
+        assert main._apertura_tercero("Restaurante Prueba", " Quería reservar una mesa, a nombre de Mikel. ") == (
+            f"Hola, {saludo}. Quería reservar una mesa, a nombre de Mikel.")
+
+    def test_no_dice_ser_mikel_y_si_le_preguntan_no_miente(self):
+        sistema = main._tercero_sistema(self.MISION)
+        assert "No te presentas ni dices tu nombre" in sistema and "Eres Jarvis" not in sistema
+        assert "No eres Mikel y nunca dices serlo" in sistema
+        assert "di la verdad sin rodeos: eres su asistente, una inteligencia artificial" in sistema
+        assert "Has empezado la llamada con esta frase: «Hola, buenas tardes. Quería reservar.»" in sistema
+
+    def test_a_el_mismo_y_con_el_interruptor_se_presenta_como_antes(self, monkeypatch):
+        assert main._apertura_tercero("Mikel", "Prueba.", propio=True).startswith("Hola, señor. Soy Jarvis")
+        assert "Eres Jarvis" in main._tercero_sistema({**self.MISION, "propio": True})
+        monkeypatch.setattr(main, "TERCEROS_SE_PRESENTA", True)
+        assert main._apertura_tercero("Erik Uni", "Te llamo por lo del sábado.") == (
+            "Hola, Erik. Soy Jarvis, el asistente de Mikel. Te llamo por lo del sábado.")
+        assert "Ya te has presentado con esta frase" in main._tercero_sistema(self.MISION)
+
+
+class TestLaConsultaSaleYa:
+    """La pregunta de una llamada no espera a que Home Assistant pase a recogerla."""
+
+    @pytest.fixture
+    def cola(self, monkeypatch, mock_requests):
+        monkeypatch.setattr(main, "HA_URL", "http://ha.test:8123")
+        monkeypatch.setattr(main, "HA_TOKEN", "ha-token")
+        monkeypatch.setattr(main, "MOVIL_NOTIFY", "notify.mobile_app_movil")
+        monkeypatch.setattr(main, "GARAJE_PEDIR_UBICACION", "")
+        monkeypatch.setattr(main, "_en_clase", lambda: None)
+        aviso = {"titulo": "📞 En la llamada con Restaurante", "texto": "¿A las 21:30?", "tag": "p-1", "id": "p-1",
+                 "acciones": [{"action": "LA_APAGAR_resp1-p-1", "title": "Sí"}]}
+        monkeypatch.setattr(main, "_avisos_movil", [dict(aviso), {"titulo": "otro", "texto": "x", "tag": "p-2"}])
+        return mock_requests
+
+    def test_va_directa_al_movil_y_sale_de_la_cola(self, cola):
+        cola.add("POST", "/api/services/notify/mobile_app_movil", FakeResponse([]))
+        assert main._adelantar_aviso("p-1") is True
+        _, url, kw = cola.called("POST", "/api/services/notify/")[0]
+        assert url == "http://ha.test:8123/api/services/notify/mobile_app_movil"
+        assert kw["json"] == {"title": "📞 En la llamada con Restaurante", "message": "¿A las 21:30?",
+                              "data": {"actions": [{"action": "LA_APAGAR_resp1-p-1", "title": "Sí"}], "tag": "p-1",
+                                       "push": {"interruption-level": "time-sensitive"}}}
+        # El otro aviso sigue esperando su sondeo; este ya no, para no llegar dos veces.
+        assert [a["tag"] for a in main._avisos_movil] == ["p-2"]
+
+    def test_en_clase_llega_pero_no_atraviesa_el_silencio(self, cola, monkeypatch):
+        monkeypatch.setattr(main, "_en_clase", lambda: {"titulo": "Clase"})
+        cola.add("POST", "/api/services/notify/mobile_app_movil", FakeResponse([]))
+        assert main._adelantar_aviso("p-1") is True
+        assert "push" not in cola.called("POST", "/api/services/notify/")[0][2]["json"]["data"]
+
+    def test_si_home_assistant_no_la_acepta_se_queda_en_la_cola(self, cola):
+        cola.add("POST", "/api/services/notify/mobile_app_movil", FakeResponse({}, status_code=500))
+        assert main._adelantar_aviso("p-1") is False
+        assert [a["tag"] for a in main._avisos_movil] == ["p-1", "p-2"]
+
+    def test_sin_servicio_o_sin_directo_todo_como_antes(self, cola, monkeypatch):
+        assert main._adelantar_aviso("no-esta") is False
+        monkeypatch.setattr(main, "MOVIL_NOTIFY", "notify.persistent_notification")     # no es un móvil
+        assert main._movil_notify() == "" and main._adelantar_aviso("p-1") is False
+        # Sin `MOVIL_NOTIFY`, vale el móvil del garaje, que es el mismo.
+        monkeypatch.setattr(main, "MOVIL_NOTIFY", "")
+        monkeypatch.setattr(main, "GARAJE_PEDIR_UBICACION", "notify.mobile_app_del_garaje")
+        assert main._movil_notify() == "notify.mobile_app_del_garaje"
+        monkeypatch.setattr(main, "HA_TOKEN", "")
+        assert main._adelantar_aviso("p-1") is False and len(main._avisos_movil) == 2
+        assert cola.called("POST", "/api/services/notify/") == []
 
 
 class TestLaTabla:
