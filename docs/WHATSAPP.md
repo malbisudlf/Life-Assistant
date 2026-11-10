@@ -217,12 +217,25 @@ Si es urgente, dímelo y se lo paso. (Jarvis, su asistente)». Va en la misma pa
 vigilancia, antes de clasificar, así que **solo funciona con `WHATSAPP_VIGILANCIA=1`**.
 
 Es mandar en tu nombre sin botón, la excepción a «lo que sale lo apruebas tú», y por eso:
-**vacío no contesta a nadie** (se apunta chat a chat), nunca a un grupo, el texto lo escribe
-el backend y no repite nada de lo que te dijeron, una vez por chat cada `WA_NM_CADA_H` (3)
+**vacío no contesta a nadie** (se apunta chat a chat), el texto lo escribe el
+backend y no repite nada de lo que te dijeron, una vez por chat cada `WA_NM_CADA_H` (3)
 horas y `WA_NM_DIA_MAX` (10) al día, y nunca si en esa ráfaga ya has escrito tú. Lo que te
 contesten («sí, es urgente») lo mira la vigilancia como siempre: en el gimnasio avisa al
 momento, y en clase espera al final, como pediste el 2026-11-05. Las horas de los envíos
 viven en memoria: un reinicio las pone a cero, y como mucho contesta una vez más.
+
+**Grupos (2026-11-10): solo si te etiquetan.** Un grupo puede ir en la lista (su id acaba en
+`@g.us`), pero solo se le contesta cuando un mensaje reciente (`WA_NM_MENCION_MAX_MIN`, 10
+min) de otra persona te **etiqueta con una @ de verdad**. Eso lo sabe el puente: guarda
+`menciona` (columna de `mensajes`, migrada sola al arrancar) cuando el `mentionedJid` del
+mensaje trae tu número o tu id anónimo (`@lid`), y lo devuelve en `/mensajes`. No bastan que
+alguien escriba en el grupo, que te nombre sin etiquetar ni que responda a algo tuyo
+(se pidió así). Dos diferencias con un chat individual: el aviso dice «Si es urgente, que
+le llame» (la vigilancia no lee grupos, nadie le pasaría el recado) y los mensajes del
+grupo se piden uno a uno por su chat, y solo mientras toca no molestar
+(`_wa_nm_mensajes_de_grupos`): pedirlos todos con `grupos=1` llenaría las 400 plazas de la
+pasada con grupos y dejaría fuera a los individuales. La clasificación de la vigilancia
+sigue sin leer grupos (`WHATSAPP_VIGILAR_GRUPOS`), así que lo que dicen no sale a OpenAI.
 
 ## Por qué un mensaje no puede darle órdenes
 

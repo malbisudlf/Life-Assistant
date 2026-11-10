@@ -34294,8 +34294,10 @@ def _wa_vig_pasada() -> dict:
         return {}
     datos = _whatsapp("GET", "/mensajes", {"horas": WA_VIG_HORAS, "limite": 400,
                                            **({"grupos": "1"} if WHATSAPP_VIGILAR_GRUPOS else {})})
+    mensajes = list(datos.get("mensajes") or [])
+    mensajes += _wa_nm_mensajes_de_grupos(mensajes)
     por_chat: dict = {}
-    for m in datos.get("mensajes") or []:
+    for m in mensajes:
         d = _fecha_utc(m.get("hora"))
         if d and _wa_chat_valido(m.get("chat")):
             por_chat.setdefault(m["chat"], []).append((d.timestamp(), m))
@@ -34333,37 +34335,61 @@ def _wa_vig_pasada() -> dict:
 
 # ── No molestar: Jarvis contesta por ti en clase y en el gimnasio (2026-11-08) ──
 # «Mikel está en clase hasta las 12:00. Si es urgente, dímelo y se lo paso.» Es mandar un
-# mensaje en su nombre sin que pulse nada, así que tiene tres candados:
-#  - **Apagado por defecto y por lista**: solo a los chats de `WHATSAPP_NO_MOLESTAR` (ids de
-#    chats individuales, uno a uno). Vacío, no contesta a nadie. Nunca a un grupo.
+# mensaje en su nombre sin que pulse nada, así que tiene cuatro candados:
+#  - **Apagado por defecto y por lista**: solo a los chats de `WHATSAPP_NO_MOLESTAR` (ids,
+#    uno a uno). Vacío, no contesta a nadie.
+#  - **Un grupo solo si te etiquetan** (2026-11-10): a un grupo de la lista se le contesta
+#    únicamente cuando un mensaje reciente de otro te etiqueta con una @ de verdad
+#    (`menciona`, que pone el puente). Que alguien escriba en el grupo, te nombre sin
+#    etiquetar o conteste a algo tuyo no basta. Y el aviso de un grupo no manda a nadie «a
+#    decírselo a Jarvis», porque la vigilancia no mira grupos: «que le llame».
 #  - **El texto lo escribe el backend**, no un modelo, y no repite nada de lo que te dijeron:
 #    solo dónde estás y hasta cuándo (la hora de fin de la clase del calendario).
 #  - **Una vez por chat cada `WA_NM_CADA_H` horas** y `WA_NM_DIA_MAX` al día, y nunca si en
 #    esa ráfaga ya has contestado tú (estás con el móvil).
-# Lo que te dicen después («sí, es urgente») lo sigue mirando la vigilancia: en el gimnasio
-# te avisa al momento, y en clase espera al final, que es lo que pediste el 2026-11-05.
+# Lo que te dicen después («sí, es urgente») lo sigue mirando la vigilancia, en los chats
+# individuales: en el gimnasio te avisa al momento, y en clase espera al final, que es lo
+# que pediste el 2026-11-05.
 WHATSAPP_NO_MOLESTAR = frozenset(
     c.strip() for c in os.getenv("WHATSAPP_NO_MOLESTAR", "").split(",")
-    if c.strip() and not c.strip().endswith("@g.us") and _wa_chat_valido(c.strip()))
+    if c.strip() and _wa_chat_valido(c.strip()))
 WA_NM_CADA_H = 3
 WA_NM_DIA_MAX = 10
+WA_NM_MENCION_MAX_MIN = 10    # una etiqueta más vieja que esto ya no se contesta
 _WA_NM_FIRMA = "(Jarvis, su asistente)"
 _wa_nm_enviados: dict = {}
 
 
-def _wa_no_molestar_texto() -> Optional[str]:
+def _wa_no_molestar_texto(grupo: bool = False) -> Optional[str]:
+    # En un grupo no se dice «dímelo»: la vigilancia no lee grupos, así que nadie se lo pasaría.
+    urgente = "Si es urgente, que le llame." if grupo else "Si es urgente, dímelo y se lo paso."
     clase = _en_clase()
     if clase:
         return (f"Mikel está en clase hasta las {clase['fin'].strftime('%H:%M')} y no mira el móvil. "
-                f"Si es urgente, dímelo y se lo paso. {_WA_NM_FIRMA}")
+                f"{urgente} {_WA_NM_FIRMA}")
     if (_lugar_actual_seguro() or {}).get("lugar") == LUGAR_GIMNASIO:
-        return f"Mikel está entrenando y no mira el móvil. Si es urgente, dímelo y se lo paso. {_WA_NM_FIRMA}"
+        return f"Mikel está entrenando y no mira el móvil. {urgente} {_WA_NM_FIRMA}"
     return None
+
+
+def _wa_me_etiquetan(nuevos: list) -> bool:
+    """Algún mensaje de otro, reciente, que te etiqueta de verdad. Sin la hora no se fía."""
+    ahora = time.time()
+    for m in nuevos:
+        if m.get("mio") or m.get("menciona") is not True:
+            continue
+        d = _fecha_utc(m.get("hora"))
+        if d and 0 <= ahora - d.timestamp() <= WA_NM_MENCION_MAX_MIN * 60:
+            return True
+    return False
 
 
 def _wa_no_molestar(chat: str, nuevos: list) -> bool:
     """Contesta por ti si toca (ver arriba). True si ha mandado algo."""
-    if chat not in WHATSAPP_NO_MOLESTAR or chat.endswith("@g.us"):
+    if chat not in WHATSAPP_NO_MOLESTAR:
+        return False
+    grupo = chat.endswith("@g.us")
+    if grupo and not _wa_me_etiquetan(nuevos):
         return False
     if any(m.get("mio") and _WA_NM_FIRMA not in str(m.get("texto") or "") for m in nuevos):
         return False
@@ -34372,7 +34398,7 @@ def _wa_no_molestar(chat: str, nuevos: list) -> bool:
         return False
     if sum(1 for t in _wa_nm_enviados.values() if ahora - t < 86400) >= WA_NM_DIA_MAX:
         return False
-    texto = _wa_no_molestar_texto()
+    texto = _wa_no_molestar_texto(grupo)
     if not texto:
         return False
     r = _j_whatsapp_enviar(chat, texto)
@@ -34380,8 +34406,29 @@ def _wa_no_molestar(chat: str, nuevos: list) -> bool:
         logger.warning("WhatsApp: el no molestar no pudo contestar (%s)", str(r.get("error"))[:80])
         return False
     _wa_nm_enviados[chat] = ahora
-    logger.info("WhatsApp: no molestar, contestado por ti a un chat de la lista")
+    logger.info("WhatsApp: no molestar, contestado por ti a %s de la lista", "un grupo" if grupo else "un chat")
     return True
+
+
+def _wa_nm_mensajes_de_grupos(ya: list) -> list:
+    """Los mensajes recientes de los grupos de la lista de no molestar, de uno en uno por su
+    chat: pedirlos todos con `grupos=1` metería los de decenas de grupos en las 400 plazas
+    de la pasada y dejaría fuera a los individuales. Solo mientras toca no molestar (en
+    clase o en el gimnasio): el resto del día no se pide nada. Un grupo que falla se salta."""
+    grupos = [c for c in WHATSAPP_NO_MOLESTAR if c.endswith("@g.us")]
+    if not grupos or not _wa_no_molestar_texto(grupo=True):
+        return []
+    vistos = {(m.get("chat"), m.get("hora"), m.get("texto")) for m in ya}
+    extra: list = []
+    for chat in grupos:
+        try:
+            r = _whatsapp("GET", "/mensajes", {"chat": chat, "horas": WA_VIG_HORAS, "limite": 60})
+        except Exception as e:
+            logger.warning("WhatsApp: no se pudo mirar un grupo de no molestar (%s)", type(e).__name__)
+            continue
+        extra += [m for m in r.get("mensajes") or []
+                  if (m.get("chat"), m.get("hora"), m.get("texto")) not in vistos]
+    return extra
 
 
 def _wa_vig_hilo() -> None:
