@@ -143,6 +143,9 @@ SIN_COPIA = frozenset({
     "noche_partes", "noche_items", "sesion_avisos", "migraciones_aplicadas",
     "presencia_tramos", "despertares", "moodle_entregas", "jarvis_preguntas",
     "lecturas_telefono",
+    # Los recados: asuntos de días, con lo que dijo otra persona por teléfono. Cuando
+    # haría falta restaurarlos ya estarían cerrados o caducados.
+    "jarvis_recados",
     # De WhatsApp, que se quitó el 2026-10-01: la borra `20261001_quitar_whatsapp`. Sigue
     # aquí porque su `create table` sigue en las migraciones, y nunca se copió.
     "whatsapp_chats",

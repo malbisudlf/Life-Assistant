@@ -131,6 +131,23 @@ Dos herramientas de Jarvis, que solo existen con `TERCEROS_LLAMADAS=1`:
    llamada. Sin tope diario desde el 2026-11-01, a petición de Mikel (`TERCEROS_DIA_MAX`,
    0; con un número vuelve a haberlo, y «llámame» no cuenta).
 
+## La voz (2026-11-10)
+
+Mikel: «la de Jarvis mola, pero no es creíble». La voz de Jarvis (Fish, con la británica
+de Azure detrás) es un personaje; a quien coge el teléfono en una clínica le suena a
+broma o a centralita. Desde el parche 45, las llamadas a **otras personas** hablan con
+una voz española de Azure, `TERCEROS_VOZ` (`azure:es-ES-Tristan:DragonHDLatestNeural`,
+elegida por él entre tres muestras). El backend la manda en el cuerpo de la llamada
+(`voz`) y la voice-app la usa solo en esa: Jarvis sigue hablándole a él con la suya,
+también en «llámame» y al devolverle la llamada.
+
+**Cambia la voz, no lo que dice.** La regla 4 sigue igual: se presenta como «Jarvis, el
+asistente de Mikel» y, si le preguntan si es una máquina, dice que sí. Una voz natural
+sirve para que no cuelguen antes de escuchar, no para hacerse pasar por una persona.
+
+Si Azure falla a media llamada, la frase sale con la voz de siempre antes que dejar la
+línea muda. Sin `TERCEROS_VOZ`, todo como antes.
+
 ## Lo que pasa después y en medio (2026-11-08)
 
 **La cita, al calendario con botón.** Al colgar, si la llamada fue de verdad (ni buzón ni
@@ -194,6 +211,8 @@ Lo que **no** se sabe todavía, y la primera llamada lo dirá:
   recado (la presentación, que ya dice el motivo, y «Cuando puedas, contéstale a Mikel») y
   cuelga sin preguntar al backend. Te llega «Ha saltado el buzón de Aita y le he dejado el
   recado». Si es una persona que habla mucho, sigue la conversación normal.
-- **No insiste.** Si no lo coge, te llega «no lo ha cogido» y decides tú.
+- **No insiste.** Si no lo coge, te llega «no lo ha cogido» y decides tú. Para que
+  insista hasta conseguirlo están los recados (`docs/RECADOS.md`), que son esta misma
+  llamada repetida con memoria.
 - **No hay llamadas entrantes.** Llamar al fijo y que conteste Jarvis es justo lo que el
   480 impide.

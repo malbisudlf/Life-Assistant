@@ -463,9 +463,14 @@ class TestJarvisDespachador:
         monkeypatch.setattr(main, "GARAJE_SENSOR", "binary_sensor.puerta_garaje")
         monkeypatch.setattr(main, "GARAJE_MOVIL", "device_tracker.movil")
         monkeypatch.setattr(main, "CAMARAS", "garaje=camera.garaje")
+        # Y los recados, que nacen apagados y van encima de las llamadas a otros.
+        monkeypatch.setattr(main, "RECADOS", True)
         esquema = main._jarvis_esquema()
         nombres = {h["function"]["name"] for h in esquema}
-        assert nombres == set(main._JARVIS_HERRAMIENTAS)
+        # Todas menos las internas, que solo ejecuta un botón y no se anuncian a ningún modelo.
+        internas = {n for n, h in main._JARVIS_HERRAMIENTAS.items() if h.get("interna")}
+        assert internas == {"recado_seguir"}
+        assert nombres == set(main._JARVIS_HERRAMIENTAS) - internas
         # Toda herramienta necesita descripción: es lo único que el modelo usa para elegir.
         assert all(h["function"]["description"] for h in esquema)
 

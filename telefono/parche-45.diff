@@ -1,0 +1,281 @@
+--- a/voice-app/lib/tts-service.js
++++ b/voice-app/lib/tts-service.js
+@@ -201,7 +201,20 @@
+     + '</lang></voice></speak>';
+ }
+ 
+-function peticionAzure(text) {
++// Parche 45: la voz de las llamadas a OTRAS personas. La de Jarvis (Fish, y la británica
++// de Azure detrás) es un personaje: a Mikel le gusta, y a quien coge el teléfono en una
++// clínica le suena a broma o a centralita. Quien llama pasa `voiceId` = «azure:<voz>»
++// (una de las españolas de Azure, p. ej. `es-ES-Tristan:DragonHDLatestNeural`) y esa
++// llamada entera habla con ella. Lo que dice no cambia: se sigue presentando como el
++// asistente de Mikel.
++const VOZ_PEDIDA = /^azure:([A-Za-z0-9:.-]{3,80})$/;
++
++function vozPedida(voiceId) {
++  const m = typeof voiceId === 'string' ? voiceId.match(VOZ_PEDIDA) : null;
++  return m ? m[1] : null;
++}
++
++function peticionAzure(text, voz) {
+   return {
+     method: 'POST',
+     url: `https://${encodeURIComponent(AZURE_SPEECH_REGION)}.tts.speech.microsoft.com/cognitiveservices/v1`,
+@@ -211,7 +224,7 @@
+       'X-Microsoft-OutputFormat': AZURE_SPEECH_FORMATO,
+       'User-Agent': 'claude-phone'
+     },
+-    data: ssml(text, AZURE_SPEECH_VOICE)
++    data: ssml(text, voz || AZURE_SPEECH_VOICE)
+   };
+ }
+ 
+@@ -231,8 +244,8 @@
+ // Una voz con `peticion` y sin `sintetizar` se sintetiza entera igual, si no va en directo
+ for (const v of Object.keys(VOCES)) {
+   if (!VOCES[v].sintetizar && VOCES[v].peticion) {
+-    VOCES[v].sintetizar = async function (text) {
+-      const cfg = VOCES[v].peticion(text);
++    VOCES[v].sintetizar = async function (text, voiceId) {
++      const cfg = VOCES[v].peticion(text, v === 'azure' ? vozPedida(voiceId) : null);
+       cfg.responseType = 'arraybuffer';
+       cfg.timeout = TTS_TIMEOUT_MS;
+       const response = await axios(cfg);
+@@ -249,9 +262,9 @@
+  * Pide el audio en streaming y vuelve en cuanto llega el primer trozo. Lanza si no llega
+  * a tiempo o si la voz contesta con error, para que generateSpeech pruebe la siguiente.
+  */
+-function abrirEnDirecto(voz, text) {
++function abrirEnDirecto(voz, text, voiceId) {
+   return new Promise(function (resolve, reject) {
+-    const cfg = VOCES[voz].peticion(text);
++    const cfg = VOCES[voz].peticion(text, voz === 'azure' ? vozPedida(voiceId) : null);
+     cfg.responseType = 'stream';
+     cfg.timeout = TTS_PRIMER_BYTE_MS;
+     let resuelto = false;
+@@ -392,6 +405,9 @@
+ const anticipadas = new Map();
+ 
+ function anticipar(text, voiceId) {
++  // Con una voz pedida no se anticipa: `anticipadas` va por texto, y la misma frase con
++  // la voz de Jarvis se colaría en una llamada que habla con otra.
++  if (vozPedida(voiceId)) return;
+   if (!text || fijas.has(text) || anticipadas.has(text)) return;
+   const p = generar(text, voiceId);
+   p.catch(function () {});
+@@ -401,6 +417,8 @@
+ }
+ 
+ async function generateSpeech(text, voiceId = DEFAULT_VOICE_ID) {
++  // Parche 45: las frases fijas y las anticipadas son de la voz de Jarvis.
++  if (vozPedida(voiceId)) return generar(text, voiceId);
+   // Mirando el disco cada vez: que falte el fichero no puede costar una llamada.
+   if (fijas.has(text) && fs.existsSync(path.join(DIR_FIJAS, ficheroFija(text)))) {
+     return `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/frases-fijas/${ficheroFija(text)}`;
+@@ -415,7 +433,12 @@
+ 
+ async function generar(text, voiceId = DEFAULT_VOICE_ID) {
+   const startTime = Date.now();
+-  const orden = ordenDeVoces().filter(function (v) { return VOCES[v].configurada(); });
++  let orden = ordenDeVoces().filter(function (v) { return VOCES[v].configurada(); });
++  // Parche 45: con una voz pedida, Azure va delante. Si falla, las de siempre detrás:
++  // cambiar de voz a media llamada es mejor que quedarse mudo.
++  if (vozPedida(voiceId) && VOCES.azure.configurada()) {
++    orden = ['azure'].concat(orden.filter(function (v) { return v !== 'azure'; }));
++  }
+   if (!orden.length) {
+     throw new Error('TTS generation failed: no hay ninguna voz configurada (ELEVENLABS_API_KEY o AZURE_SPEECH_*)');
+   }
+@@ -432,7 +455,7 @@
+     try {
+       logger.info('Generating speech', { proveedor: voz, textLength: text.length, voiceId });
+       if (enDirecto(voz)) {
+-        const id = await abrirEnDirecto(voz, text);
++        const id = await abrirEnDirecto(voz, text, voiceId);
+         delete apartadaHasta[voz];
+         logger.info('Speech generation successful', {
+           proveedor: voz, enDirecto: true, id, latency: Date.now() - startTime, textLength: text.length
+@@ -572,5 +595,6 @@
+   servirEnDirecto,
+   setAudioDir,
+   cleanupOldFiles,
+-  getAvailableVoices
++  getAvailableVoices,
++  vozPedida
+ };
+--- a/voice-app/lib/outbound-routes.js
++++ b/voice-app/lib/outbound-routes.js
+@@ -78,6 +78,11 @@
+   if ((body.mode === 'tercero') !== (body.linea === 'o2')) {
+     return { valid: false, error: 'Mode "tercero" goes with linea "o2", and only it' };
+   }
++  // Parche 45: la voz de esta llamada, solo para las de terceros y solo con esta forma.
++  if (body.voz !== undefined && (body.mode !== 'tercero' || typeof body.voz !== 'string'
++      || !/^azure:[A-Za-z0-9:.-]{3,80}$/.test(body.voz))) {
++    return { valid: false, error: 'Field "voz" must be "azure:<voice>" and only with mode "tercero"' };
++  }
+   if (body.mode === 'tercero') {
+     // Los mismos que deja el backend (_tel_llamable): móviles y fijos geográficos.
+     if (!/^\+34(?:6\d{8}|7[1-4]\d{7}|8[1-8]\d{7}|9[1-8]\d{7})$/.test(body.to)) {
+@@ -183,6 +188,8 @@
+     var webhookUrl = req.body.webhookUrl;
+     var escuchaPasiva = req.body.escuchaPasiva === true;
+     var tercero = mode === 'tercero' ? req.body.tercero : null;
++    // Parche 45: la voz con que se habla a otra persona (la pide el backend).
++    var vozTercero = tercero && req.body.voz ? req.body.voz : null;
+ 
+     // Look up device configuration
+     var deviceConfig = null;
+@@ -293,7 +300,7 @@
+           ? await prepararLlamada({
+               tercero: tercero,
+               apertura: message,
+-              voiceId: (deviceConfig && deviceConfig.voiceId) ? deviceConfig.voiceId : null,
++              voiceId: vozTercero || ((deviceConfig && deviceConfig.voiceId) ? deviceConfig.voiceId : null),
+               ttsService: ttsService,
+               log: function(m) { logger.info(m, { callId: callId }); }
+             })
+@@ -326,7 +333,7 @@
+         session.setDialog(dialog);
+         session.setEndpoint(endpoint);
+         session.answeredBy = result.answeredBy || 'unknown';
+-        var voiceId = (deviceConfig && deviceConfig.voiceId) ? deviceConfig.voiceId : null;
++        var voiceId = vozTercero || ((deviceConfig && deviceConfig.voiceId) ? deviceConfig.voiceId : null);
+ 
+         if (tercero) {
+           // Parche 32: la presentación la dice la conversación, después del «¿Sí?».
+@@ -579,5 +586,6 @@
+ 
+ module.exports = {
+   router: router,
+-  setupRoutes: setupRoutes
++  setupRoutes: setupRoutes,
++  validateRequest: validateRequest
+ };
+--- /dev/null
++++ b/voice-app/test/parche45.test.js
+@@ -0,0 +1,123 @@
++/**
++ * Parche 45: las llamadas a otras personas hablan con una voz española de Azure, no con la
++ * de Jarvis. Ver telefono/PARCHES.md en Life Assistant.
++ *
++ * `axios` es un doble: se lanza con `node --test test/parche45.test.js`, dentro de la
++ * imagen y sin red.
++ */
++'use strict';
++
++const test = require('node:test');
++const assert = require('node:assert');
++const Module = require('node:module');
++const os = require('node:os');
++const fs = require('node:fs');
++const path = require('node:path');
++const { Readable } = require('node:stream');
++
++for (const nivel of ['log', 'warn', 'error', 'info']) console[nivel] = function () {};
++
++let pedidos = [];
++let responder = null;
++const axiosFalso = async function axios(opciones) {
++  pedidos.push(opciones);
++  const r = await responder(opciones);
++  if (opciones.responseType === 'stream' && Buffer.isBuffer(r.data)) r.data = Readable.from([r.data]);
++  return r;
++};
++axiosFalso.defaults = {};
++const requireDeVerdad = Module.prototype.require;
++Module.prototype.require = function (id) {
++  if (id === 'axios') return axiosFalso;
++  return requireDeVerdad.apply(this, arguments);
++};
++
++const RUTA = require.resolve('../lib/tts-service');
++const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'p45-'));
++function servicio(entorno) {
++  for (const k of ['ELEVENLABS_API_KEY', 'AZURE_SPEECH_KEY', 'AZURE_SPEECH_REGION', 'AZURE_SPEECH_VOICE',
++                   'TTS_ORDEN', 'TTS_PAUSA_CUOTA_MS', 'TTS_PAUSA_MS', 'VOZ_URL', 'VOZ_TOKEN', 'VOZ_VOZ',
++                   'TTS_EN_DIRECTO', 'TTS_PRIMER_BYTE_MS', 'FISH_AUDIO_API_KEY', 'FISH_AUDIO_VOICE']) delete process.env[k];
++  process.env.TTS_EN_DIRECTO = '';
++  Object.assign(process.env, entorno);
++  delete require.cache[RUTA];
++  pedidos = [];
++  const s = require('../lib/tts-service');
++  s.setAudioDir(DIR);
++  return s;
++}
++
++// Como corre en caja: Fish (Jarvis) delante y la británica de Azure detrás.
++const CASA = { FISH_AUDIO_API_KEY: 'fk', FISH_AUDIO_VOICE: 'jarvis-id', AZURE_SPEECH_KEY: 'az',
++               AZURE_SPEECH_REGION: 'francecentral', AZURE_SPEECH_VOICE: 'en-GB-Ryan:DragonHDLatestNeural',
++               TTS_ORDEN: 'fish,azure' };
++const TRISTAN = 'azure:es-ES-Tristan:DragonHDLatestNeural';
++const MP3 = Buffer.from('ID3fake-mp3');
++function esFish(o) { return o.url.indexOf('fish.audio') !== -1; }
++function esAzure(o) { return o.url.indexOf('tts.speech.microsoft.com') !== -1; }
++
++test('45: sin voz pedida, todo como siempre (habla Fish, la de Jarvis)', async function () {
++  responder = async function () { return { data: MP3 }; };
++  const s = servicio(CASA);
++  await s.generateSpeech('Buenos días, señor.', 'voz-del-dispositivo');
++  assert.deepStrictEqual(pedidos.map(esFish), [true]);
++});
++
++test('45: con la voz pedida habla Azure con ESA voz, y Fish ni se toca', async function () {
++  responder = async function () { return { data: MP3 }; };
++  const s = servicio(CASA);
++  const url = await s.generateSpeech('Hola, buenas tardes.', TRISTAN);
++  assert.match(url, /\.mp3$/);
++  assert.strictEqual(pedidos.length, 1);
++  assert.ok(esAzure(pedidos[0]));
++  assert.match(pedidos[0].data, /<voice name="es-ES-Tristan:DragonHDLatestNeural">/);
++  assert.ok(pedidos[0].data.indexOf('en-GB-Ryan') === -1, 'no la británica de Jarvis');
++});
++
++test('45: en directo también va con la voz pedida', async function () {
++  responder = async function () { return { data: MP3 }; };
++  const s = servicio(Object.assign({}, CASA, { TTS_EN_DIRECTO: 'fish,azure' }));
++  const url = await s.generateSpeech('Hola.', TRISTAN);
++  assert.match(url, /^shout:\/\/.*\/tts-stream\/[0-9a-f]+\.mp3$/);
++  assert.strictEqual(pedidos[0].responseType, 'stream');
++  assert.match(pedidos[0].data, /<voice name="es-ES-Tristan:DragonHDLatestNeural">/);
++});
++
++test('45: si Azure falla, la frase sale con la de siempre antes que quedarse mudo', async function () {
++  responder = async function (o) { if (esAzure(o)) throw new Error('503'); return { data: MP3 }; };
++  const s = servicio(CASA);
++  const url = await s.generateSpeech('Hola.', TRISTAN);
++  assert.match(url, /\.mp3$/);
++  assert.deepStrictEqual(pedidos.map(esAzure), [true, false]);
++});
++
++test('45: una frase anticipada con la voz de Jarvis no se cuela en la llamada a otro', async function () {
++  responder = async function () { return { data: MP3 }; };
++  const s = servicio(CASA);
++  s.anticipar('Un momento.', 'voz-del-dispositivo');     // Jarvis, hablando con Mikel
++  s.anticipar('Un momento.', TRISTAN);                    // no se anticipa nada con voz pedida
++  await new Promise(function (r) { setImmediate(r); });
++  assert.deepStrictEqual(pedidos.map(esFish), [true]);
++  await s.generateSpeech('Un momento.', TRISTAN);
++  assert.ok(esAzure(pedidos[1]), 'la llamada a otro la pide a Azure, no reutiliza la de Fish');
++  assert.match(pedidos[1].data, /es-ES-Tristan/);
++});
++
++test('45: solo vale «azure:<voz>»: lo demás es la voz del dispositivo, como siempre', function () {
++  const s = servicio(CASA);
++  assert.strictEqual(s.vozPedida(TRISTAN), 'es-ES-Tristan:DragonHDLatestNeural');
++  for (const mala of [null, undefined, '', 'default', 'es-ES-Tristan', 'azure:', 'azure:x"><break/>', 'fish:abc', 42]) {
++    assert.strictEqual(s.vozPedida(mala), null);
++  }
++});
++
++test('45: la ruta solo acepta `voz` en una llamada a terceros y con esa forma', function () {
++  const { validateRequest } = require('../lib/outbound-routes');
++  const base = { to: '+34600000000', message: 'Hola', mode: 'tercero', linea: 'o2',
++                 tercero: '0b6f7a52-2f5c-4b7e-9a51-6c2d1e0f9a11' };
++  assert.strictEqual(validateRequest(base).valid, true);
++  assert.strictEqual(validateRequest(Object.assign({}, base, { voz: TRISTAN })).valid, true);
++  assert.strictEqual(validateRequest(Object.assign({}, base, { voz: 'azure:x"><break/>' })).valid, false);
++  assert.strictEqual(validateRequest(Object.assign({}, base, { voz: 'jarvis' })).valid, false);
++  assert.strictEqual(validateRequest({ to: '11411', message: 'Hola', mode: 'announce', voz: TRISTAN }).valid, false);
++});

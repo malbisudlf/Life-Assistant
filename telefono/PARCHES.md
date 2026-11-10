@@ -2053,6 +2053,28 @@ tres piezas, y las tres hay que ponerlas: el backend desplegado, el RUNBOOK copi
 
 **Tests:** el 44 de `test/parche20.test.js`; suite entera, 212 de 212 dentro de la imagen.
 
+## El parche 45: una voz creíble para hablar con otros
+
+Del 2026-11-10 (`telefono/parche-45.diff`; vuelta atrás: imagen `antes-p45` y los
+`*.bak-20261110-antes-p45`). **Sin probar aún en una llamada real a otra persona.** Mikel:
+«haz que tenga una voz creíble, que la de Jarvis mola, pero no es creíble».
+
+- **`tts-service.js`**: un `voiceId` con la forma `azure:<voz>` (`vozPedida`) hace que esa
+  frase la diga Azure con ESA voz, delante de las demás, también en directo. Las frases
+  fijas y las anticipadas (que son de la voz de Jarvis y van por texto) no se usan con
+  una voz pedida: la misma frase con otra voz se colaría en la llamada. Si Azure falla,
+  las voces de siempre detrás.
+- **`outbound-routes.js`**: `POST /api/outbound-call` acepta `voz`, solo con
+  `mode: "tercero"` y solo con esa forma, y la pasa como `voiceId` a la preparación y a
+  la conversación con el tercero.
+- **Backend**: `TERCEROS_VOZ` en `backend.env`; no se manda en «llámame».
+
+La voz elegida, `es-ES-Tristan:DragonHDLatestNeural`, es de la misma familia que la
+británica de reserva: ~3 s entera, pero en directo y con el guion generado antes de
+marcar (parche 43). Lo que dice no cambia: sigue presentándose como el asistente de Mikel.
+
+**Tests:** `test/parche45.test.js` (7); suite entera, 219 de 219 dentro de la imagen.
+
 ## Lo que además NO está en el repositorio original
 
 - **El servicio de systemd** `claude-phone-api` (`/etc/systemd/system/`), que levanta el
