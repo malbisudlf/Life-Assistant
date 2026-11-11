@@ -22,7 +22,7 @@ def nm(monkeypatch):
     monkeypatch.setattr(main, "WHATSAPP_NO_MOLESTAR", frozenset({AIMAR}))
     monkeypatch.setattr(main, "_wa_nm_enviados", {})
     monkeypatch.setattr(main, "_en_clase", lambda: {"titulo": "RL", "fin": datetime(2026, 11, 9, 12, 0, tzinfo=main.LOCAL_TZ)})
-    monkeypatch.setattr(main, "_lugar_actual_seguro", lambda: None)
+    monkeypatch.setattr(main, "_lugar_actual_seguro", lambda: {"lugar": main.LUGAR_UNI})
     monkeypatch.setattr(main, "_j_whatsapp_enviar", lambda chat, texto: enviados.append((chat, texto)) or {"ok": True})
     return enviados
 
@@ -49,6 +49,27 @@ def test_en_el_gimnasio_tambien(nm, monkeypatch):
 def test_en_casa_no(nm, monkeypatch):
     monkeypatch.setattr(main, "_en_clase", lambda: None)
     monkeypatch.setattr(main, "_lugar_actual_seguro", lambda: {"lugar": main.LUGAR_CASA})
+    assert main._wa_no_molestar(AIMAR, [_msg("ey")]) is False and nm == []
+
+
+@pytest.mark.parametrize("donde", [
+    {"lugar": main.LUGAR_CASA},     # ha faltado a clase
+    {"lugar": main.LUGAR_FUERA},    # está en otra parte
+    None,                           # el móvil no informa: ante la duda no se habla por él
+])
+def test_con_clase_en_el_calendario_pero_sin_estar_en_la_uni_no(nm, monkeypatch, donde):
+    monkeypatch.setattr(main, "_lugar_actual_seguro", lambda: donde)
+    assert main._wa_no_molestar(AIMAR, [_msg("¿Vienes luego?")]) is False and nm == []
+
+
+def test_con_clase_en_el_calendario_y_en_el_gimnasio_dice_que_entrena(nm, monkeypatch):
+    monkeypatch.setattr(main, "_lugar_actual_seguro", lambda: {"lugar": main.LUGAR_GIMNASIO})
+    assert main._wa_no_molestar(AIMAR, [_msg("ey")]) is True
+    assert nm[0][1].startswith("Mikel está entrenando")
+
+
+def test_en_la_uni_sin_clase_no(nm, monkeypatch):
+    monkeypatch.setattr(main, "_en_clase", lambda: None)
     assert main._wa_no_molestar(AIMAR, [_msg("ey")]) is False and nm == []
 
 
@@ -107,7 +128,6 @@ def test_un_grupo_una_vez_cada_tres_horas_y_si_contestas_no(con_grupo):
 
 
 def test_un_grupo_en_casa_no(con_grupo, monkeypatch):
-    monkeypatch.setattr(main, "_en_clase", lambda: None)
     monkeypatch.setattr(main, "_lugar_actual_seguro", lambda: {"lugar": main.LUGAR_CASA})
     assert main._wa_no_molestar(GRUPO, [_grupo_msg("@Mikel", menciona=True)]) is False
 

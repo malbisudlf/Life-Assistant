@@ -34347,6 +34347,8 @@ def _wa_vig_pasada() -> dict:
 #    solo dónde estás y hasta cuándo (la hora de fin de la clase del calendario).
 #  - **Una vez por chat cada `WA_NM_CADA_H` horas** y `WA_NM_DIA_MAX` al día, y nunca si en
 #    esa ráfaga ya has contestado tú (estás con el móvil).
+# «En clase» es estar EN LA UNI (el lugar firme) con una clase del calendario en curso: el
+# calendario solo pone la hora de fin. Una clase a la que no has ido no contesta a nadie.
 # Lo que te dicen después («sí, es urgente») lo sigue mirando la vigilancia, en los chats
 # individuales: en el gimnasio te avisa al momento, y en clase espera al final, que es lo
 # que pediste el 2026-11-05.
@@ -34363,11 +34365,16 @@ _wa_nm_enviados: dict = {}
 def _wa_no_molestar_texto(grupo: bool = False) -> Optional[str]:
     # En un grupo no se dice «dímelo»: la vigilancia no lee grupos, así que nadie se lo pasaría.
     urgente = "Si es urgente, que le llame." if grupo else "Si es urgente, dímelo y se lo paso."
-    clase = _en_clase()
+    # Manda el sitio, no el horario (2026-11-11): Mikel falta a clases, y con solo el
+    # calendario Jarvis le decía a su gente que estaba en un aula en la que no estaba. Al
+    # revés que `_en_clase` a secas, que calla avisos y ante la duda calla: esto habla en su
+    # nombre, y ante la duda (el móvil no informa, o consta en otro sitio) no dice nada.
+    lugar = (_lugar_actual_seguro() or {}).get("lugar")
+    clase = _en_clase() if lugar == LUGAR_UNI else None
     if clase:
         return (f"Mikel está en clase hasta las {clase['fin'].strftime('%H:%M')} y no mira el móvil. "
                 f"{urgente} {_WA_NM_FIRMA}")
-    if (_lugar_actual_seguro() or {}).get("lugar") == LUGAR_GIMNASIO:
+    if lugar == LUGAR_GIMNASIO:
         return f"Mikel está entrenando y no mira el móvil. {urgente} {_WA_NM_FIRMA}"
     return None
 

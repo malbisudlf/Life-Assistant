@@ -211,10 +211,18 @@ céntimos al mes: unas 16 ráfagas al día de chats individuales.
 
 ## No molestar: Jarvis contesta por ti (2026-11-08)
 
-En clase (`_en_clase`, por el calendario) o en el gimnasio (el lugar firme), a los chats de
+En clase o en el gimnasio, a los chats de
 `WHATSAPP_NO_MOLESTAR` les contesta: «Mikel está en clase hasta las 12:00 y no mira el móvil.
 Si es urgente, dímelo y se lo paso. (Jarvis, su asistente)». Va en la misma pasada que la
 vigilancia, antes de clasificar, así que **solo funciona con `WHATSAPP_VIGILANCIA=1`**.
+
+**Manda el sitio, no el horario (2026-11-11).** «En clase» es estar en la uni (el lugar
+firme, `ZONAS_UNI`) con una clase del calendario en curso; el calendario solo pone la hora de
+fin. Con solo el calendario contestaba «está en clase» las veces que Mikel faltaba. Es al
+revés que `_en_clase` a secas, que calla avisos y ante la duda calla: esto habla en su nombre,
+así que si el móvil no informa o consta en otro sitio, no dice nada. El gimnasio depende de
+que la zona de Home Assistant se llame como dice `ZONAS_GIMNASIO`: una errata en el nombre
+de la zona y el gimnasio no existe, sin un solo aviso.
 
 Es mandar en tu nombre sin botón, la excepción a «lo que sale lo apruebas tú», y por eso:
 **vacío no contesta a nadie** (se apunta chat a chat), el texto lo escribe el
