@@ -1,0 +1,562 @@
+diff -ruN a/voice-app/lib/anticipo.js b/voice-app/lib/anticipo.js
+--- a/voice-app/lib/anticipo.js	2026-11-12 20:08:37.026293800 +0100
++++ b/voice-app/lib/anticipo.js	2026-11-12 20:08:37.054396300 +0100
+@@ -24,7 +24,8 @@
+  *   del texto. Sin small, el cierre lo decide turbo y el texto está listo al cerrar.
+  *   ANTICIPO_RAPIDO=1 lo devuelve.
+  * - No con la escucha pasiva dormida (`activo`): con la radio del coche las pausas no
+- *   paran, y cada una sería una pasada más de la GPU de jacobo para nada.
++ *   paran, y cada una sería una pasada más de la GPU de jacobo para nada. Parche 46:
++ *   salvo que ya le hayan nombrado o lo dicho sea corto (`activo` recibe la pausa).
+  */
+ 
+ const OPCIONES = { format: 'pcm', sampleRate: 16000, language: 'es' };
+@@ -47,7 +48,7 @@
+   if (!whisperClient || typeof whisperClient.oidoDisponible !== 'function') return function () {};
+   const activo = p.activo || function () { return true; };
+   const alPausar = function (pausa) {
+-    if (!activo()) return;
++    if (!activo(pausa)) return;
+     pausa.desde = Date.now();
+     pausa.transcripcion = whisperClient.transcribe(pausa.audio, OPCIONES);
+     // Que una pausa tirada que falla no acabe en un unhandledRejection.
+diff -ruN a/voice-app/lib/audio-fork.js b/voice-app/lib/audio-fork.js
+--- a/voice-app/lib/audio-fork.js	2026-11-12 20:08:36.866351800 +0100
++++ b/voice-app/lib/audio-fork.js	2026-11-12 20:08:36.892309600 +0100
+@@ -77,6 +77,11 @@
+     this._cierreRapidoMs = parseInt(process.env.VAD_CIERRE_RAPIDO_MS || '700', 10);
+     this._pausa = null;
+     this._pausaEmitida = false;
++    // Parche 46: a estos ms de voz dentro de una frase se avisa ('hablando') con lo dicho
++    // hasta ahí, para que la escucha pasiva busque su nombre sin esperar al final.
++    this._avisosHablaMs = String(process.env.ESCUCHA_PASIVA_TEMPRANA_MS || '1200,2500').split(',')
++      .map(function (x) { return parseInt(x, 10); }).filter(function (x) { return x > 0; });
++    this._avisosHabla = 0;
+ 
+     // DEBUG: Track message counts
+     this._messageCount = 0;
+@@ -154,6 +159,7 @@
+     this._rmsVoz = [];
+     this._pausa = null;
+     this._pausaEmitida = false;
++    this._avisosHabla = 0;
+ 
+     if (this._preRollChunks.length) {
+       for (const chunk of this._preRollChunks) this._appendUtterance(chunk, false);
+@@ -177,6 +183,7 @@
+     this._silenceMs = 0;
+     this._pausa = null;
+     this._pausaEmitida = false;
++    this._avisosHabla = 0;
+   }
+ 
+   _finalizeUtterance(reason) {
+@@ -382,6 +389,12 @@
+       this.emit('pausa', this._pausa);
+     }
+ 
++    if (this._avisosHabla < this._avisosHablaMs.length && this.listenerCount('hablando') > 0 &&
++        this._chunkDurationMs(this._speechBytes) >= this._avisosHablaMs[this._avisosHabla]) {
++      this._avisosHabla++;
++      this.emit('hablando', { audio: Buffer.concat(this._utteranceChunks) });
++    }
++
+     if (this._bargeArmado && this._chunkDurationMs(this._speechBytes) >= this._bargeMs) {
+       this._bargeArmado = false;
+       console.log('[AUDIO-DEBUG] barge-in: ' + Math.round(this._chunkDurationMs(this._speechBytes)) + ' ms de voz mientras Jarvis habla, for ' + this.callUuid);
+diff -ruN a/voice-app/lib/conversation-loop.js b/voice-app/lib/conversation-loop.js
+--- a/voice-app/lib/conversation-loop.js	2026-11-12 20:08:36.918312300 +0100
++++ b/voice-app/lib/conversation-loop.js	2026-11-12 20:08:36.945308900 +0100
+@@ -277,7 +277,7 @@
+     const pasiva = new EscuchaPasiva({
+       log: (m) => logger.info(m, { callUuid }), activa: escuchaPasiva
+     });
+-    armarAnticipo(session, whisperClient, { activo: () => !pasiva.dormida() });
++    armarAnticipo(session, whisperClient, { activo: (pausa) => pasiva.anticipar(pausa, whisperClient) });
+ 
+     while (turnCount < maxTurns && callActive) {
+       turnCount++;
+@@ -296,7 +296,13 @@
+       const crono = cronometro.turno(callUuid, 'saliente');
+       const logCrono = (m) => logger.info(m, { callUuid });
+       if (pasiva.dormida()) {
+-        const oido = await pasiva.esperarPalabra({ session, whisperClient, sigueActiva: () => callActive });
++        const oido = await pasiva.esperarPalabra({
++          session, whisperClient, sigueActiva: () => callActive,
++          // Parche 46: el tono de «le he oído», mientras aún habla.
++          alNombrar: () => {
++            if (callActive && process.env.ESCUCHA_PASIVA_TONO !== '0') endpoint.play(GOTIT_BEEP_URL).catch(() => {});
++          }
++        });
+         if (!oido) break;
+         if (oido.tope) {
+           if (callActive) await endpoint.play(await ttsService.generateSpeech(FRASES_PASIVA.tope, voiceId));
+@@ -310,7 +316,10 @@
+         }
+         if (oido.resto) {
+           transcript = oido.resto;
+-          crono.marca('cierre').marca('texto');
++          // Parche 46: el despertar también se cronometra, desde que calló.
++          const uf = pasiva.ultimaFrase || {};
++          if (typeof uf.finHabla === 'number') crono.marca('finHabla', uf.finHabla);
++          crono.marca('cierre', uf.cierreEn).marca('texto', uf.textoEn);
+         } else if (callActive) {
+           await endpoint.play(await ttsService.generateSpeech(FRASES_PASIVA.despierta, voiceId));
+         }
+diff -ruN a/voice-app/lib/escucha-pasiva.js b/voice-app/lib/escucha-pasiva.js
+--- a/voice-app/lib/escucha-pasiva.js	2026-11-12 20:08:36.970823100 +0100
++++ b/voice-app/lib/escucha-pasiva.js	2026-11-12 20:08:36.997719900 +0100
+@@ -21,6 +21,20 @@
+  * ESCUCHA_PASIVA_VENTANA_MS (4 s) si es larga; la frase entera solo cuando el
+  * principio trae el nombre. Por eso, en una frase larga, «Jarvis» tiene que ir al
+  * principio. Con la radio puesta todo el viaje son unos 8 minutos de Whisper por hora.
++ *
++ * Parche 46: despertar tardaba ~8,5 s (llamada del 2026-11-12) frente a los ~4 de un
++ * turno normal, porque dormido transcribía dos veces seguidas (el principio y luego la
++ * frase entera) y sin anticipo. Con el oído de jacobo disponible:
++ *  - a los ESCUCHA_PASIVA_TEMPRANA_MS (1200 y 2500) de voz, `small` mira si lo que va
++ *    dicho trae el nombre ('hablando' de audio-fork.js). Si lo trae suena el tono
++ *    (`alNombrar`) mientras aún hablas, y esa frase se anticipa dure lo que dure.
++ *    Medido en jacobo el 2026-11-12 con voz de Piper por banda de teléfono: `small`
++ *    solo vio el nombre en 1 de 4 frases (se lo come al principio) y ninguna vez donde
++ *    no estaba. El tono es, pues, un extra que a veces no suena; lo que decide es turbo;
++ *  - una frase de hasta ESCUCHA_PASIVA_ANTICIPO_MS (10 s) se transcribe en su pausa, no
++ *    al cerrarse (`anticipar`): al cerrarse, el texto ya está;
++ *  - la frase se transcribe una sola vez, entera: en casa la ventana no ahorra nada.
++ * Sin jacobo (OpenAI) todo sigue como en el 22. ESCUCHA_PASIVA_TEMPRANA_MS=0 lo apaga.
+  */
+ 'use strict';
+ 
+@@ -111,6 +125,33 @@
+     this.ventanaMs = entero('ESCUCHA_PASIVA_VENTANA_MS', 4000);
+     this.topeMs = entero('ESCUCHA_PASIVA_MAX_MIN', 180) * 60000;
+     this.desde = this.activa ? Date.now() : null;
++    // Parche 46: lo que `small` ha visto de la frase que está entrando, y la última
++    // que despertó (para el cronómetro: cuándo calló y cuándo se cerró).
++    this.temprana = String(process.env.ESCUCHA_PASIVA_TEMPRANA_MS || '') !== '0';
++    // Hasta cuánto de frase se transcribe en su pausa estando dormido: lo que dura una
++    // pregunta. Más larga es charla o la radio, y espera a cerrarse.
++    this.anticipoMs = entero('ESCUCHA_PASIVA_ANTICIPO_MS', 10000);
++    this._nombrada = false;
++    this.ultimaFrase = null;
++  }
++
++  /** Parche 46: ¿ha oído ya su nombre en la frase que está entrando? */
++  nombrada() {
++    return this.dormida() && this._nombrada;
++  }
++
++  /**
++   * Parche 46: ¿se transcribe esta pausa aunque esté dormido? Sí si ya le han nombrado,
++   * o si lo dicho es corto y contesta jacobo: es la misma pasada que se haría al cerrar
++   * la frase, solo que antes. Una frase larga sin nombre (la radio) no se anticipa.
++   */
++  anticipar(pausa, whisperClient) {
++    if (!this.dormida()) return true;
++    if (!this.temprana) return false;
++    if (this._nombrada) return true;
++    const corta = pausa && pausa.audio && pausa.audio.length <= this.anticipoMs * 32;
++    return Boolean(corta && whisperClient && typeof whisperClient.oidoDisponible === 'function' &&
++      whisperClient.oidoDisponible());
+   }
+ 
+   /** ¿Toca esperar a que le nombren antes de escuchar el turno? */
+@@ -172,48 +213,92 @@
+    */
+   async esperarPalabra(p) {
+     const sigueActiva = p.sigueActiva || function () { return true; };
++    const w = p.whisperClient;
+     // 16 kHz, 16 bits, mono: 32 bytes por milisegundo.
+     const ventana = this.ventanaMs * 32;
+     let oidas = 0;
+     this.log('ESCUCHA-PASIVA: a la escucha');
+-    while (sigueActiva()) {
+-      if (Date.now() - this.desde > this.topeMs) {
+-        this.log('ESCUCHA-PASIVA: tope de tiempo');
+-        return { tope: true };
+-      }
+-      p.session.setCaptureEnabled(true);
+-      let u = null;
+-      try {
+-        u = await p.session.waitForUtterance({ timeoutMs: 60000 });
+-      } catch (err) {
+-        if (/closed/i.test(err.message || '')) return null;
+-        continue;                                 // un minuto en silencio: a seguir
+-      }
+-      if (!sigueActiva()) return null;
+-      oidas++;
+-      let texto = '';
+-      const larga = u.audio.length > ventana * 1.5;
+-      try {
+-        texto = await this._transcribir(p.whisperClient, larga ? u.audio.subarray(0, ventana) : u.audio);
+-      } catch (err) {
+-        this.log('ESCUCHA-PASIVA: Whisper falló (' + err.message + ')');
+-        await dormirMs(1000);
+-        continue;
+-      }
+-      let hallada = buscarPalabra(texto);
+-      // Lo que se habla sin nombrarle no se registra: ni el texto, solo que no era.
+-      if (!hallada) continue;
+-      if (larga) {
++    const conOido = function () {
++      return typeof w.oidoDisponible === 'function' && w.oidoDisponible();
++    };
++    // Parche 46: mientras hablas, `small` busca el nombre en lo que va dicho.
++    let serie = 0;
++    const alHablar = (trozo) => {
++      if (!this.temprana || this._nombrada || !conOido()) return;
++      const mia = serie;
++      w.transcribe(trozo.audio, { format: 'pcm', sampleRate: 16000, language: 'es', soloOido: true, rapido: true })
++        .then((texto) => {
++          if (mia !== serie || this._nombrada || !buscarPalabra(texto)) return;
++          this._nombrada = true;
++          this.log('ESCUCHA-PASIVA: oigo mi nombre mientras habla');
++          if (p.alNombrar) { try { p.alNombrar(); } catch (e) { /* el tono no puede cortar nada */ } }
++        }, function () {});
++    };
++    const conEventos = typeof p.session.on === 'function' && typeof p.session.off === 'function';
++    if (conEventos) p.session.on('hablando', alHablar);
++    try {
++      while (sigueActiva()) {
++        if (Date.now() - this.desde > this.topeMs) {
++          this.log('ESCUCHA-PASIVA: tope de tiempo');
++          return { tope: true };
++        }
++        p.session.setCaptureEnabled(true);
++        let u = null;
+         try {
+-          hallada = buscarPalabra(await this._transcribir(p.whisperClient, u.audio)) || hallada;
+-        } catch (err) { /* vale con lo del principio */ }
++          u = await p.session.waitForUtterance({ timeoutMs: 60000 });
++        } catch (err) {
++          if (/closed/i.test(err.message || '')) return null;
++          continue;                                 // un minuto en silencio: a seguir
++        }
++        const cierreEn = Date.now();
++        const nombrada = this._nombrada;
++        this._nombrada = false;
++        serie++;
++        if (!sigueActiva()) return null;
++        oidas++;
++        let hallada = null;
++        const anticipada = u.pausa && u.pausa.transcripcion;
++        try {
++          if (anticipada) {
++            // Ya transcrita, entera, durante el silencio que la cerró.
++            hallada = buscarPalabra(await anticipada);
++          } else if (this.temprana && conOido()) {
++            hallada = buscarPalabra(await this._transcribir(w, u.audio));
++          } else {
++            const larga = u.audio.length > ventana * 1.5;
++            hallada = buscarPalabra(await this._transcribir(w, larga ? u.audio.subarray(0, ventana) : u.audio));
++            if (hallada && larga) {
++              try {
++                hallada = buscarPalabra(await this._transcribir(w, u.audio)) || hallada;
++              } catch (err) { /* vale con lo del principio */ }
++            }
++          }
++        } catch (err) {
++          let salvada = false;
++          if (anticipada) {
++            // Falló la del anticipo: la frase entera, como siempre.
++            try { hallada = buscarPalabra(await this._transcribir(w, u.audio)); salvada = true; } catch (e) { /* abajo */ }
++          }
++          if (!salvada) {
++            this.log('ESCUCHA-PASIVA: Whisper falló (' + err.message + ')');
++            if (!nombrada) { await dormirMs(1000); continue; }
++          }
++        }
++        // Lo que se habla sin nombrarle no se registra: ni el texto, solo que no era.
++        // Si el tono ya sonó y el texto final no trae el nombre, mejor preguntar que callar.
++        if (!hallada && nombrada) hallada = { resto: '' };
++        if (!hallada) continue;
++        p.session.setCaptureEnabled(false);
++        this.despierta = true;
++        this.ultimaFrase = { finHabla: u.finHabla, cierreEn: cierreEn, textoEn: Date.now(), tono: nombrada };
++        this.log('ESCUCHA-PASIVA: me llaman (tras ' + oidas + ' frases sin mí' + (nombrada ? ', tono dado' : '') + ')');
++        return hallada;
+       }
+-      p.session.setCaptureEnabled(false);
+-      this.despierta = true;
+-      this.log('ESCUCHA-PASIVA: me llaman (tras ' + oidas + ' frases sin mí)');
+-      return hallada;
++      return null;
++    } finally {
++      this._nombrada = false;
++      if (conEventos) p.session.off('hablando', alHablar);
+     }
+-    return null;
+   }
+ }
+ 
+diff -ruN a/voice-app/lib/sip-handler.js b/voice-app/lib/sip-handler.js
+--- a/voice-app/lib/sip-handler.js	2026-11-12 20:08:37.080396500 +0100
++++ b/voice-app/lib/sip-handler.js	2026-11-12 20:08:37.107396500 +0100
+@@ -168,7 +168,7 @@
+     const logTurno = function (m) { console.log('[' + new Date().toISOString() + '] ' + m); };
+     // Parche 22: la escucha pasiva, y si sigue la llamada (para no escuchar a nadie tras colgar).
+     const pasiva = new EscuchaPasiva({ log: logTurno });
+-    armarAnticipo(session, whisperClient, { activo: function () { return !pasiva.dormida(); } });
++    armarAnticipo(session, whisperClient, { activo: function (pausa) { return pasiva.anticipar(pausa, whisperClient); } });
+     let viva = true;
+     dialog.on('destroy', function () { viva = false; });
+ 
+@@ -183,7 +183,11 @@
+       const crono = cronometro.turno(callUuid, 'entrante');
+       if (pasiva.dormida()) {
+         const oido = await pasiva.esperarPalabra({
+-          session: session, whisperClient: whisperClient, sigueActiva: function () { return viva; }
++          session: session, whisperClient: whisperClient, sigueActiva: function () { return viva; },
++          // Parche 46: el tono de «le he oído», mientras aún habla.
++          alNombrar: function () {
++            if (viva && process.env.ESCUCHA_PASIVA_TONO !== '0') endpoint.play(GOTIT_BEEP_URL).catch(function () {});
++          }
+         });
+         if (!oido) break;
+         if (oido.tope) {
+@@ -194,7 +198,10 @@
+         llamado = true;
+         if (oido.resto) {
+           transcript = oido.resto;
+-          crono.marca('cierre').marca('texto');
++          // Parche 46: el despertar también se cronometra, desde que calló.
++          const uf = pasiva.ultimaFrase || {};
++          if (typeof uf.finHabla === 'number') crono.marca('finHabla', uf.finHabla);
++          crono.marca('cierre', uf.cierreEn).marca('texto', uf.textoEn);
+         } else {
+           await endpoint.play(await ttsService.generateSpeech(FRASES_PASIVA.despierta, voiceId));
+         }
+diff -ruN a/voice-app/test/parche46.test.js b/voice-app/test/parche46.test.js
+--- a/voice-app/test/parche46.test.js	1970-01-01 01:00:00.000000000 +0100
++++ b/voice-app/test/parche46.test.js	2026-11-12 20:08:37.135397800 +0100
+@@ -0,0 +1,230 @@
++/**
++ * Parche 46: despertar a Jarvis en la escucha pasiva tardaba el doble que un turno
++ * normal. Ahora busca su nombre mientras hablas (tono incluido), transcribe la frase
++ * una sola vez y, si puede, durante el silencio que la cierra; y el cronómetro cuenta
++ * el despertar desde que callaste.
++ *
++ * Se lanza con `node --test test/parche46.test.js`, dentro de la imagen y sin red.
++ */
++'use strict';
++
++const test = require('node:test');
++const assert = require('node:assert');
++const Module = require('node:module');
++const { EventEmitter } = require('node:events');
++
++const requireDeVerdad = Module.prototype.require;
++Module.prototype.require = function (id) {
++  if (id === 'ws') return { Server: function () {} };
++  return requireDeVerdad.apply(this, arguments);
++};
++for (const nivel of ['log', 'warn', 'error']) console[nivel] = function () {};
++
++const { EscuchaPasiva } = require('../lib/escucha-pasiva');
++const { armarAnticipo } = require('../lib/anticipo');
++const { AudioForkSession } = require('../lib/audio-fork');
++const cronometro = require('../lib/cronometro');
++
++const tic = function () { return new Promise(function (r) { setImmediate(r); }); };
++
++/** Una sesión a la que el test le da las frases a mano. */
++function sesionManual() {
++  const s = new EventEmitter();
++  s.setCaptureEnabled = function () {};
++  s.pendientes = [];
++  s.waitForUtterance = function () {
++    return new Promise(function (resolve, reject) { s.pendientes.push({ resolve: resolve, reject: reject }); });
++  };
++  s.llega = function (u) { s.pendientes.shift().resolve(u); };
++  s.cuelga = function () { s.pendientes.shift().reject(new Error('AudioForkSession closed for call x')); };
++  return s;
++}
++
++/** Con el oído de jacobo: apunta qué se le pide y con qué modelo. */
++function whisperConOido(disponible) {
++  const w = { pedidos: [] };
++  w.oidoDisponible = function () { return disponible !== false; };
++  w.transcribe = async function (a, o) {
++    w.pedidos.push({ texto: a.toString(), rapido: Boolean(o && o.rapido), soloOido: Boolean(o && o.soloOido) });
++    return a.toString();
++  };
++  return w;
++}
++
++test('46: con jacobo, una frase larga se transcribe una sola vez y entera', async function () {
++  process.env.ESCUCHA_PASIVA_VENTANA_MS = '1';            // 32 bytes: todo es «largo»
++  try {
++    const p = new EscuchaPasiva({ activa: true });
++    const w = whisperConOido();
++    const s = sesionManual();
++    const espera = p.esperarPalabra({ session: s, whisperClient: w });
++    const orden = 'Jarvis, escúchame, estoy yendo a la universidad, ¿hay mucho tráfico?';
++    s.llega({ audio: Buffer.from(orden), reason: 'end_silence', finHabla: 1000 });
++    const r = await espera;
++    assert.strictEqual(w.pedidos.length, 1, 'antes eran dos pasadas seguidas');
++    assert.strictEqual(w.pedidos[0].texto, orden);
++    assert.ok(/tráfico/.test(r.resto));
++    assert.strictEqual(p.ultimaFrase.finHabla, 1000);
++    assert.ok(p.ultimaFrase.cierreEn <= p.ultimaFrase.textoEn);
++  } finally {
++    delete process.env.ESCUCHA_PASIVA_VENTANA_MS;
++  }
++});
++
++test('46: sin jacobo sigue la ventana del 22 (el principio y, si trae el nombre, entera)', async function () {
++  process.env.ESCUCHA_PASIVA_VENTANA_MS = '1';
++  try {
++    const p = new EscuchaPasiva({ activa: true });
++    const w = whisperConOido(false);
++    const s = sesionManual();
++    const espera = p.esperarPalabra({ session: s, whisperClient: w });
++    s.llega({ audio: Buffer.from('Jarvis, apaga la calefacción de casa que se nos ha olvidado'), reason: 'end_silence' });
++    await espera;
++    assert.strictEqual(w.pedidos.length, 2);
++    assert.ok(w.pedidos[0].texto.length < w.pedidos[1].texto.length, 'primero solo el principio');
++    assert.ok(/^Jarvis, apaga/.test(w.pedidos[0].texto));
++  } finally {
++    delete process.env.ESCUCHA_PASIVA_VENTANA_MS;
++  }
++});
++
++test('46: oye su nombre mientras hablas: suena el tono y esa frase se anticipa', async function () {
++  const p = new EscuchaPasiva({ activa: true });
++  const w = whisperConOido();
++  const s = sesionManual();
++  let tonos = 0;
++  const espera = p.esperarPalabra({ session: s, whisperClient: w, alNombrar: function () { tonos++; } });
++  const larga = { audio: Buffer.alloc(p.anticipoMs * 32 * 3) };
++  assert.strictEqual(p.anticipar(larga, w), false, 'una frase larga sin nombre no se anticipa');
++
++  s.emit('hablando', { audio: Buffer.from('Jarvis, escúch') });
++  await tic(); await tic();
++  assert.strictEqual(tonos, 1);
++  assert.deepStrictEqual(w.pedidos[0], { texto: 'Jarvis, escúch', rapido: true, soloOido: true });
++  assert.ok(p.nombrada());
++  assert.strictEqual(p.anticipar(larga, w), true);
++  // El segundo aviso de la misma frase no repite ni el tono ni la consulta.
++  s.emit('hablando', { audio: Buffer.from('Jarvis, escúchame, estoy') });
++  await tic();
++  assert.strictEqual(tonos, 1);
++  assert.strictEqual(w.pedidos.length, 1);
++
++  // La frase llega con la transcripción del anticipo: no se pide otra.
++  s.llega({
++    audio: Buffer.from('x'), reason: 'end_silence', finHabla: 5,
++    pausa: { transcripcion: Promise.resolve('Jarvis, escúchame, ¿hay tráfico?') }
++  });
++  const r = await espera;
++  assert.deepStrictEqual(r, { resto: 'escúchame, ¿hay tráfico?' });
++  assert.strictEqual(w.pedidos.length, 1);
++  assert.strictEqual(p.ultimaFrase.tono, true);
++  assert.strictEqual(s.listenerCount('hablando'), 0, 'al despertar deja de mirar');
++});
++
++test('46: la charla sin su nombre ni suena ni despierta, y lo oído de una frase no vale para la siguiente', async function () {
++  const p = new EscuchaPasiva({ activa: true });
++  const w = whisperConOido();
++  let lento = null;
++  const transcribe = w.transcribe;
++  w.transcribe = function (a, o) {
++    if (o && o.rapido) return new Promise(function (r) { lento = function () { r(a.toString()); }; });
++    return transcribe(a, o);
++  };
++  const s = sesionManual();
++  let tonos = 0;
++  const espera = p.esperarPalabra({ session: s, whisperClient: w, alNombrar: function () { tonos++; } });
++  s.emit('hablando', { audio: Buffer.from('Jarvis, pon') });      // `small` aún no ha contestado…
++  s.llega({ audio: Buffer.from('y el partido de ayer'), reason: 'end_silence' });
++  await tic(); await tic();
++  lento();                                                         // …y contesta con la frase ya cerrada
++  await tic(); await tic();
++  assert.strictEqual(tonos, 0);
++  assert.ok(!p.nombrada());
++  s.cuelga();
++  assert.strictEqual(await espera, null);
++  assert.ok(p.dormida());
++});
++
++test('46: si el tono ya sonó y el texto final no trae el nombre, pregunta «¿Señor?»', async function () {
++  const p = new EscuchaPasiva({ activa: true });
++  const w = whisperConOido();
++  const s = sesionManual();
++  const espera = p.esperarPalabra({ session: s, whisperClient: w, alNombrar: function () {} });
++  s.emit('hablando', { audio: Buffer.from('Jarvis') });
++  await tic(); await tic();
++  s.llega({ audio: Buffer.from('ya vi eso'), reason: 'end_silence' });
++  assert.deepStrictEqual(await espera, { resto: '' });
++});
++
++test('46: dormido, una pausa corta se transcribe ya si contesta jacobo; despierto, siempre', function () {
++  const p = new EscuchaPasiva({ activa: true });
++  const corta = { audio: Buffer.alloc(p.anticipoMs * 32) };
++  assert.strictEqual(p.anticipar(corta, whisperConOido()), true);
++  assert.strictEqual(p.anticipar(corta, whisperConOido(false)), false, 'contra OpenAI, no');
++  assert.strictEqual(p.anticipar(corta, { transcribe: function () {} }), false);
++  p.despierta = true;
++  assert.strictEqual(p.anticipar({ audio: Buffer.alloc(p.anticipoMs * 320) }, whisperConOido(false)), true);
++  process.env.ESCUCHA_PASIVA_TEMPRANA_MS = '0';
++  try {
++    const apagada = new EscuchaPasiva({ activa: true });
++    assert.strictEqual(apagada.anticipar(corta, whisperConOido()), false, 'apagado, como en el 22');
++  } finally {
++    delete process.env.ESCUCHA_PASIVA_TEMPRANA_MS;
++  }
++});
++
++test('46: el anticipo le pasa la pausa a `activo`', function () {
++  const s = new EventEmitter();
++  const w = whisperConOido();
++  const vistas = [];
++  armarAnticipo(s, w, { activo: function (pausa) { vistas.push(pausa); return false; } });
++  const pausa = { audio: Buffer.from('hola') };
++  s.emit('pausa', pausa);
++  assert.deepStrictEqual(vistas, [pausa]);
++  assert.strictEqual(w.pedidos.length, 0);
++});
++
++test('46: el detector avisa a los 1,2 y 2,5 s de voz, una vez cada uno por frase', function () {
++  const ws = new EventEmitter();
++  const s = new AudioForkSession({ ws: ws, callUuid: 'x' });
++  const avisos = [];
++  s.on('hablando', function (t) { avisos.push(t.audio.length); });
++  // 20 ms de voz a 16 kHz: una onda cuadrada bien por encima del umbral.
++  const voz = Buffer.alloc(640);
++  for (let i = 0; i < 320; i++) voz.writeInt16LE(i % 40 < 20 ? 12000 : -12000, i * 2);
++  // Tres trozos de voz y uno de silencio: como al hablar, y el suelo de ruido se queda abajo.
++  const callado = Buffer.alloc(640);
++  const hablar = function (trozosDeVoz) {
++    for (let i = 0; i < trozosDeVoz; i++) {
++      ws.emit('message', voz);
++      if (i % 3 === 2) ws.emit('message', callado);
++    }
++  };
++  for (let i = 0; i < 10; i++) ws.emit('message', callado);
++  hablar(57);                                                      // 1,14 s de voz
++  assert.strictEqual(avisos.length, 0);
++  hablar(6);
++  assert.strictEqual(avisos.length, 1);
++  hablar(90);                                                      // hasta ~3 s
++  assert.strictEqual(avisos.length, 2);
++  assert.ok(avisos[1] > avisos[0]);
++  // Sin nadie escuchando el aviso, no se monta el audio para nada.
++  s.removeAllListeners('hablando');
++  s.setCaptureEnabled(false);
++  s.setCaptureEnabled(true);
++  hablar(70);
++  assert.strictEqual(avisos.length, 2);
++});
++
++test('46: el cronómetro cuenta el despertar desde que callaste', function () {
++  cronometro._reiniciar();
++  const crono = cronometro.turno('x', 'saliente');
++  const uf = { finHabla: 1000, cierreEn: 2200, textoEn: 2300 };
++  crono.marca('finHabla', uf.finHabla);
++  crono.marca('cierre', uf.cierreEn).marca('texto', uf.textoEn);
++  crono.marca('consulta', 2300).marca('respuesta', 4700).marca('suena', 5200);
++  const r = crono.cerrar('claude', function () {});
++  assert.strictEqual(r.ms.cierre, 1200);
++  assert.strictEqual(r.ms.oido, 100);
++  assert.strictEqual(r.ms.total, 4200);
++});

@@ -2075,6 +2075,83 @@ marcar (parche 43). Lo que dice no cambia: sigue presentándose como el asistent
 
 **Tests:** `test/parche45.test.js` (7); suite entera, 219 de 219 dentro de la imagen.
 
+## El parche 46: despertar no tarda el doble
+
+Del 2026-11-12 (`telefono/parche-46.diff`). Mikel: «el Jarvis de escucha pasiva tarda
+muchísimo en contestar». Medido en su llamada de ese día (08:05): de que calló a que sonó
+la voz, **~8,5 s**, frente a los ~4 de un turno normal. El desglose: 1,2 s de cierre,
+2,2 s de la primera transcripción (los 4 s del principio; jacobo no contestó a 1,5 s y
+salió OpenAI), 0,8 s de la segunda (la frase entera), 3,7 s de Claude y 0,5 de voz. Y el
+cronómetro del 38 decía 4,3 s, porque en el despertar empezaba a contar con el texto ya
+en la mano: por eso el panel de Grafana no lo delataba.
+
+- **`escucha-pasiva.js`**: con el oído de jacobo disponible, la frase se transcribe **una
+  vez y entera** (la ventana de 4 s existía para no pagar a OpenAI la radio; en casa no
+  ahorra nada), y si dura hasta `ESCUCHA_PASIVA_ANTICIPO_MS` (10 s) **en su pausa**, como
+  un turno normal (`anticipar`): al cerrarse la frase, el texto ya está. Sin jacobo, todo
+  como en el 22.
+- **El nombre mientras hablas.** `audio-fork.js` avisa (`hablando`) a los 1,2 y 2,5 s de
+  voz de cada frase, y dormido `small` mira si lo dicho hasta ahí trae el nombre. Si lo
+  trae, **suena el tono** de «le he oído» sin esperar a que acabes y esa frase se anticipa
+  dure lo que dure. `ESCUCHA_PASIVA_TONO=0` quita el tono; `ESCUCHA_PASIVA_TEMPRANA_MS=0`
+  apaga el parche entero.
+- **Lo que el tono NO garantiza.** Medido en jacobo con voz de Piper por banda de
+  teléfono: `small` solo escribió el nombre en 1 de 4 frases que lo llevaban (se lo come
+  cuando va lo primero) y en ninguna de las 4 que no. Con esa voz, `turbo` escribió
+  «Sarvis» y «Starbis», que la expresión de `buscarPalabra` no cubre; con la voz de Mikel
+  no hay datos (los registros no guardan lo que se oye dormido). O sea: el tono es un
+  extra que a veces no sonará, y la ganancia segura es la de arriba. **Lo siguiente, si
+  hace falta, es que el oído acepte una pista** (`prompt` de whisper.cpp) con el nombre.
+- **`anticipo.js`**: `activo` recibe la pausa.
+- **Los dos bucles** (`conversation-loop.js`, `sip-handler.js`): pasan el tono y marcan en
+  el cronómetro cuándo calló y cuándo se cerró la frase que despertó
+  (`pasiva.ultimaFrase`), así que `[TURNO]` y Grafana ya cuentan el despertar entero.
+
+Lo esperable: ~1,4 s de que calla a tener el texto (antes ~4,2), o sea ~4,5-5,5 s de punta
+a punta según lo que tarde Claude. **Estimado, no medido en una llamada.**
+
+**Tests:** `test/parche46.test.js` (9); suite entera, 228 de 228 dentro de la imagen.
+
+## El parche 47: «Jarvis, apunta eso»
+
+Del 2026-11-12 (`telefono/parche-47.diff`, encima del 46). En la escucha pasiva, lo que se
+dice sin nombrarle no salía de la voice-app, y sigue sin salir; pero ahora se **recuerda
+en memoria** `ESCUCHA_PASIVA_MEMORIA_S` (90 s; 0 lo apaga), para poder decir dos segundos
+después «Jarvis, apunta eso».
+
+- **`escucha-pasiva.js`**: `recordar()` guarda el texto de cada frase oída dormido (y lo
+  que va delante del nombre en la frase que le despierta, `antesDelNombre`), `loReciente()`
+  lo devuelve de un tirón y lo olvida. Nunca al registro ni a disco; «modo normal» lo
+  borra y se va con la llamada. Sin jacobo, de una frase larga solo hay sus primeros 4 s.
+- **`apunte.js`** (nuevo): si la frase ENTERA es la orden («apunta eso», «anota lo que
+  acabo de decir», «apúntalo»…), manda lo recordado a `POST /telefono/apunte` del backend,
+  que lo guarda como una idea («Apunte de viva voz (12/11 08:05): …»), y dice «Apuntado,
+  señor». «Apunta que mañana tengo dentista» no es esto: es una nota que toma Claude.
+- **No pasa por Claude, a propósito**: en esa memoria está lo que haya dicho la radio o
+  quien vaya al lado, y el Claude del teléfono tiene shell. De vuelta solo llega un sí o
+  un no; el registro apunta cuántos caracteres, no cuáles.
+- **Los dos bucles**: lo atienden antes que los reflejos y vuelven a dormirse.
+
+**Tests:** `test/parche47.test.js` (5).
+
+## El parche 48: «mira mi pantalla»
+
+Del 2026-11-12 (`telefono/parche-48.diff`). `pc_pantalla` no está en el teléfono porque
+lo que hay en una pantalla lo ha escrito cualquiera. Va como internet (parche 37):
+**`lectura.js`** entiende `📖 LEER: pantalla pregunta=…` (sin pregunta, «¿Qué hay en
+pantalla?»; `seguir` repite lo ya contado), el backend pide la captura al MCP del PC, la
+mira el modelo de visión y la llamada lo cuenta. A Claude le vuelve solo el aviso de que
+se ha contado. Si el PC duerme, el backend pide encenderlo y la llamada lo dice, sin
+esperar. El RUNBOOK lo explica («La pantalla de su PC»).
+
+**Tests:** `test/parche48.test.js` (3); suite entera con los tres, **236 de 236**.
+
+**Los tres están SIN APLICAR en caja** a 2026-11-12: probados en una copia aparte
+(`/tmp/p46`, se pierde al reiniciar). Aplicar = copiar `lib/` y `test/`, reconstruir la
+imagen (etiquetando antes `antes-p46`), `exportar.sh` para la foto y copiar el RUNBOOK a
+`~/telefono-jarvis/CLAUDE.md`. El backend tiene que ir antes (`/telefono/apunte` y la
+lectura de `pantalla`).
+
 ## Lo que además NO está en el repositorio original
 
 - **El servicio de systemd** `claude-phone-api` (`/etc/systemd/system/`), que levanta el

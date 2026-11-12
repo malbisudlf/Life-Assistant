@@ -25,6 +25,9 @@ import Manos from "./Manos";
 import PanelProyectos from "./Proyectos";
 import MenuRadial from "./MenuRadial";
 import { useProyectos } from "./useProyectos";
+import { PanelVivo } from "./PanelesVivos";
+import { usePanelesVivos } from "./usePanelesVivos";
+import { repartir } from "../../lib/hudPaneles";
 
 const VOZ_NAVEGADOR = typeof window !== "undefined"
   && Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
@@ -141,6 +144,9 @@ export default function JarvisHUD({
   // Los proyectos se piden si se pueden ver: el panel abierto o las manos puestas (el
   // puño los saca en el menú).
   const proyectos = useProyectos(proyectosOn || manosOn);
+  // Los paneles que Jarvis dibuja («enséñame el sueño contra el HRV»): PanelesVivos.jsx.
+  const vivos = usePanelesVivos(pensando);
+  const vivosPorColumna = useMemo(() => repartir(vivos.paneles), [vivos.paneles]);
   const [abrirProyecto, setAbrirProyecto] = useState(null);
 
   // ── El menú del puño ──
@@ -530,6 +536,13 @@ export default function JarvisHUD({
                          asa={asaDe("camara")} />
           </section>
         )}
+        {vivosPorColumna.izquierda.map(p => (
+          <section key={p.id} className="jh-panel jh-panel-vivo jh-movible" data-panel={`vivo-${p.id}`}
+                   style={estiloPanel(`vivo-${p.id}`)} aria-label={p.titulo} {...movibleDe(`vivo-${p.id}`)}>
+            <Esquinas />
+            <PanelVivo panel={p} asa={asaDe(`vivo-${p.id}`)} onQuitar={() => vivos.quitar(p.id)} />
+          </section>
+        ))}
         </div>
 
         {/* ── Centro: el reactor y la conversación ── */}
@@ -657,6 +670,13 @@ export default function JarvisHUD({
                             abrir={abrirProyecto} />
           </section>
         )}
+        {vivosPorColumna.derecha.map(p => (
+          <section key={p.id} className="jh-panel jh-panel-vivo jh-movible" data-panel={`vivo-${p.id}`}
+                   style={estiloPanel(`vivo-${p.id}`)} aria-label={p.titulo} {...movibleDe(`vivo-${p.id}`)}>
+            <Esquinas />
+            <PanelVivo panel={p} asa={asaDe(`vivo-${p.id}`)} onQuitar={() => vivos.quitar(p.id)} />
+          </section>
+        ))}
         </div>
       </div>
 
@@ -974,6 +994,24 @@ const CSS = `
   background: transparent; border: 1px solid var(--jh-c3); color: var(--jh-c); padding: 3px 8px; border-radius: 3px; cursor: pointer;
 }
 .jh-mini:disabled { opacity: .4; cursor: default; }
+
+/* Los paneles que dibuja Jarvis (PanelesVivos.jsx) */
+.jh-panel-vivo { animation: jh-vivo-entra .5s ease-out; }
+@keyframes jh-vivo-entra { from { opacity: 0; } to { opacity: 1; } }
+.jh-vivo-grafica { width: 100%; height: auto; display: block; overflow: visible; }
+.jh-vivo-eje { stroke: var(--jh-c3); stroke-width: 1; }
+.jh-vivo-pie { margin-top: 8px; display: flex; flex-direction: column; gap: 3px; }
+.jh-vivo-leyenda { display: flex; align-items: baseline; gap: 6px; font-size: 12px; }
+.jh-vivo-punto { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; align-self: center; }
+.jh-vivo-nombre { color: var(--jh-tenue); flex: 1; }
+.jh-vivo-valor { font-family: 'DM Mono', monospace; color: var(--jh-texto); }
+.jh-vivo-media { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--jh-tenue); }
+.jh-vivo-cifra { font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 38px; line-height: 1; color: var(--jh-c); }
+.jh-vivo-fila { display: flex; gap: 10px; padding: 4px 0; border-top: 1px dashed var(--jh-c3); font-size: 12.5px; }
+.jh-vivo-cuando { font-family: 'DM Mono', monospace; font-size: 11px; color: var(--jh-c); white-space: nowrap; }
+.jh-vivo-que { color: var(--jh-texto); min-width: 0; overflow-wrap: anywhere; }
+.jh-vivo-cerrar { padding: 0 6px; line-height: 1.3; }
+@media (prefers-reduced-motion: reduce) { .jh-panel-vivo { animation: none; } }
 
 /* La cámara */
 .jh-directo { font-family: 'DM Mono', monospace; font-size: 9.5px; letter-spacing: .12em; color: var(--jh-tenue); }

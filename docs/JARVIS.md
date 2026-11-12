@@ -1026,6 +1026,25 @@ está en la sección «Lugares» de `backend/main.py`, y la lógica pura del das
 - **Lo que se descartó**: callar la firma de malestar por la FC del gimnasio. Mira la FC
   en reposo, la HRV y la respiración de cada día, que no se mueven por estar entrenando.
 
+### La llegada a casa (2026-11-11)
+
+«Bienvenido a casa, señor.» Al volver tras un rato fuera (`LLEGADA_FUERA_MIN`, 30 min, por
+el lugar firme) el backend enciende lo declarado en `LLEGADA_ENTIDADES` y se queda mirando
+el sensor de presencia de tu cuarto (`LLEGADA_SENSOR`); cuando te ve **entrar**, tu Echo
+(`LLEGADA_ECHO`) dice la bienvenida y el parte: quién de tu agenda te ha escrito y sigue
+sin respuesta (nombres, nunca el texto), lo que queda de hoy y la temperatura del cuarto
+(`LLEGADA_CLIMA`). En el garaje no hay altavoz: por eso suena en el cuarto y no al cruzar
+la puerta.
+
+Habla sola por un altavoz en una casa donde vive más gente, y de ahí sus reglas: **nace
+apagada** (`LLEGADA=1`); solo tu cuarto y tu Echo; el sensor tiene que verse vacío antes
+de verse ocupado (si ya había alguien dentro, no se sabe quién es y no se le lee tu parte);
+si no entras en `LLEGADA_ESPERA_MIN` (30) no dice nada; de 0:00 a 8:00 enciende pero no
+habla; y el parte lo escribe el backend, sin modelo. No hay automatización nueva en Home
+Assistant: el backend pregunta por el sensor cada pocos segundos durante esa espera y nada
+más. El código, en «La llegada a casa» de `backend/main.py`; los tests, en
+`tests/backend/test_llegada.py`.
+
 ## El programador
 
 `encargar_proyecto` (con botón), `ver_proyectos` y `hablar_con_el_programador`: Jarvis le
@@ -1212,6 +1231,34 @@ en vez del dashboard cuando el fragmento empieza por `#tele`, en diferido).
   señal en el sofá frente a otros cuartos, y la automatización (entre semana, por la mañana,
   la tele apagada, una vez al día). Encenderla sola es encender la tele de todos: con su visto
   bueno y probándola con ella delante.
+
+### Los paneles que dibuja Jarvis (2026-11-12)
+
+«Enséñame el sueño de dos semanas contra el HRV» y en la vista aparece ese panel. **No es
+un chat continuo ni un modelo pintando**: Jarvis solo piensa cuando le preguntas, y lo que
+deja es una receta con `hud_panel` —un título, un tipo (`linea`, `barras`, `cifra`,
+`lista`) y una o dos fuentes de un catálogo cerrado (`HUD_FUENTES`: sueno, pasos, hrv,
+fc_reposo, energia, ejercicio, peso, agenda, trafico)—. A partir de ahí el panel vive sin
+modelo: `PanelesVivos.jsx` pide sus datos a `GET /hud/datos` y los refresca solo (el
+tráfico cada 2 min, las series cada 10). `hud_quitar` lo retira; también la × del panel.
+
+- **El modelo elige piezas; no escribe HTML ni datos.** Una fuente o un tipo que no
+  existen se rechazan diciendo cuáles hay. Lo único libre es el título, que se pinta como
+  texto (`tests/frontend/panelesVivos.test.jsx` lo comprueba con un `<img onerror>`).
+- **Dos fuentes van una contra otra**, cada una estirada a su mínimo y máximo: se compara
+  la forma, no la escala (horas contra milisegundos no caben en un eje).
+- **Las recetas viven en memoria** del backend (hasta `HUD_PANELES_MAX`, 6). La vista
+  guarda su copia con la instancia que se la dio, y la repone (`PUT /hud/paneles`) solo si
+  el backend es OTRA instancia y está vacío: así un despliegue no los borra, y uno que
+  Jarvis quitó no resucita.
+- **También por teléfono**: «Jarvis, ponme en pantalla el tráfico a la uni» lo dibuja
+  aunque la vista esté en otra habitación; la vista mira cada minuto y al acabar cada turno.
+- Se mueven con el ratón y con las manos como los demás (`data-panel="vivo-<id>"`). Los
+  tres primeros van a la derecha, bajo el día; el resto, a la izquierda.
+- La lógica pura (del punto al trazo, cómo se dice un valor, cuándo se repone) está en
+  `src/lib/hudPaneles.js`; el estado, en `usePanelesVivos.js`.
+- **Para añadir una fuente**: una entrada en `HUD_FUENTES` (si es una métrica de
+  `health_metrics`, nada más) y su nombre en la descripción de `hud_panel`.
 
 ### La cámara, las manos y los proyectos (2026-10-28)
 
@@ -1781,6 +1828,32 @@ era la factura. Ahora se mide solo (tabla `jarvis_gasto`, migración `20260903_g
 - El **% cacheado** es la palanca de coste real: si se hunde, algo que cambia a menudo se
   ha colado delante del prompt. Sale en el panel ⚙ al lado del total.
 
+
+## El copiloto: `trafico` (2026-11-12)
+
+En el coche: «Jarvis, ¿hay mucho tráfico?» → «No tengo tráfico en directo, señor». Lo
+había desde siempre (`/maps/departure` le pregunta a Google cuánto se tarda con el tráfico
+de ahora), pero solo para la hora de salida de una cita. `trafico` lo dice de frente, con
+Directions y alternativas: cuánto se tarda ahora, cuántos minutos de más y, si la ruta de
+siempre hoy no es la mejor, cuál lo es.
+
+- **Sale de donde estás** (la presencia de HA, redondeada como en la hora de salida) y, si
+  no se sabe, de casa. La dirección no vuelve en la respuesta: «desde donde estás».
+- **`destino`**: «casa» (`HOME_ADDRESS`), los de `TRAFICO_LUGARES` («uni=…;gimnasio=…»,
+  con sus alias) o lo que digas, tal cual a Google. Vacío = tu próxima cita con sitio en
+  `COPILOTO_VENTANA_MIN`, de la que solo se dice la hora (el título de una invitación lo
+  escribe otro) y con cuánto margen llegas.
+- **Está en el teléfono**: vuelven minutos, kilómetros y nombres de carretera de Google.
+- **Al arrancar el coche lo dice él** (`COPILOTO=1`, nace apagado): el aviso del modo
+  coche lleva delante el camino a esa cita y si llegas justo o tarde. Sin cita con sitio,
+  o si Google tarda más de `COPILOTO_SEG`, el aviso de siempre. A demanda («¿Señor?»), no.
+- Dos preguntas iguales en `TRAFICO_CACHE_S` (2 min) son una sola petición de pago.
+- **Lo que no hace**: avisar a mitad de viaje de que la ruta ha empeorado. La llamada en
+  escucha pasiva no tiene cómo recibir algo que decir sin que le pregunten.
+
+En la misma tanda, dos cosas que la llamada hace sin pasar por el Claude con shell —«mira
+mi pantalla» (`📖 LEER: pantalla`, `_lectura_pantalla`) y «apunta eso»
+(`POST /telefono/apunte`)—: ver los parches 47 y 48 en `telefono/PARCHES.md`.
 
 ## El garaje y las cámaras
 

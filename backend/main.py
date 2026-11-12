@@ -8604,6 +8604,11 @@ def ha_presencia(body: PresenciaRequest, request: Request, token: str = ""):
         except Exception:
             logger.exception("Retirar avisos de salida al volver: fallo inesperado")
 
+    # La bienvenida («La llegada a casa»): con su propio interruptor, no el de las reglas.
+    # Antes de `_procesar_lugar_seguro`: el lugar firme todavía dice de dónde vienes.
+    if anterior and not anterior.get("en_casa") and en_casa:
+        _llegada_al_volver()
+
     # Las llegadas y salidas de los lugares con nombre. No sustituyen a lo de arriba: lo
     # de casa se dispara al primer aviso, sin esperar, porque apagar la luz al irte no
     # puede aguardar cinco minutos; esto espera a que el lugar sea firme.
@@ -15571,6 +15576,202 @@ def _j_casa_anunciar(texto: str, donde: str = "cocina") -> dict:
     if fallos == len(destinos):
         return {"ok": False, "motivo": "Los Echo no han aceptado el mensaje."}
     return {"ok": True, "frase": "Dicho, señor.", "dicho_en": destinos, "fallidos": fallos}
+
+
+# ── La llegada a casa (2026-11-11) ────────────────────────────────────────────
+# «Bienvenido a casa, señor», como en las películas. En el garaje no hay altavoz, así que
+# no suena al cruzar la puerta sino **cuando entras en tu cuarto**: al volver a casa tras
+# un rato fuera se enciende lo que hayas declarado (`LLEGADA_ENTIDADES`) y un hilo se
+# queda mirando el sensor de presencia de tu cuarto; cuando te ve entrar, tu Echo te da la
+# bienvenida y el parte de lo que pasó mientras no estabas.
+#
+# Lo que no es obvio:
+#  - **Solo tu cuarto y tu Echo.** En la casa vive más gente: nada de esto toca una luz ni
+#    un altavoz común, y de noche (`LLEGADA_HABLA_DESDE`-`HASTA`) enciende pero no habla.
+#  - **El sensor tiene que verse vacío antes de verse ocupado.** Si ya había alguien en tu
+#    cuarto cuando llegaste, no se sabe quién es y no se le lee tu parte a nadie.
+#  - **Una vuelta de verdad** (`LLEGADA_FUERA_MIN` fuera, por el lugar firme): bajar a por
+#    el pan no merece bienvenida, y un parpadeo del GPS tampoco.
+#  - **El parte son hechos que escribe el backend**, sin modelo: quién de tu agenda te ha
+#    escrito y no has contestado (nombres, nunca el texto), lo que queda de hoy y la
+#    temperatura del cuarto. Cada trozo que falle se calla; la bienvenida sale igual.
+#  - **Nace apagada** (`LLEGADA=1`) y sin sensor no hace nada: habla sola por un altavoz.
+LLEGADA             = _flag("LLEGADA", "0")
+LLEGADA_SENSOR      = os.getenv("LLEGADA_SENSOR", "")       # binary_sensor de presencia de TU cuarto
+LLEGADA_ECHO        = os.getenv("LLEGADA_ECHO", "")         # uno de los valores de _CASA_ECHOS
+LLEGADA_CLIMA       = os.getenv("LLEGADA_CLIMA", "")        # climate de tu cuarto, para la temperatura
+LLEGADA_ENTIDADES   = tuple(
+    e.strip() for e in os.getenv("LLEGADA_ENTIDADES", "").split(",") if e.strip()
+)
+LLEGADA_FUERA_MIN   = int(os.getenv("LLEGADA_FUERA_MIN", "30"))
+LLEGADA_ESPERA_MIN  = int(os.getenv("LLEGADA_ESPERA_MIN", "30"))
+LLEGADA_SONDEO_SEG  = 4
+LLEGADA_HABLA_DESDE = 8
+LLEGADA_HABLA_HASTA = 24
+LLEGADA_VOZ_MAX     = 420
+LLEGADA_NOMBRES_MAX = 3
+_LLEGADA_SENSOR_RE  = re.compile(r"^binary_sensor\.[a-z0-9_]{1,64}$")
+_LLEGADA_CLIMA_RE   = re.compile(r"^climate\.[a-z0-9_]{1,64}$")
+_llegada_lock       = threading.Lock()
+_llegada_en_curso   = False
+
+
+def _llegada_configurada() -> bool:
+    return bool(LLEGADA and _ha_directo() and _LLEGADA_SENSOR_RE.match(LLEGADA_SENSOR)
+                and LLEGADA_ECHO in set(_CASA_ECHOS.values()))
+
+
+def _llegada_fuera_desde() -> Optional[datetime]:
+    """Desde cuándo estás fuera según el lugar FIRME, o None si consta que estás en casa.
+    Se pregunta al llegar, cuando el firme todavía es el sitio del que vienes."""
+    with _lugar_lock:
+        firme = _lugar_estado.get("firme")
+    if not firme or firme[0] == LUGAR_CASA:
+        return None
+    return firme[1]
+
+
+def _llegada_enumerar(nombres: list) -> str:
+    """«Aimar», «Aimar y Erik», «Aimar, Erik, Ane y 2 más»."""
+    primeros, resto = nombres[:LLEGADA_NOMBRES_MAX], len(nombres) - LLEGADA_NOMBRES_MAX
+    if resto > 0:
+        return ", ".join(primeros) + f" y {resto} más"
+    if len(primeros) == 1:
+        return primeros[0]
+    return ", ".join(primeros[:-1]) + " y " + primeros[-1]
+
+
+def _llegada_mensajes(desde: datetime, ahora: datetime) -> str:
+    """Quién de tu agenda te ha escrito mientras estabas fuera y sigue sin respuesta. Solo
+    nombres: el texto de un mensaje no se dice por un altavoz."""
+    if not _whatsapp_configurado():
+        return ""
+    horas = min(24, max(1, math.ceil((ahora - desde).total_seconds() / 3600)))
+    datos = _whatsapp("GET", "/mensajes", {"horas": horas, "limite": 400})
+    ultimo: dict = {}
+    for m in datos.get("mensajes") or []:
+        chat, d = m.get("chat"), _fecha_utc(m.get("hora"))
+        if not d or d < desde or not _wa_chat_valido(chat) or str(chat).endswith("@g.us"):
+            continue
+        if chat not in ultimo or d > ultimo[chat][0]:
+            ultimo[chat] = (d, bool(m.get("mio")))
+    nombres = []
+    for chat, (_, mio) in sorted(ultimo.items(), key=lambda x: x[1][0], reverse=True):
+        if mio:
+            continue
+        c = _wa_chat_guardado(chat)
+        if c and c.get("en_agenda") and str(c.get("nombre") or "").strip():
+            nombres.append(_wa_nombre_seguro(c, chat))
+    if not nombres:
+        return ""
+    verbo = "le ha escrito" if len(nombres) == 1 else "le han escrito"
+    return f"Mientras estaba fuera {verbo} {_llegada_enumerar(nombres)}."
+
+
+def _llegada_agenda(desde: datetime, ahora: datetime) -> str:
+    for linea in _contexto_agenda(ahora):
+        if linea.startswith("Lo que queda de hoy:"):
+            resto = linea.split(":", 1)[1].strip()
+            if resto.startswith("nada"):
+                return "No le queda nada en la agenda de hoy."
+            return f"Le queda hoy: {resto}"
+    return ""
+
+
+def _llegada_clima(desde: datetime, ahora: datetime) -> str:
+    if not _LLEGADA_CLIMA_RE.match(LLEGADA_CLIMA):
+        return ""
+    e = _ha_entidad(LLEGADA_CLIMA) or {}
+    try:
+        grados = float((e.get("attributes") or {})["current_temperature"])
+    except (KeyError, TypeError, ValueError):
+        return ""
+    return f"Su cuarto está a {round(grados)} grados."
+
+
+def _llegada_parte(desde: datetime) -> str:
+    """Lo que dice el Echo: la bienvenida y los hechos que se hayan podido mirar."""
+    ahora = _ahora_local()
+    trozos = ["Bienvenido a casa, señor."]
+    for mirar in (_llegada_mensajes, _llegada_agenda, _llegada_clima):
+        try:
+            trozo = mirar(desde, ahora)
+        except Exception as e:
+            logger.warning("Llegada: un trozo del parte no ha salido (%s)", type(e).__name__)
+            trozo = ""
+        if trozo and len(" ".join(trozos + [trozo])) <= LLEGADA_VOZ_MAX:
+            trozos.append(trozo)
+    return " ".join(trozos)
+
+
+def _llegada_esperar_cuarto(dormir=time.sleep) -> bool:
+    """Espera a verte ENTRAR en tu cuarto: el sensor vacío y, después, ocupado. False si
+    pasa `LLEGADA_ESPERA_MIN` sin verlo, o si ya había alguien y no llega a salir."""
+    visto_vacio = False
+    for _ in range(max(1, LLEGADA_ESPERA_MIN * 60 // LLEGADA_SONDEO_SEG)):
+        estado = str((_ha_entidad(LLEGADA_SENSOR) or {}).get("state") or "")
+        if estado == "off":
+            visto_vacio = True
+        elif estado == "on" and visto_vacio:
+            return True
+        dormir(LLEGADA_SONDEO_SEG)
+    return False
+
+
+def _llegada_decir(texto: str) -> bool:
+    try:
+        r = http.post(f"{HA_URL}/api/services/notify/send_message", headers=_ha_cabeceras(),
+                      json={"entity_id": f"notify.{LLEGADA_ECHO}_hablar", "message": texto},
+                      timeout=6)
+        return r.status_code < 300
+    except requests.RequestException as e:
+        logger.warning("Llegada: el Echo no ha aceptado la bienvenida (%s)", type(e).__name__)
+        return False
+
+
+def _llegada_hilo(desde: datetime, dormir=time.sleep) -> bool:
+    """La llegada entera. True si ha llegado a hablar."""
+    global _llegada_en_curso
+    try:
+        if LLEGADA_ENTIDADES:
+            _encender_entidades(list(LLEGADA_ENTIDADES))
+        if not _llegada_esperar_cuarto(dormir):
+            logger.info("Llegada: no se le ha visto entrar en su cuarto; no se dice nada")
+            return False
+        if not (_leer_presencia() or {}).get("en_casa"):
+            return False               # se ha vuelto a ir mientras se esperaba
+        if not LLEGADA_HABLA_DESDE <= _ahora_local().hour < LLEGADA_HABLA_HASTA:
+            return False
+        dicho = _llegada_decir(_llegada_parte(desde))
+        logger.info("Llegada: bienvenida %s", "dicha" if dicho else "sin decir")
+        return dicho
+    except Exception:
+        logger.exception("Llegada: fallo inesperado")
+        return False
+    finally:
+        with _llegada_lock:
+            _llegada_en_curso = False
+
+
+def _llegada_al_volver() -> bool:
+    """Del aviso de presencia, al pasar de fuera a casa. Nunca lanza: no puede tumbar la
+    escritura de la presencia. True si ha arrancado la llegada."""
+    global _llegada_en_curso
+    try:
+        if not _llegada_configurada():
+            return False
+        desde = _llegada_fuera_desde()
+        if not desde or (datetime.now(timezone.utc) - desde).total_seconds() < LLEGADA_FUERA_MIN * 60:
+            return False
+        with _llegada_lock:
+            if _llegada_en_curso:
+                return False
+            _llegada_en_curso = True
+        threading.Thread(target=_llegada_hilo, args=(desde,), daemon=True).start()
+        return True
+    except Exception:
+        logger.exception("Llegada: no se pudo arrancar")
+        return False
 
 
 def _contexto_casa() -> str:
@@ -23902,6 +24103,224 @@ def _j_recado_dejar(recado: str) -> dict:
             "nota": "No vuelvo a llamar por esto. Si había una llamada en marcha, esa termina."}
 
 
+# ── EL COPILOTO: tráfico en directo ──────────────────────────────────────────────────
+#
+# El 2026-11-12, en el coche: «Jarvis, ¿hay mucho tráfico?» → «No tengo tráfico en
+# directo, señor». Y sí lo había: `/maps/departure` lleva meses preguntándole a Google
+# cuánto se tarda con el tráfico de ahora, pero solo para la hora de salida de una cita.
+# Esto es lo mismo dicho de frente: cuánto se tarda AHORA a un sitio, cuánto es de más y
+# si hay otra ruta mejor (Directions con alternativas; con la misma clave).
+#
+#   - **Lo que vuelve son cifras y nombres de carretera**, de Google: nada escrito por
+#     nadie. Por eso `trafico` sí entra en el teléfono, al revés que internet.
+#   - **El origen es donde estás** (la presencia de HA, redondeada como en la hora de
+#     salida) y, si no se sabe, casa. La dirección no sale en la respuesta: solo «desde
+#     donde estás» o «desde casa».
+#   - **Los sitios de siempre tienen nombre** (`TRAFICO_LUGARES`, «uni=…;gimnasio=…»), y
+#     «casa» es `HOME_ADDRESS`. Lo demás se le pasa a Google tal cual lo dijiste.
+#   - **Sin destino, la próxima cita con sitio** (en las próximas `COPILOTO_VENTANA_MIN`).
+#   - **Al arrancar el coche lo dice él** (`COPILOTO=1`): el aviso del modo coche lleva
+#     delante cuánto hay hasta esa cita. Nace apagado; sin cita con sitio, o si Google no
+#     contesta en `COPILOTO_SEG`, el aviso es el de siempre.
+COPILOTO              = os.getenv("COPILOTO", "0") == "1"
+COPILOTO_VENTANA_MIN  = int(os.getenv("COPILOTO_VENTANA_MIN", "180"))
+COPILOTO_SEG          = float(os.getenv("COPILOTO_SEG", "4"))
+TRAFICO_CACHE_S       = 120
+TRAFICO_RETRASO_MIN   = 3     # por debajo de esto, «va fluido»
+TRAFICO_ATAJO_MIN     = 3     # lo que tiene que ganar otra ruta para nombrarla
+_trafico_cache: dict  = {}
+_trafico_lock         = threading.Lock()
+
+
+def _trafico_lugares() -> dict:
+    """{nombre: dirección} de `TRAFICO_LUGARES` («uni=Universidad de X;gimnasio=…»)."""
+    lugares = {}
+    for trozo in os.getenv("TRAFICO_LUGARES", "").split(";"):
+        nombre, _, direccion = trozo.partition("=")
+        if nombre.strip() and direccion.strip():
+            lugares[nombre.strip().lower()] = direccion.strip()[:300]
+    return lugares
+
+
+_TRAFICO_ALIAS = {"universidad": "uni", "la uni": "uni", "la universidad": "uni", "clase": "uni",
+                  "gym": "gimnasio", "el gimnasio": "gimnasio", "el gym": "gimnasio",
+                  "mi casa": "casa"}
+
+
+def _trafico_sitio(texto: str) -> tuple:
+    """(lo que se le manda a Google, cómo se dice) de un sitio dicho por Mikel."""
+    dicho = " ".join(str(texto or "").split())[:200]
+    clave = dicho.lower().strip(" .")
+    clave = _TRAFICO_ALIAS.get(clave, clave)
+    if clave == "casa" and HOME_ADDRESS:
+        return HOME_ADDRESS, "casa"
+    guardado = _trafico_lugares().get(clave)
+    if guardado:
+        return guardado, clave
+    return dicho, dicho
+
+
+def _trafico_rutas(origen: str, destino: str, espera: float = 8.0) -> list:
+    """Las rutas en coche de `origen` a `destino` con el tráfico de ahora, la más rápida
+    primero: [{via, minutos, normal_min, retraso_min, km}]. Lanza si Google no contesta."""
+    clave = (_origen_normalizado(origen), destino.strip().lower())
+    with _trafico_lock:
+        guardado = _trafico_cache.get(clave)
+        if guardado and time.time() - guardado[0] < TRAFICO_CACHE_S:
+            return [dict(r) for r in guardado[1]]
+    r = http.get("https://maps.googleapis.com/maps/api/directions/json", params={
+        "origin": clave[0], "destination": destino, "mode": "driving",
+        "departure_time": "now", "alternatives": "true", "language": "es",
+        "key": GOOGLE_MAPS_API_KEY}, timeout=espera)
+    if r.status_code >= 300:
+        raise RuntimeError(f"Maps directions {r.status_code}")
+    datos = r.json()
+    if datos.get("status") == "ZERO_RESULTS" or datos.get("status") == "NOT_FOUND":
+        return []
+    if datos.get("status") != "OK":
+        raise RuntimeError(f"Maps directions status={datos.get('status')}")
+    rutas = []
+    for ruta in datos.get("routes") or []:
+        try:
+            tramo = ruta["legs"][0]
+            normal = int(tramo["duration"]["value"])
+            ahora = int((tramo.get("duration_in_traffic") or tramo["duration"])["value"])
+            metros = int(tramo["distance"]["value"])
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue
+        via = re.sub(r"[^\w\s/.,ñÑáéíóúÁÉÍÓÚüÜ-]", "", str(ruta.get("summary") or ""))[:60].strip()
+        rutas.append({"via": via, "minutos": round(ahora / 60), "normal_min": round(normal / 60),
+                      "retraso_min": max(0, round((ahora - normal) / 60)),
+                      "km": round(metros / 1000, 1)})
+    rutas.sort(key=lambda x: x["minutos"])
+    with _trafico_lock:
+        ahora_s = time.time()
+        for k in [k for k, (t, _) in _trafico_cache.items() if ahora_s - t >= TRAFICO_CACHE_S]:
+            del _trafico_cache[k]
+        _trafico_cache[clave] = (ahora_s, [dict(x) for x in rutas])
+    return rutas
+
+
+def _trafico_frase(a_donde: str, rutas: list) -> str:
+    """Lo que diría un copiloto, en una frase: cuánto, cuánto de más y si hay otra mejor."""
+    mejor = rutas[0]
+    por = f" por {mejor['via']}" if mejor["via"] else ""
+    frase = f"A {a_donde}{por}, {mejor['minutos']} minutos"
+    if mejor["retraso_min"] >= TRAFICO_RETRASO_MIN:
+        frase += f", {mejor['retraso_min']} más de lo normal"
+    else:
+        frase += ", va fluido"
+    # La de siempre es la más corta sin tráfico: si hoy no es la mejor, se dice cuál lo es.
+    habitual = min(rutas, key=lambda x: x["normal_min"])
+    if habitual is not mejor and habitual["minutos"] - mejor["minutos"] >= TRAFICO_ATAJO_MIN \
+            and habitual["via"]:
+        frase += (f". Por {habitual['via']}, la de siempre, serían "
+                  f"{habitual['minutos'] - mejor['minutos']} minutos más")
+    return frase + "."
+
+
+def _proxima_cita_con_sitio(ventana_min: int) -> Optional[dict]:
+    ahora = _ahora_local()
+    for ev in _eventos_con_fecha(dias=1):
+        sitio = (ev.get("location") or "").strip()
+        if sitio and ahora < ev["ini"] <= ahora + timedelta(minutes=ventana_min):
+            return ev
+    return None
+
+
+def _j_trafico(destino: str = "", origen: str = "") -> dict:
+    if not GOOGLE_MAPS_API_KEY:
+        return {"ok": False, "error": "No hay clave de Google Maps configurada."}
+    cita = None
+    if not str(destino or "").strip():
+        cita = _proxima_cita_con_sitio(COPILOTO_VENTANA_MIN)
+        if not cita:
+            return {"ok": False, "error": "No sé a dónde: no tienes ninguna cita con sitio en las "
+                                          "próximas horas. Pregúntale a dónde va."}
+        # El título no: lo puede haber escrito quien mandó la invitación.
+        a_google, a_donde = cita["location"].strip()[:300], f"su cita de las {cita['ini'].strftime('%H:%M')}"
+    else:
+        a_google, a_donde = _trafico_sitio(destino)
+    if str(origen or "").strip():
+        de_google, desde = _trafico_sitio(origen)
+    else:
+        coords = coords_presencia()
+        if coords:
+            de_google, desde = f"{coords[0]},{coords[1]}", "donde estás"
+        elif HOME_ADDRESS:
+            de_google, desde = HOME_ADDRESS, "casa"
+        else:
+            return {"ok": False, "error": "No sé desde dónde sales: dime el origen."}
+    try:
+        rutas = _trafico_rutas(de_google, a_google)
+    except Exception as e:   # noqa: BLE001
+        logger.warning("Tráfico: Google no ha contestado (%s)", type(e).__name__)
+        return {"ok": False, "error": "Google Maps no contesta ahora mismo."}
+    if not rutas:
+        return {"ok": False, "error": f"Google no encuentra una ruta en coche a «{a_donde[:60]}»."}
+    salida = {"ok": True, "a": a_donde[:80], "desde": desde[:80],
+              "rutas": rutas[:3], "frase": _trafico_frase(a_donde[:80], rutas)}
+    if cita:
+        llegada = _ahora_local() + timedelta(minutes=rutas[0]["minutos"])
+        salida["cita"] = {"hora": cita["ini"].strftime("%H:%M"),
+                          "llegarias": llegada.strftime("%H:%M"),
+                          "margen_min": round((cita["ini"] - llegada).total_seconds() / 60)}
+    return salida
+
+
+def _copiloto_apertura() -> str:
+    """Lo que el modo coche dice de entrada sobre el camino, o "" si no hay nada que decir.
+
+    Solo con una cita con sitio por delante: sin ella habría que adivinar a dónde vas, y un
+    copiloto que se equivoca de destino cada mañana se apaga a la semana."""
+    if not COPILOTO or not GOOGLE_MAPS_API_KEY:
+        return ""
+    try:
+        cita = _proxima_cita_con_sitio(COPILOTO_VENTANA_MIN)
+        if not cita:
+            return ""
+        coords = coords_presencia()
+        origen = f"{coords[0]},{coords[1]}" if coords else HOME_ADDRESS
+        if not origen:
+            return ""
+        rutas = _trafico_rutas(origen, cita["location"].strip()[:300], espera=COPILOTO_SEG)
+        if not rutas:
+            return ""
+        frase = _trafico_frase(f"su cita de las {cita['ini'].strftime('%H:%M')}", rutas)
+        margen = round((cita["ini"] - _ahora_local()).total_seconds() / 60) - rutas[0]["minutos"]
+        if margen < 0:
+            frase += f" Llega unos {-margen} minutos tarde."
+        elif margen <= 10:
+            frase += " Llega justo."
+        return frase
+    except Exception as e:   # noqa: BLE001
+        logger.warning("Copiloto: sin parte de tráfico al arrancar (%s)", type(e).__name__)
+        return ""
+
+
+# ── «Jarvis, apunta eso» ─────────────────────────────────────────────────────────────
+# En la escucha pasiva, la voice-app recuerda en memoria lo oído en el último minuto y
+# medio (parche 47). Si dices «Jarvis, apunta eso», lo manda aquí y se guarda como una
+# idea más, con su marca de que salió de viva voz. No pasa por el Claude del teléfono: lo
+# que hay ahí lo ha podido decir la radio o quien vaya al lado, y esa sesión tiene shell.
+class ApunteTelefono(BaseModel):
+    texto: str = Field(..., min_length=2, max_length=2000)
+
+
+@app.post("/telefono/apunte")
+def telefono_apunte(request: Request, cuerpo: ApunteTelefono):
+    if not _token_ok(_extract_service_token(request), JARVIS_MCP_TELEFONO_TOKEN):
+        raise HTTPException(status_code=401, detail="Token inválido")
+    texto = " ".join(cuerpo.texto.split())
+    try:
+        r = _j_guardar_idea(f"Apunte de viva voz ({_ahora_local().strftime('%d/%m %H:%M')}): {texto}")
+    except Exception as e:   # noqa: BLE001
+        logger.error("Apunte por teléfono: no se pudo guardar (%s)", type(e).__name__)
+        return {"ok": False}
+    logger.info("Apunte por teléfono: guardado (%d caracteres)", len(texto))
+    return {"ok": bool(r.get("ok"))}
+
+
 # ── MODO COCHE ───────────────────────────────────────────────────────────────────────
 #
 # Jarvis a la escucha en el coche, como un altavoz que se despierta con su nombre: el
@@ -23929,6 +24348,8 @@ def _j_recado_dejar(recado: str) -> dict:
 MODO_COCHE_PAUSA_MIN = int(os.getenv("MODO_COCHE_PAUSA_MIN", "10"))
 MODO_COCHE_MENSAJE   = ("Modo coche, señor. Me quedo a la escucha en silencio; "
                         "diga «Jarvis» cuando me necesite.")
+MODO_COCHE_CON_CAMINO = ("Modo coche, señor. {camino} Me quedo a la escucha; "
+                         "diga «Jarvis» cuando me necesite.")
 MODO_COCHE_A_DEMANDA = "¿Señor?"
 _modo_coche_ultima: dict = {"ts": 0.0}
 
@@ -23950,9 +24371,12 @@ def telefono_modo_coche(request: Request, token: str = "", escucha: str = "pasiv
         return {"ok": True, "llamada": False,
                 "motivo": f"ya te llamé hace {int(hace // 60)} min; no repito antes de "
                           f"{MODO_COCHE_PAUSA_MIN}"}
+    # El copiloto: si vas a una cita con sitio, el camino va delante del aviso de siempre.
+    camino = _copiloto_apertura() if pasiva else ""
     cuerpo = {"to": TELEFONO_EXTENSION, "device": TELEFONO_DISPOSITIVO,
               "mode": "conversation",
-              "message": MODO_COCHE_MENSAJE if pasiva else MODO_COCHE_A_DEMANDA,
+              "message": ((MODO_COCHE_CON_CAMINO.format(camino=camino) if camino
+                           else MODO_COCHE_MENSAJE) if pasiva else MODO_COCHE_A_DEMANDA),
               "timeoutSeconds": TELEFONO_TIMBRE_SEG, "detectVoicemail": True}
     if pasiva:
         cuerpo["escuchaPasiva"] = True
@@ -28451,6 +28875,202 @@ def _j_ideas(limite: int = 10) -> dict:
     } for i in ideas[:limite]]}
 
 
+# ── EL HUD QUE SE DIBUJA SOLO ────────────────────────────────────────────────────────
+#
+# «Enséñame el sueño de las dos últimas semanas contra el HRV» → en la vista J.A.R.V.I.S.
+# aparece ese panel. No es un chat continuo ni un modelo pintando: Jarvis solo piensa
+# cuando le preguntas, y lo que deja es una RECETA (`hud_panel`): un título, un tipo de
+# dibujo y de qué fuentes bebe, elegidas de un catálogo cerrado. A partir de ahí el panel
+# vive sin modelo: la vista le pide sus datos al backend (`GET /hud/datos`) y los refresca.
+#
+#   - **El modelo no escribe HTML ni datos**: elige piezas. Lo único libre es el título,
+#     que se pinta como texto. Una fuente o un tipo que no existen se rechazan diciendo
+#     cuáles hay, para que corrija.
+#   - **Las recetas viven en memoria**, hasta `HUD_PANELES_MAX`. La vista guarda su copia
+#     y las repone tras un despliegue (`PUT /hud/paneles`, que valida igual que la
+#     herramienta): no merecen una tabla.
+#   - **Los datos se sirven con el JWT de siempre** y son los que ya ve el dashboard: no
+#     hay nada nuevo expuesto, solo otra forma de pedirlo.
+HUD_PANELES_MAX = 6
+HUD_TIPOS = ("linea", "barras", "cifra", "lista")
+# fuente → (cómo se llama, unidad, métrica de health_metrics o None si es propia)
+HUD_FUENTES = {
+    "sueno":     ("Sueño", "h", "sleep_analysis"),
+    "pasos":     ("Pasos", "", "step_count"),
+    "hrv":       ("HRV", "ms", "heart_rate_variability"),
+    "fc_reposo": ("FC en reposo", "lpm", "resting_heart_rate"),
+    "energia":   ("Energía activa", "kcal", "active_energy"),
+    "ejercicio": ("Ejercicio", "min", "apple_exercise_time"),
+    "peso":      ("Peso", "kg", "weight_body_mass"),
+    "agenda":    ("Agenda", "", None),
+    "trafico":   ("Tráfico", "min", None),
+}
+_HUD_SOLO_LISTA = {"agenda"}
+_HUD_SOLO_CIFRA = {"trafico"}
+_hud_paneles: list = []
+_hud_lock = threading.Lock()
+
+
+def _hud_receta(titulo, tipo, fuentes, dias=14, destino="") -> tuple:
+    """(receta, error). La receta validada de un panel, o por qué no vale."""
+    titulo = " ".join(str(titulo or "").split())[:60]
+    if isinstance(fuentes, str):
+        fuentes = [f for f in re.split(r"[,\s]+", fuentes) if f]
+    fuentes = [str(f).strip().lower() for f in (fuentes or [])][:2]
+    malas = [f for f in fuentes if f not in HUD_FUENTES]
+    if not fuentes or malas:
+        return None, ("Fuentes que no existen: " + ", ".join(malas) + ". " if malas else "Falta la fuente. ") \
+            + "Las que hay: " + ", ".join(HUD_FUENTES) + "."
+    tipo = str(tipo or "").strip().lower()
+    if fuentes[0] in _HUD_SOLO_LISTA:
+        tipo, fuentes = "lista", fuentes[:1]
+    elif fuentes[0] in _HUD_SOLO_CIFRA:
+        tipo, fuentes = "cifra", fuentes[:1]
+    elif tipo not in HUD_TIPOS or tipo == "lista":
+        tipo = "linea"
+    if tipo in ("linea", "barras", "cifra") and any(f in _HUD_SOLO_LISTA | _HUD_SOLO_CIFRA for f in fuentes[1:]):
+        fuentes = fuentes[:1]
+    if tipo == "cifra":
+        fuentes = fuentes[:1]
+    try:
+        dias = max(1, min(int(dias or 14), 90))
+    except (TypeError, ValueError):
+        dias = 14
+    receta = {"titulo": titulo or HUD_FUENTES[fuentes[0]][0], "tipo": tipo, "fuentes": fuentes, "dias": dias}
+    if "trafico" in fuentes:
+        receta["destino"] = " ".join(str(destino or "").split())[:120]
+    return receta, ""
+
+
+def _hud_poner(receta: dict, pid: str = "") -> dict:
+    """Pone un panel (o sustituye al del mismo título) y devuelve cómo quedó."""
+    panel = {**receta, "id": pid if re.fullmatch(r"[a-f0-9]{8}", pid or "") else uuid.uuid4().hex[:8]}
+    with _hud_lock:
+        _hud_paneles[:] = [p for p in _hud_paneles
+                           if p["id"] != panel["id"] and p["titulo"].lower() != panel["titulo"].lower()]
+        _hud_paneles.append(panel)
+        del _hud_paneles[:-HUD_PANELES_MAX]
+    return panel
+
+
+def _j_hud_panel(fuentes="", titulo: str = "", tipo: str = "linea", dias: int = 14,
+                 destino: str = "") -> dict:
+    receta, error = _hud_receta(titulo, tipo, fuentes, dias, destino)
+    if error:
+        return {"ok": False, "error": error}
+    panel = _hud_poner(receta)
+    return {"ok": True, "panel": panel["titulo"], "tipo": panel["tipo"],
+            "nota": "Ya está dibujado en la vista J.A.R.V.I.S. (pantalla completa) y se "
+                    "actualiza solo. Si no la tiene abierta, lo verá al abrirla. No le "
+                    "recites los datos salvo que los pida."}
+
+
+def _j_hud_quitar(panel: str = "") -> dict:
+    cual = " ".join(str(panel or "").split()).lower()
+    with _hud_lock:
+        antes = len(_hud_paneles)
+        _hud_paneles[:] = [] if cual in ("", "todos", "todo") else \
+            [p for p in _hud_paneles if cual not in p["titulo"].lower()]
+        quitados = antes - len(_hud_paneles)
+    if not quitados:
+        return {"ok": False, "error": "No hay ningún panel con ese nombre.",
+                "paneles": [p["titulo"] for p in _hud_paneles]}
+    return {"ok": True, "quitados": quitados}
+
+
+def _hud_serie(fuente: str, dias: int) -> list:
+    """[{d: 'YYYY-MM-DD', v: número}] de una métrica de salud, lo más antiguo primero."""
+    metrica = HUD_FUENTES[fuente][2]
+    filas = (get_health_metrics(days=dias + 1, credentials=None).get("metrics") or {}).get(metrica) or []
+    puntos = []
+    for f in filas[-dias:]:
+        if fuente == "sueno":
+            if (f.get("extra") or {}).get("excluded"):
+                continue
+            valor = _horas_sueno(f)
+        else:
+            valor = f.get("value")
+        try:
+            valor = round(float(valor), 2)
+        except (TypeError, ValueError):
+            continue
+        if valor > 0:
+            puntos.append({"d": str(f.get("date") or "")[:10], "v": valor})
+    return puntos
+
+
+def _hud_datos(fuente: str, dias: int = 14, destino: str = "") -> dict:
+    nombre, unidad, metrica = HUD_FUENTES[fuente]
+    if metrica:
+        return {"clase": "serie", "nombre": nombre, "unidad": unidad, "puntos": _hud_serie(fuente, dias)}
+    if fuente == "agenda":
+        hoy = _ahora_local().date().isoformat()
+        eventos = _j_agenda(min(dias, 14)).get("eventos") or []
+        return {"clase": "lista", "nombre": nombre, "items": [
+            {"a": ("" if e["dia"] == hoy else e["dia"][8:10] + "/" + e["dia"][5:7] + " ")
+                  + ("todo el día" if e.get("todo_el_dia") else e["hora"]),
+             "b": str(e.get("titulo") or "")[:80]} for e in eventos[:12]]}
+    r = _j_trafico(destino)
+    if not r.get("ok"):
+        return {"clase": "cifra", "nombre": nombre, "valor": None, "unidad": "", "nota": r.get("error", "")[:140]}
+    mejor = r["rutas"][0]
+    return {"clase": "cifra", "nombre": f"A {r['a']}"[:60], "valor": mejor["minutos"], "unidad": "min",
+            "nota": (f"+{mejor['retraso_min']} min sobre lo normal" if mejor["retraso_min"] >= TRAFICO_RETRASO_MIN
+                     else "fluido") + (f" · {mejor['via']}" if mejor["via"] else "")}
+
+
+class HudPanelIn(BaseModel):
+    id:      str = Field("", max_length=8)
+    titulo:  str = Field("", max_length=60)
+    tipo:    str = Field("linea", max_length=10)
+    fuentes: list[str] = Field(default_factory=list, max_length=2)
+    dias:    int = Field(14, ge=1, le=90)
+    destino: str = Field("", max_length=120)
+
+
+class HudPanelesIn(BaseModel):
+    paneles: list[HudPanelIn] = Field(default_factory=list, max_length=HUD_PANELES_MAX)
+
+
+@app.get("/hud/paneles")
+def hud_paneles(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    with _hud_lock:
+        return {"instancia": INSTANCIA, "paneles": list(_hud_paneles)}
+
+
+@app.put("/hud/paneles")
+def hud_paneles_reponer(cuerpo: HudPanelesIn,
+                        credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    """La vista repone sus paneles tras un despliegue. Solo si aquí no hay ninguno: lo que
+    Jarvis haya puesto o quitado después manda sobre una copia vieja del navegador."""
+    with _hud_lock:
+        vacio = not _hud_paneles
+    if vacio:
+        for p in cuerpo.paneles:
+            receta, error = _hud_receta(p.titulo, p.tipo, p.fuentes, p.dias, p.destino)
+            if not error:
+                _hud_poner(receta, p.id)
+    with _hud_lock:
+        return {"paneles": list(_hud_paneles)}
+
+
+@app.delete("/hud/paneles/{panel_id}")
+def hud_panel_quitar(panel_id: str = Path(..., pattern=r"^[a-f0-9]{8}$"),
+                     credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    with _hud_lock:
+        _hud_paneles[:] = [p for p in _hud_paneles if p["id"] != panel_id]
+        return {"paneles": list(_hud_paneles)}
+
+
+@app.get("/hud/datos")
+def hud_datos(fuente: str = Query(..., pattern=r"^[a-z_]{2,20}$"), dias: int = Query(14, ge=1, le=90),
+              destino: str = Query("", max_length=120),
+              credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    if fuente not in HUD_FUENTES:
+        raise HTTPException(status_code=404, detail="Esa fuente no existe")
+    return _hud_datos(fuente, dias, destino)
+
+
 def _j_guardar_idea(texto: str) -> dict:
     texto = str(texto or "").strip()[:2000]
     if not texto:
@@ -30223,6 +30843,55 @@ def _lectura_internet(pregunta: str = "") -> dict:
 _LECTURAS = {"semana": _lectura_semana, "correo": _lectura_correo, "tareas": _lectura_tareas}
 
 
+# ── «Mira mi pantalla», por teléfono ────────────────────────────────────────────────
+# `pc_pantalla` no está en el teléfono, y no puede estarlo: lo que hay en una pantalla (una
+# web, un correo abierto) lo ha escrito cualquiera, y al otro lado de la llamada hay una
+# shell. Así que va como internet: Claude pone `📖 LEER: pantalla pregunta=…`, el backend
+# pide la captura al MCP del PC, la mira el modelo de visión y la respuesta va de aquí al
+# altavoz. Claude sabe qué se preguntó, no qué había.
+#
+# Sin esperar al PC: en el chat `pc_pantalla` lo enciende y aguanta dos minutos; con
+# alguien al teléfono, si no contesta a la primera se pide que arranque y se dice.
+PANTALLA_VOZ = ("(Tu respuesta se lee en voz alta por teléfono: contesta a lo que se pregunta "
+                "en menos de 80 palabras, en frases seguidas, sin listas ni markdown ni "
+                "direcciones web, de usted y llamándole «señor».) ")
+_pantalla_ultima: Optional[dict] = None
+
+
+def _lectura_pantalla(pregunta: str = "") -> dict:
+    """Con pregunta, mira la pantalla. Sin ella es «repite» o «sigue» sobre lo ya contado."""
+    global _pantalla_ultima
+    nombre = "lo que hay en su pantalla"
+    pregunta = " ".join(str(pregunta or "").split())[:300]
+    if not pregunta:
+        u = _pantalla_ultima
+        if not u or time.time() - u["cuando"] > LECTURA_SEGUIR_HORAS * 3600:
+            return {"ok": False, "frase": "Eso ya no lo tengo, señor. Pídame que mire otra vez."}
+        return {"ok": True, "nombre": nombre, "secciones": [u["seccion"]]}
+    if not _pc_mcp_configurado():
+        return {"ok": False, "frase": "Su PC no está conectado conmigo, señor."}
+    try:
+        resultado = _pc_mcp_rpc("tools/call", {"name": "pantalla", "arguments": {"monitor": 0}})
+    except (requests.exceptions.ConnectionError, requests.exceptions.ConnectTimeout):
+        _mcp_sesiones.pop(_PC_MCP_SESION, None)
+        pedido = _pc_dir_listo() and all(_escribir_pedido_pc(o) for o in ("wol", "mcp"))
+        return {"ok": False, "frase": ("Su PC está apagado o dormido, señor. Lo estoy encendiendo; "
+                                       "pídamelo otra vez en un minuto.") if pedido
+                else "Su PC no contesta, señor, y no puedo encenderlo desde aquí."}
+    _, imagenes = _pc_contenido(resultado)
+    if resultado.get("isError") or not imagenes:
+        return {"ok": False, "frase": "El PC no me ha dado la captura, señor. Puede que esté bloqueado."}
+    descripcion = _describir_captura(*imagenes[0], pregunta=PANTALLA_VOZ + pregunta)
+    frases = [f for f in (_frase_para_voz(x) for x in descripcion.splitlines()) if len(f) > 1]
+    if not frases:
+        return {"ok": False, "frase": "He hecho la captura, pero no saco nada en claro, señor."}
+    # El título es este, siempre: Claude ve el índice, y ahí no puede ir nada de la pantalla.
+    seccion = {"n": 1, "etiqueta": "1", "titulo": "La pantalla", "trozos": _trocear(frases),
+               "bloques": []}
+    _pantalla_ultima = {"cuando": time.time(), "seccion": seccion}
+    return {"ok": True, "nombre": nombre, "secciones": [seccion]}
+
+
 def _lectura_entera(que: str, fecha: str = "", chat: str = "", pregunta: str = "") -> dict:
     """Todo lo que hay que leer de `que`, por secciones, con sus trozos y sus bloques."""
     if que == "briefing":
@@ -30241,6 +30910,8 @@ def _lectura_entera(que: str, fecha: str = "", chat: str = "", pregunta: str = "
             return _lectura_whatsapp(chat)
         if que == "internet":
             return _lectura_internet(pregunta)
+        if que == "pantalla":
+            return _lectura_pantalla(pregunta)
         return _LECTURAS[que]()
     except Exception as e:
         logger.error("Lectura por teléfono de '%s' falló (%s)", que, _causa(e))
@@ -30390,7 +31061,7 @@ def _contexto_lectura() -> str:
 
 @app.get("/telefono/lectura")
 def telefono_lectura(request: Request,
-                     que: str = Query("", pattern="^(briefing|semana|correo|tareas|whatsapp|internet)?$"),
+                     que: str = Query("", pattern="^(briefing|semana|correo|tareas|whatsapp|internet|pantalla)?$"),
                      desde: int = 1, hasta: int = 0, fecha: str = "",
                      trozo: int = 0, seguir: bool = False,
                      chat: str = Query("", max_length=60),
@@ -30446,7 +31117,7 @@ def telefono_lectura(request: Request,
 
 
 class PosicionLectura(BaseModel):
-    que:       Literal["briefing", "semana", "correo", "tareas", "whatsapp", "internet"]
+    que:       Literal["briefing", "semana", "correo", "tareas", "whatsapp", "internet", "pantalla"]
     fecha:     str  = Field("", pattern=r"^(\d{4}-\d{2}-\d{2})?$")
     n:         int  = Field(1, ge=1, le=500)
     trozo:     int  = Field(0, ge=0, le=5000)
@@ -35085,6 +35756,50 @@ _JARVIS_HERRAMIENTAS = {
         "descripcion": "Tiempo actual y máximas/mínimas de hoy en la ubicación del usuario.",
         "parametros":  {},
     },
+    "hud_panel": {
+        "confirmar":   False,
+        "fn":          _j_hud_panel,
+        "descripcion": "Dibuja un panel en la vista J.A.R.V.I.S. (el HUD a pantalla completa) que "
+                       "se queda ahí y se actualiza solo. Úsalo cuando pida VER algo («enséñame», "
+                       "«ponme en pantalla», «dibuja», «compara»), no para contestar una pregunta "
+                       "suelta. Fuentes: sueno, pasos, hrv, fc_reposo, energia, ejercicio, peso "
+                       "(series por día: tipo `linea` o `barras`, o `cifra` para el último valor; "
+                       "dos fuentes = una contra otra), agenda (lista) y trafico (los minutos a "
+                       "`destino`, en directo). Un panel con el mismo título sustituye al anterior.",
+        "parametros":  {
+            "fuentes": {"type": "string", "description": "Una fuente, o dos separadas por coma para compararlas."},
+            "titulo":  {"type": "string", "description": "Título corto del panel."},
+            "tipo":    {"type": "string", "enum": ["linea", "barras", "cifra", "lista"]},
+            "dias":    {"type": "integer", "description": "Cuántos días atrás (1-90), por defecto 14."},
+            "destino": {"type": "string", "description": "Solo para trafico: a dónde («uni», «casa», un sitio)."},
+        },
+        "obligatorios": ["fuentes"],
+    },
+    "hud_quitar": {
+        "confirmar":   False,
+        "fn":          _j_hud_quitar,
+        "descripcion": "Quita de la vista J.A.R.V.I.S. el panel cuyo título contenga `panel`, o "
+                       "todos si va vacío o «todos».",
+        "parametros":  {"panel": {"type": "string", "description": "Parte del título; vacío = todos."}},
+        "obligatorios": [],
+    },
+    "trafico": {
+        "confirmar":   False,
+        "fn":          _j_trafico,
+        "descripcion": "El tráfico EN DIRECTO en coche (Google Maps): cuánto se tarda ahora a un "
+                       "sitio, cuántos minutos de más sobre lo normal y si hay otra ruta mejor. "
+                       "Sale de donde está Mikel ahora (ya lo sabes tú, no hace falta su "
+                       "dirección). `destino` puede ser «casa», «uni», «gimnasio» o cualquier "
+                       "sitio o dirección tal como lo diga; vacío = su próxima cita con sitio. "
+                       "Úsalo para «¿hay tráfico?», «¿cuánto tardo a…?», «¿por dónde voy?». "
+                       "`frase` ya viene lista para decirla.",
+        "parametros":  {
+            "destino": {"type": "string", "description": "A dónde va; vacío = la próxima cita."},
+            "origen":  {"type": "string", "description": "Solo si pregunta desde otro sitio "
+                                                         "que donde está («desde casa»)."},
+        },
+        "obligatorios": [],
+    },
     "salud": {
         "confirmar":   False,
         "fn":          _brief_salud,
@@ -36953,6 +37668,9 @@ _MCP_SERVIDOR_SOLO_LECTURA = {
     # 2026-11-05: los PR de Mikel, en campos cerrados. No es el GitHub de `mcp_usar`, que
     # sigue fuera: aquí no entra el texto de nadie más. Ver `_j_github_prs`.
     "github_prs",
+    # 2026-11-12: el tráfico en directo. Minutos, kilómetros y nombres de carretera de
+    # Google. De una cita solo dice la hora, no el título (que puede ser de otro).
+    "trafico",
 }
 # `buscar_documentos` y `leer_documento` se quedan fuera a propósito: traen texto escrito
 # por terceros (un PDF que te mandaron), y al otro lado de esta llamada hay una sesión con
@@ -36986,6 +37704,9 @@ _MCP_SERVIDOR_ACCIONES = {
     "tele", "casa_anunciar",
     # 2026-10-28: poner y controlar la música. Reversibles como las teclas multimedia.
     "musica_poner", "musica_control",
+    # 2026-11-12: dibujar o quitar un panel del HUD. Piezas de un catálogo cerrado y un
+    # título que escribe esta sesión; no vuelve ningún dato, solo que está puesto.
+    "hud_panel", "hud_quitar",
     # 2026-10-27, «los mismos permisos que el de Telegram»: probar los indexadores y pasar
     # uno por FlareSolverr. En el chat van sin confirmar y lo segundo se deshace quitando
     # una etiqueta. Lo que traen de la web es el porqué de cada fallo, escrito por
@@ -38956,6 +39677,9 @@ _JARVIS_RELLENOS = {
     "editar_evento":      "Voy con el calendario.",
     "borrar_evento":      "Voy con el calendario.",
     "clima":              "Miro el tiempo.",
+    "trafico":            "Miro el tráfico.",
+    "hud_panel":          "Lo pongo en pantalla.",
+    "hud_quitar":         "Despejo la pantalla.",
     "salud":              "Miro tus datos de salud.",
     "sueno":              "Miro cómo has dormido.",
     "entrenamiento":      "Miro lo del entrenamiento.",

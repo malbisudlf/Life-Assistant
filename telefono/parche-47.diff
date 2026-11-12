@@ -1,0 +1,425 @@
+diff -ruN a/voice-app/lib/apunte.js b/voice-app/lib/apunte.js
+--- a/voice-app/lib/apunte.js	1970-01-01 01:00:00.000000000 +0100
++++ b/voice-app/lib/apunte.js	2026-11-12 20:26:00.321572500 +0100
+@@ -0,0 +1,101 @@
++/**
++ * Parche 47: «Jarvis, apunta eso». Ver telefono/PARCHES.md en Life Assistant.
++ *
++ * En la escucha pasiva, lo que se dice sin nombrarle no sale de la voice-app. Pero a
++ * veces lo que querías era justo eso: has dicho algo en voz alta, o te lo han dicho, y
++ * dos segundos después quieres que conste. La escucha guarda EN MEMORIA lo transcrito
++ * en los últimos ESCUCHA_PASIVA_MEMORIA_S (90 s) —nunca en el registro ni en disco, y se
++ * va con la llamada— y «Jarvis, apunta eso» lo manda al backend, que lo guarda como una
++ * idea. Lo que no se pide apuntar se olvida solo.
++ *
++ * No pasa por Claude, a propósito: lo que hay en esa memoria lo ha podido decir la radio
++ * o quien vaya al lado, y el Claude del teléfono tiene shell. Va de la voice-app al
++ * backend (`POST /telefono/apunte`) y de vuelta solo llega un sí o un no.
++ *
++ * El criterio es de frase ENTERA, como en reflejos.js: «apunta eso» es la orden, y
++ * «apunta que mañana tengo dentista» es una nota que ya sabe tomar Claude.
++ */
++'use strict';
++
++const QUITAR = /[¡!¿?.,;:«»"']/g;
++const DELANTE = /^(?:(?:oye|vale|venga|eh|jarvis|por favor|porfa|y)\b ?)+/;
++const DETRAS = /(?: (?:por favor|porfa|jarvis|senor|anda|gracias))+$/;
++const ORDEN = new RegExp(
++  '^(?:apunta(?:me|lo)?|anota(?:me|lo)?|guarda(?:me|lo)?|toma nota de|quedate con|recuerda)' +
++  '(?: (?:eso|esto|eso ultimo|lo ultimo|lo de antes|lo anterior|' +
++  'lo que (?:he|hemos|ha|han|acabo de|acabamos de|acaba de|acaban de|se ha|estaba|estabamos|estaban) ?' +
++  '(?:dicho|decir|diciendo|hablado|hablar|hablando|comentado|comentar|comentando)?|' +
++  'lo ultimo que (?:he|hemos|ha|han|se ha) dicho))?$');
++
++function normalizar(texto) {
++  return String(texto || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
++    .replace(QUITAR, ' ').replace(/\s+/g, ' ').trim()
++    .replace(DELANTE, '').replace(DETRAS, '').trim();
++}
++
++/** ¿Es la orden de apuntar lo que se acaba de decir? */
++function pideApuntar(texto) {
++  const t = normalizar(texto);
++  // «apunta», «guarda» a secas no: demasiado fácil de decir sin querer.
++  return ORDEN.test(t) && / /.test(t) || /^(?:apuntalo|anotalo|apuntamelo|anotamelo)$/.test(t);
++}
++
++const FRASES = {
++  hecho:  'Apuntado, señor.',
++  nada:   'No he oído nada que apuntar, señor.',
++  fallo:  'No he podido apuntarlo, señor.'
++};
++
++function urlBase() {
++  return String(process.env.LECTURA_URL || '').replace(/\/+$/, '');
++}
++
++async function mandar(texto, fetchImpl) {
++  const r = await (fetchImpl || fetch)(urlBase() + '/telefono/apunte', {
++    method: 'POST',
++    headers: { Authorization: 'Bearer ' + (process.env.LECTURA_TOKEN || ''), 'Content-Type': 'application/json' },
++    body: JSON.stringify({ texto: texto }),
++    signal: AbortSignal.timeout(8000)
++  });
++  if (!r.ok) throw new Error('HTTP ' + r.status);
++  const d = await r.json();
++  if (!d || !d.ok) throw new Error('el backend no lo ha guardado');
++}
++
++/**
++ * Si la frase es «apunta eso», lo hace y lo dice. Devuelve true si era eso.
++ * @param {string} transcript
++ * @param {Object} c
++ * @param {Object} c.pasiva      - EscuchaPasiva (su memoria)
++ * @param {Object} c.endpoint
++ * @param {Object} c.ttsService
++ * @param {string} [c.voiceId]
++ * @param {Function} [c.log]
++ * @param {Function} [c.sigueActiva]
++ * @param {Function} [c.fetch]   - para los tests
++ */
++async function atender(transcript, c) {
++  if (!c.pasiva || !c.pasiva.activa || !pideApuntar(transcript)) return false;
++  const log = c.log || function () {};
++  const dicho = c.pasiva.loReciente();
++  let frase = FRASES.nada;
++  if (dicho) {
++    try {
++      await mandar(dicho, c.fetch);
++      frase = FRASES.hecho;
++      // Ni el texto ni su principio: solo cuánto.
++      log('APUNTE: guardado (' + dicho.length + ' caracteres)');
++    } catch (e) {
++      frase = FRASES.fallo;
++      log('APUNTE: falló (' + e.message + ')');
++    }
++  } else {
++    log('APUNTE: nada en la memoria');
++  }
++  if (!c.sigueActiva || c.sigueActiva()) {
++    await c.endpoint.play(await c.ttsService.generateSpeech(frase, c.voiceId));
++  }
++  return true;
++}
++
++module.exports = { atender, pideApuntar, normalizar, FRASES };
+diff -ruN a/voice-app/lib/conversation-loop.js b/voice-app/lib/conversation-loop.js
+--- a/voice-app/lib/conversation-loop.js	2026-11-12 20:26:00.163891000 +0100
++++ b/voice-app/lib/conversation-loop.js	2026-11-12 20:26:00.195075800 +0100
+@@ -25,6 +25,8 @@
+ const { armarAnticipo, transcribirFrase } = require('./anticipo');
+ // Parche 38: el cronómetro de cada turno (de que dejas de hablar a oír a Jarvis).
+ const cronometro = require('./cronometro');
++// Parche 47: «Jarvis, apunta eso» lo cumple la llamada con lo que acaba de oír.
++const apunte = require('./apunte');
+ 
+ // Audio cue URLs
+ const READY_BEEP_URL = `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/static/ready-beep.wav`;
+@@ -474,6 +476,16 @@
+         continue;
+       }
+ 
++      // Parche 47: «apunta eso»: lo oído en el último minuto y medio, al backend.
++      if (await apunte.atender(transcript, {
++        pasiva, endpoint, ttsService, voiceId,
++        log: (m) => logger.info(m, { callUuid }), sigueActiva: () => callActive
++      })) {
++        crono.cerrar('reflejo', logCrono);
++        pasiva.dormir();
++        continue;
++      }
++
+       // Parche 34: la tele y lo que no hace falta pensar, sin pasar por Claude.
+       const reflejo = await reflejos.atender(transcript, {
+         endpoint, session, ttsService, voiceId,
+diff -ruN a/voice-app/lib/escucha-pasiva.js b/voice-app/lib/escucha-pasiva.js
+--- a/voice-app/lib/escucha-pasiva.js	2026-11-12 20:26:00.104166700 +0100
++++ b/voice-app/lib/escucha-pasiva.js	2026-11-12 20:26:00.134511200 +0100
+@@ -35,6 +35,10 @@
+  *    al cerrarse (`anticipar`): al cerrarse, el texto ya está;
+  *  - la frase se transcribe una sola vez, entera: en casa la ventana no ahorra nada.
+  * Sin jacobo (OpenAI) todo sigue como en el 22. ESCUCHA_PASIVA_TEMPRANA_MS=0 lo apaga.
++ *
++ * Parche 47: lo transcrito dormido se recuerda ESCUCHA_PASIVA_MEMORIA_S (90 s) en
++ * memoria, para «Jarvis, apunta eso» (lib/apunte.js). Sigue sin salir de la voice-app
++ * salvo que lo pidas, y sin escribirse en ningún sitio.
+  */
+ 'use strict';
+ 
+@@ -93,6 +97,14 @@
+   return { resto: limpiar(antes) };
+ }
+ 
++/** Parche 47: lo dicho ANTES del nombre en la misma frase («…y pan. Jarvis, apunta eso»). */
++function antesDelNombre(texto) {
++  const t = String(texto || '');
++  const m = expresionPalabra().exec(t);
++  if (!m) return '';
++  return limpiar(t.slice(0, m.index + m[1].length));
++}
++
+ function pideEscuchaPasiva(texto) {
+   return /\b(modo (coche|pasivo|escucha|copiloto)|escucha pasiva|qu[eé]date (escuchando|a la escucha))\b/i
+     .test(String(texto || ''));
+@@ -133,6 +145,29 @@
+     this.anticipoMs = entero('ESCUCHA_PASIVA_ANTICIPO_MS', 10000);
+     this._nombrada = false;
+     this.ultimaFrase = null;
++    // Parche 47: lo transcrito hace poco, para «Jarvis, apunta eso». Solo en memoria:
++    // ni al registro ni a disco, y se va con la llamada. 0 lo apaga.
++    const memoria = parseInt(process.env.ESCUCHA_PASIVA_MEMORIA_S, 10);
++    this.memoriaMs = (Number.isFinite(memoria) && memoria >= 0 ? memoria : 90) * 1000;
++    this._reciente = [];
++  }
++
++  /** Parche 47: guarda lo oído (dormido, sin nombrarle) durante `memoriaMs`. */
++  recordar(texto) {
++    const t = String(texto || '').replace(/\s+/g, ' ').trim();
++    if (!this.memoriaMs || t.length < 2) return;
++    const ahora = Date.now();
++    this._reciente.push({ en: ahora, texto: t.slice(0, 1000) });
++    this._reciente = this._reciente.filter((x) => ahora - x.en <= this.memoriaMs).slice(-30);
++  }
++
++  /** Parche 47: lo dicho en los últimos `memoriaMs`, de un tirón; y lo olvida. */
++  loReciente() {
++    const ahora = Date.now();
++    const texto = this._reciente.filter((x) => ahora - x.en <= this.memoriaMs)
++      .map(function (x) { return x.texto; }).join(' ').slice(-2000).trim();
++    this._reciente = [];
++    return texto;
+   }
+ 
+   /** Parche 46: ¿ha oído ya su nombre en la frase que está entrando? */
+@@ -183,6 +218,7 @@
+     if (pideModoNormal(texto)) {
+       this.activa = false;
+       this.despierta = false;
++      this._reciente = [];
+       this.log('ESCUCHA-PASIVA: apagada');
+       return { frase: FRASES.normal };
+     }
+@@ -257,19 +293,25 @@
+         if (!sigueActiva()) return null;
+         oidas++;
+         let hallada = null;
++        let texto = '';
+         const anticipada = u.pausa && u.pausa.transcripcion;
+         try {
+           if (anticipada) {
+             // Ya transcrita, entera, durante el silencio que la cerró.
+-            hallada = buscarPalabra(await anticipada);
++            texto = await anticipada;
++            hallada = buscarPalabra(texto);
+           } else if (this.temprana && conOido()) {
+-            hallada = buscarPalabra(await this._transcribir(w, u.audio));
++            texto = await this._transcribir(w, u.audio);
++            hallada = buscarPalabra(texto);
+           } else {
+             const larga = u.audio.length > ventana * 1.5;
+-            hallada = buscarPalabra(await this._transcribir(w, larga ? u.audio.subarray(0, ventana) : u.audio));
++            texto = await this._transcribir(w, larga ? u.audio.subarray(0, ventana) : u.audio);
++            hallada = buscarPalabra(texto);
+             if (hallada && larga) {
+               try {
+-                hallada = buscarPalabra(await this._transcribir(w, u.audio)) || hallada;
++                const entera = await this._transcribir(w, u.audio);
++                const otra = buscarPalabra(entera);
++                if (otra) { hallada = otra; texto = entera; }
+               } catch (err) { /* vale con lo del principio */ }
+             }
+           }
+@@ -277,7 +319,7 @@
+           let salvada = false;
+           if (anticipada) {
+             // Falló la del anticipo: la frase entera, como siempre.
+-            try { hallada = buscarPalabra(await this._transcribir(w, u.audio)); salvada = true; } catch (e) { /* abajo */ }
++            try { texto = await this._transcribir(w, u.audio); hallada = buscarPalabra(texto); salvada = true; } catch (e) { /* abajo */ }
+           }
+           if (!salvada) {
+             this.log('ESCUCHA-PASIVA: Whisper falló (' + err.message + ')');
+@@ -287,6 +329,8 @@
+         // Lo que se habla sin nombrarle no se registra: ni el texto, solo que no era.
+         // Si el tono ya sonó y el texto final no trae el nombre, mejor preguntar que callar.
+         if (!hallada && nombrada) hallada = { resto: '' };
++        // Parche 47: lo oído se recuerda un rato, en memoria, por si pide apuntarlo.
++        this.recordar(hallada ? antesDelNombre(texto) : texto);
+         if (!hallada) continue;
+         p.session.setCaptureEnabled(false);
+         this.despierta = true;
+@@ -303,6 +347,6 @@
+ }
+ 
+ module.exports = {
+-  EscuchaPasiva, buscarPalabra, pideEscuchaPasiva, pideModoNormal, esFinDeTurno,
++  EscuchaPasiva, buscarPalabra, antesDelNombre, pideEscuchaPasiva, pideModoNormal, esFinDeTurno,
+   FRASES, AVISO_PASIVA
+ };
+diff -ruN a/voice-app/lib/sip-handler.js b/voice-app/lib/sip-handler.js
+--- a/voice-app/lib/sip-handler.js	2026-11-12 20:26:00.236757100 +0100
++++ b/voice-app/lib/sip-handler.js	2026-11-12 20:26:00.274376400 +0100
+@@ -16,6 +16,8 @@
+ const { armarAnticipo, transcribirFrase } = require('./anticipo');
+ // Parche 38: el cronómetro de cada turno (de que dejas de hablar a oír a Jarvis).
+ const cronometro = require('./cronometro');
++// Parche 47: «Jarvis, apunta eso» lo cumple la llamada con lo que acaba de oír.
++const apunte = require('./apunte');
+ 
+ // Audio cue URLs
+ const READY_BEEP_URL = `http://127.0.0.1:${process.env.HTTP_PORT || 3000}/static/ready-beep.wav`;
+@@ -319,6 +321,16 @@
+         continue;
+       }
+ 
++      // Parche 47: «apunta eso»: lo oído en el último minuto y medio, al backend.
++      if (await apunte.atender(transcript, {
++        pasiva: pasiva, endpoint: endpoint, ttsService: ttsService, voiceId: voiceId,
++        log: logTurno, sigueActiva: function () { return viva; }
++      })) {
++        crono.cerrar('reflejo', logTurno);
++        pasiva.dormir();
++        continue;
++      }
++
+       // Parche 34: la tele y lo que no hace falta pensar, sin pasar por Claude.
+       const reflejo = await reflejos.atender(transcript, {
+         endpoint: endpoint, session: session, ttsService: ttsService, voiceId: voiceId,
+diff -ruN a/voice-app/test/parche47.test.js b/voice-app/test/parche47.test.js
+--- a/voice-app/test/parche47.test.js	1970-01-01 01:00:00.000000000 +0100
++++ b/voice-app/test/parche47.test.js	2026-11-12 20:26:00.364919100 +0100
+@@ -0,0 +1,135 @@
++/**
++ * Parche 47: «Jarvis, apunta eso». La escucha pasiva recuerda en memoria lo oído en el
++ * último minuto y medio y, si se lo piden, lo manda al backend sin pasar por Claude.
++ *
++ * Se lanza con `node --test test/parche47.test.js`, dentro de la imagen y sin red.
++ */
++'use strict';
++
++const test = require('node:test');
++const assert = require('node:assert');
++const Module = require('node:module');
++
++const requireDeVerdad = Module.prototype.require;
++Module.prototype.require = function (id) {
++  if (id === 'ws') return { Server: function () {} };
++  return requireDeVerdad.apply(this, arguments);
++};
++for (const nivel of ['log', 'warn', 'error']) console[nivel] = function () {};
++
++const { EscuchaPasiva, antesDelNombre } = require('../lib/escucha-pasiva');
++const apunte = require('../lib/apunte');
++
++function sesionFalsa(frases) {
++  let i = 0;
++  return {
++    setCaptureEnabled: function () {},
++    waitForUtterance: async function () {
++      if (i >= frases.length) throw new Error('AudioForkSession closed for call x');
++      return { audio: Buffer.from(frases[i++]), reason: 'end_silence' };
++    }
++  };
++}
++
++function whisperFalso() {
++  return { transcribe: async function (a) { return a.toString(); } };
++}
++
++function contexto(pasiva, respuesta) {
++  const c = { pasiva: pasiva, dicho: [], pedidos: [], registro: [] };
++  c.endpoint = { play: async function (url) { c.dicho.push(url); } };
++  c.ttsService = { generateSpeech: async function (t) { return t; } };
++  c.log = function (m) { c.registro.push(m); };
++  c.fetch = async function (url, o) {
++    c.pedidos.push({ url: url, cuerpo: JSON.parse(o.body), auth: o.headers.Authorization });
++    if (respuesta === 'caido') throw new Error('ECONNREFUSED');
++    return { ok: true, json: async function () { return respuesta || { ok: true }; } };
++  };
++  return c;
++}
++
++test('47: qué es «apunta eso» y qué es una nota que toma Claude', function () {
++  for (const t of ['Apunta eso.', 'Jarvis, apunta eso', 'apúntame eso, por favor', 'Anota lo que acabo de decir',
++    'guarda lo que hemos dicho', 'apunta lo último', 'Apúntalo.', 'toma nota de eso', 'apunta lo que han dicho',
++    'Vale, apunta lo de antes', 'apunta lo último que he dicho']) {
++    assert.ok(apunte.pideApuntar(t), t);
++  }
++  for (const t of ['apunta que mañana tengo dentista', 'apunta', 'guarda', 'apunta una idea', 'recuerda',
++    'eso apunta bien', 'guarda eso en la lista de la compra', '¿qué has apuntado?', '']) {
++    assert.ok(!apunte.pideApuntar(t), t);
++  }
++});
++
++test('47: recuerda lo oído dormido, también lo de delante del nombre, y despierta', async function () {
++  const p = new EscuchaPasiva({ activa: true });
++  const r = await p.esperarPalabra({
++    session: sesionFalsa(['Hay que llamar al fontanero el jueves', 'y comprar pan. Jarvis, apunta eso']),
++    whisperClient: whisperFalso()
++  });
++  assert.deepStrictEqual(r, { resto: 'apunta eso' });
++  assert.strictEqual(antesDelNombre('y comprar pan. Jarvis, apunta eso'), 'y comprar pan.');
++  assert.strictEqual(p.loReciente(), 'Hay que llamar al fontanero el jueves y comprar pan.');
++  assert.strictEqual(p.loReciente(), '', 'una vez pedido, se olvida');
++});
++
++test('47: lo viejo se olvida solo, «modo normal» lo borra y con 0 no se guarda nada', function () {
++  const p = new EscuchaPasiva({ activa: true });
++  p.recordar('lo de hace dos minutos');
++  p._reciente[0].en -= 120000;
++  p.recordar('lo de ahora');
++  assert.strictEqual(p.loReciente(), 'lo de ahora');
++  p.recordar('algo');
++  p.orden('modo normal');
++  assert.strictEqual(p.loReciente(), '');
++  process.env.ESCUCHA_PASIVA_MEMORIA_S = '0';
++  try {
++    const sin = new EscuchaPasiva({ activa: true });
++    sin.recordar('algo');
++    assert.strictEqual(sin.loReciente(), '');
++  } finally {
++    delete process.env.ESCUCHA_PASIVA_MEMORIA_S;
++  }
++});
++
++test('47: «apunta eso» lo manda al backend, lo dice y no deja el texto en el registro', async function () {
++  process.env.LECTURA_URL = 'http://backend.test/';
++  process.env.LECTURA_TOKEN = 'llave';
++  try {
++    const p = new EscuchaPasiva({ activa: true });
++    p.recordar('La matrícula del coche de Erik es 1234 ABC');
++    const c = contexto(p);
++    assert.strictEqual(await apunte.atender('Apunta eso', c), true);
++    assert.deepStrictEqual(c.pedidos, [{
++      url: 'http://backend.test/telefono/apunte',
++      cuerpo: { texto: 'La matrícula del coche de Erik es 1234 ABC' }, auth: 'Bearer llave'
++    }]);
++    assert.deepStrictEqual(c.dicho, [apunte.FRASES.hecho]);
++    assert.ok(!/1234|Erik/.test(c.registro.join(' ')));
++  } finally {
++    delete process.env.LECTURA_URL;
++    delete process.env.LECTURA_TOKEN;
++  }
++});
++
++test('47: sin nada que apuntar lo dice; si el backend falla, también; y fuera de la escucha no es cosa suya', async function () {
++  const p = new EscuchaPasiva({ activa: true });
++  let c = contexto(p);
++  assert.strictEqual(await apunte.atender('apunta eso', c), true);
++  assert.deepStrictEqual(c.dicho, [apunte.FRASES.nada]);
++  assert.strictEqual(c.pedidos.length, 0);
++
++  p.recordar('algo que apuntar');
++  c = contexto(p, 'caido');
++  assert.strictEqual(await apunte.atender('apunta eso', c), true);
++  assert.deepStrictEqual(c.dicho, [apunte.FRASES.fallo]);
++
++  p.recordar('otra cosa');
++  c = contexto(p, { ok: false });
++  await apunte.atender('apunta eso', c);
++  assert.deepStrictEqual(c.dicho, [apunte.FRASES.fallo]);
++
++  c = contexto(new EscuchaPasiva());
++  assert.strictEqual(await apunte.atender('apunta eso', c), false, 'en una llamada normal, que lo piense Claude');
++  c = contexto(p);
++  assert.strictEqual(await apunte.atender('apunta que tengo dentista', c), false);
++});
