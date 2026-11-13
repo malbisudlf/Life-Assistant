@@ -2146,11 +2146,11 @@ esperar. El RUNBOOK lo explica («La pantalla de su PC»).
 
 **Tests:** `test/parche48.test.js` (3); suite entera con los tres, **236 de 236**.
 
-**Los tres están SIN APLICAR en caja** a 2026-11-12: probados en una copia aparte
-(`/tmp/p46`, se pierde al reiniciar). Aplicar = copiar `lib/` y `test/`, reconstruir la
-imagen (etiquetando antes `antes-p46`), `exportar.sh` para la foto y copiar el RUNBOOK a
-`~/telefono-jarvis/CLAUDE.md`. El backend tiene que ir antes (`/telefono/apunte` y la
-lectura de `pantalla`).
+**Aplicados los tres el 2026-11-13** (vuelta atrás: imagen `antes-p46` y los
+`lib/*.bak-20261112-antes-p46`; RUNBOOK anterior en `CLAUDE.md.bak-20261112-antes-p46`), con
+el backend `562866c` ya desplegado, `COPILOTO=1` y `TRAFICO_LUGARES` en `backend.env`
+(copia `backend.env.bak-20261112-antes-copiloto`) y la foto exportada. **Sin probar aún
+en una llamada real**: ni el despertar, ni el tono, ni «apunta eso», ni la pantalla.
 
 ## Lo que además NO está en el repositorio original
 

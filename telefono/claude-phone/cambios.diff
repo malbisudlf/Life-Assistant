@@ -510,7 +510,7 @@ index 5e58907..c0106fd 100644
          audioForkServer: audioForkServer,
          mediaServer: mediaServer,
 diff --git a/voice-app/lib/audio-fork.js b/voice-app/lib/audio-fork.js
-index 503e831..88947ea 100644
+index 503e831..6bda9ae 100644
 --- a/voice-app/lib/audio-fork.js
 +++ b/voice-app/lib/audio-fork.js
 @@ -29,9 +29,14 @@ class AudioForkSession extends EventEmitter {
@@ -539,7 +539,7 @@ index 503e831..88947ea 100644
  
      this._preRollChunks = [];
      this._preRollBytes = 0;
-@@ -55,6 +62,22 @@ class AudioForkSession extends EventEmitter {
+@@ -55,6 +62,27 @@ class AudioForkSession extends EventEmitter {
      this._speechBytes = 0;
      this._silenceMs = 0;
  
@@ -558,11 +558,16 @@ index 503e831..88947ea 100644
 +    this._cierreRapidoMs = parseInt(process.env.VAD_CIERRE_RAPIDO_MS || '700', 10);
 +    this._pausa = null;
 +    this._pausaEmitida = false;
++    // Parche 46: a estos ms de voz dentro de una frase se avisa ('hablando') con lo dicho
++    // hasta ahí, para que la escucha pasiva busque su nombre sin esperar al final.
++    this._avisosHablaMs = String(process.env.ESCUCHA_PASIVA_TEMPRANA_MS || '1200,2500').split(',')
++      .map(function (x) { return parseInt(x, 10); }).filter(function (x) { return x > 0; });
++    this._avisosHabla = 0;
 +
      // DEBUG: Track message counts
      this._messageCount = 0;
      this._binaryCount = 0;
-@@ -77,7 +100,34 @@ class AudioForkSession extends EventEmitter {
+@@ -77,7 +105,34 @@ class AudioForkSession extends EventEmitter {
      const was = this.captureEnabled;
      this.captureEnabled = Boolean(enabled);
      console.log('[AUDIO-DEBUG] setCaptureEnabled: ' + was + ' -> ' + this.captureEnabled + ' for ' + this.callUuid);
@@ -598,22 +603,24 @@ index 503e831..88947ea 100644
    }
  
    _chunkDurationMs(byteLen) {
-@@ -101,6 +151,9 @@ class AudioForkSession extends EventEmitter {
+@@ -101,6 +156,10 @@ class AudioForkSession extends EventEmitter {
      this._utteranceBytes = 0;
      this._speechBytes = 0;
      this._silenceMs = 0;
 +    this._rmsVoz = [];
 +    this._pausa = null;
 +    this._pausaEmitida = false;
++    this._avisosHabla = 0;
  
      if (this._preRollChunks.length) {
        for (const chunk of this._preRollChunks) this._appendUtterance(chunk, false);
-@@ -122,12 +175,19 @@ class AudioForkSession extends EventEmitter {
+@@ -122,12 +181,20 @@ class AudioForkSession extends EventEmitter {
      this._utteranceBytes = 0;
      this._speechBytes = 0;
      this._silenceMs = 0;
 +    this._pausa = null;
 +    this._pausaEmitida = false;
++    this._avisosHabla = 0;
    }
  
    _finalizeUtterance(reason) {
@@ -628,7 +635,7 @@ index 503e831..88947ea 100644
  
      const audio = Buffer.concat(this._utteranceChunks);
      this._resetUtterance();
-@@ -136,15 +196,17 @@ class AudioForkSession extends EventEmitter {
+@@ -136,15 +203,17 @@ class AudioForkSession extends EventEmitter {
  
      // For DTMF-triggered finalization, be more lenient with requirements
      const isDtmfTriggered = reason === 'dtmf_trigger';
@@ -649,7 +656,7 @@ index 503e831..88947ea 100644
      return true;
    }
  
-@@ -163,26 +225,67 @@ class AudioForkSession extends EventEmitter {
+@@ -163,26 +232,67 @@ class AudioForkSession extends EventEmitter {
      return this._finalizeUtterance('dtmf_trigger');
    }
  
@@ -729,7 +736,7 @@ index 503e831..88947ea 100644
    }
  
    _onMessage(data) {
-@@ -225,13 +328,13 @@ class AudioForkSession extends EventEmitter {
+@@ -225,13 +335,13 @@ class AudioForkSession extends EventEmitter {
  
      if (data.length < 2) return;
  
@@ -745,7 +752,7 @@ index 503e831..88947ea 100644
      }
  
      if (!this._inSpeech) {
-@@ -240,18 +343,75 @@ class AudioForkSession extends EventEmitter {
+@@ -240,18 +350,81 @@ class AudioForkSession extends EventEmitter {
        this._startUtteranceWithPreRoll();
      }
  
@@ -788,6 +795,12 @@ index 503e831..88947ea 100644
 +      this._pausaEmitida = true;
 +      this._pausa = { audio: Buffer.concat(this._utteranceChunks) };
 +      this.emit('pausa', this._pausa);
++    }
++
++    if (this._avisosHabla < this._avisosHablaMs.length && this.listenerCount('hablando') > 0 &&
++        this._chunkDurationMs(this._speechBytes) >= this._avisosHablaMs[this._avisosHabla]) {
++      this._avisosHabla++;
++      this.emit('hablando', { audio: Buffer.concat(this._utteranceChunks) });
 +    }
 +
 +    if (this._bargeArmado && this._chunkDurationMs(this._speechBytes) >= this._bargeMs) {
@@ -889,10 +902,10 @@ index 23326b5..be96efc 100644
    isAvailable
  };
 diff --git a/voice-app/lib/conversation-loop.js b/voice-app/lib/conversation-loop.js
-index ec1c60c..86305fd 100644
+index ec1c60c..a59d2e4 100644
 --- a/voice-app/lib/conversation-loop.js
 +++ b/voice-app/lib/conversation-loop.js
-@@ -13,29 +13,32 @@
+@@ -13,29 +13,34 @@
   */
  
  const logger = require('./logger');
@@ -908,6 +921,8 @@ index ec1c60c..86305fd 100644
 +const { armarAnticipo, transcribirFrase } = require('./anticipo');
 +// Parche 38: el cronómetro de cada turno (de que dejas de hablar a oír a Jarvis).
 +const cronometro = require('./cronometro');
++// Parche 47: «Jarvis, apunta eso» lo cumple la llamada con lo que acaba de oír.
++const apunte = require('./apunte');
  
  // Audio cue URLs
 -const READY_BEEP_URL = 'http://127.0.0.1:3000/static/ready-beep.wav';
@@ -943,7 +958,7 @@ index ec1c60c..86305fd 100644
  ];
  
  function getRandomThinkingPhrase() {
-@@ -44,7 +47,7 @@ function getRandomThinkingPhrase() {
+@@ -44,7 +49,7 @@ function getRandomThinkingPhrase() {
  
  function isGoodbye(transcript) {
    const lower = transcript.toLowerCase().trim();
@@ -952,7 +967,7 @@ index ec1c60c..86305fd 100644
    return goodbyePhrases.some(phrase => {
      return lower === phrase || lower.includes(` ${phrase}`) ||
             lower.startsWith(`${phrase} `) || lower.endsWith(` ${phrase}`);
-@@ -122,7 +125,11 @@ function extractVoiceLine(response) {
+@@ -122,7 +127,11 @@ function extractVoiceLine(response) {
   * @param {string} [options.initialContext] - Context for outbound calls (why we're calling)
   * @param {boolean} [options.skipGreeting=false] - Skip greeting (for outbound, greeting already played)
   * @param {number} [options.maxTurns=20] - Maximum conversation turns
@@ -965,7 +980,7 @@ index ec1c60c..86305fd 100644
   */
  async function runConversationLoop(endpoint, dialog, callUuid, options) {
    const {
-@@ -134,8 +141,13 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -134,8 +143,13 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
      initialContext = null,
      skipGreeting = false,
      deviceConfig = null,
@@ -980,7 +995,7 @@ index ec1c60c..86305fd 100644
  
    // Extract devicePrompt and voiceId from deviceConfig (for Cephanie etc)
    const devicePrompt = deviceConfig?.prompt || null;
-@@ -164,7 +176,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -164,7 +178,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
      // Play greeting (skip for outbound where initial message already played)
      if (!skipGreeting && callActive) {
        const greetingUrl = await ttsService.generateSpeech(
@@ -989,7 +1004,7 @@ index ec1c60c..86305fd 100644
          voiceId
        );
        await endpoint.play(greetingUrl);
-@@ -178,12 +190,16 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -178,12 +192,16 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
          `[SYSTEM CONTEXT - DO NOT REPEAT]: You just called the user to tell them: "${initialContext}". They have answered. Now listen to their response and help them.`,
          { callId: callUuid, devicePrompt: devicePrompt, isSystemPrime: true }
        ).catch(err => logger.warn('Prime query failed', { callUuid, error: err.message }));
@@ -1007,7 +1022,7 @@ index ec1c60c..86305fd 100644
      }
  
      // Start audio fork for entire call
-@@ -195,7 +211,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -195,7 +213,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
        sessionPromise = audioForkServer.expectSession(callUuid, { timeoutMs: 10000 });
      } catch (err) {
        logger.warn('Failed to set up session expectation', { callUuid, error: err.message });
@@ -1016,7 +1031,7 @@ index ec1c60c..86305fd 100644
      }
  
      await endpoint.forkAudioStart({
-@@ -212,7 +228,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -212,7 +230,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
        logger.warn('Audio fork session failed', { callUuid, error: err.message });
        // Cancel the pending expectation if still there
        audioForkServer.cancelExpectation && audioForkServer.cancelExpectation(callUuid);
@@ -1025,7 +1040,7 @@ index ec1c60c..86305fd 100644
      }
  
      // Set up DTMF handler for # key
-@@ -245,6 +261,23 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -245,6 +263,23 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
  
      // Main conversation loop
      let turnCount = 0;
@@ -1045,11 +1060,11 @@ index ec1c60c..86305fd 100644
 +    const pasiva = new EscuchaPasiva({
 +      log: (m) => logger.info(m, { callUuid }), activa: escuchaPasiva
 +    });
-+    armarAnticipo(session, whisperClient, { activo: () => !pasiva.dormida() });
++    armarAnticipo(session, whisperClient, { activo: (pausa) => pasiva.anticipar(pausa, whisperClient) });
  
      while (turnCount < maxTurns && callActive) {
        turnCount++;
-@@ -256,82 +289,195 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -256,82 +291,214 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
          break;
        }
  
@@ -1068,7 +1083,13 @@ index ec1c60c..86305fd 100644
 +      const crono = cronometro.turno(callUuid, 'saliente');
 +      const logCrono = (m) => logger.info(m, { callUuid });
 +      if (pasiva.dormida()) {
-+        const oido = await pasiva.esperarPalabra({ session, whisperClient, sigueActiva: () => callActive });
++        const oido = await pasiva.esperarPalabra({
++          session, whisperClient, sigueActiva: () => callActive,
++          // Parche 46: el tono de «le he oído», mientras aún habla.
++          alNombrar: () => {
++            if (callActive && process.env.ESCUCHA_PASIVA_TONO !== '0') endpoint.play(GOTIT_BEEP_URL).catch(() => {});
++          }
++        });
 +        if (!oido) break;
 +        if (oido.tope) {
 +          if (callActive) await endpoint.play(await ttsService.generateSpeech(FRASES_PASIVA.tope, voiceId));
@@ -1082,7 +1103,10 @@ index ec1c60c..86305fd 100644
 +        }
 +        if (oido.resto) {
 +          transcript = oido.resto;
-+          crono.marca('cierre').marca('texto');
++          // Parche 46: el despertar también se cronometra, desde que calló.
++          const uf = pasiva.ultimaFrase || {};
++          if (typeof uf.finHabla === 'number') crono.marca('finHabla', uf.finHabla);
++          crono.marca('cierre', uf.cierreEn).marca('texto', uf.textoEn);
 +        } else if (callActive) {
 +          await endpoint.play(await ttsService.generateSpeech(FRASES_PASIVA.despierta, voiceId));
 +        }
@@ -1286,6 +1310,16 @@ index ec1c60c..86305fd 100644
 +        continue;
 +      }
 +
++      // Parche 47: «apunta eso»: lo oído en el último minuto y medio, al backend.
++      if (await apunte.atender(transcript, {
++        pasiva, endpoint, ttsService, voiceId,
++        log: (m) => logger.info(m, { callUuid }), sigueActiva: () => callActive
++      })) {
++        crono.cerrar('reflejo', logCrono);
++        pasiva.dormir();
++        continue;
++      }
++
 +      // Parche 34: la tele y lo que no hace falta pensar, sin pasar por Claude.
 +      const reflejo = await reflejos.atender(transcript, {
 +        endpoint, session, ttsService, voiceId,
@@ -1302,7 +1336,7 @@ index ec1c60c..86305fd 100644
        // ============================================
        // THINKING FEEDBACK
        // ============================================
-@@ -339,36 +485,25 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -339,36 +506,25 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
        // Check if call still active before thinking feedback
        if (!callActive) break;
  
@@ -1357,7 +1391,7 @@ index ec1c60c..86305fd 100644
  
        // Check if call ended during Claude processing
        if (!callActive) {
-@@ -376,14 +511,41 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -376,14 +532,41 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
          break;
        }
  
@@ -1400,7 +1434,7 @@ index ec1c60c..86305fd 100644
  
        logger.info('Turn complete', { callUuid, turn: turnCount });
      }
-@@ -391,15 +553,17 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -391,15 +574,17 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
      // Max turns reached
      if (turnCount >= maxTurns && callActive) {
        const maxUrl = await ttsService.generateSpeech(
@@ -1420,7 +1454,7 @@ index ec1c60c..86305fd 100644
      logger.error('Conversation loop error', {
        callUuid,
        error: error.message,
-@@ -409,7 +573,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -409,7 +594,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
      try {
        if (session) session.setCaptureEnabled(false);
        if (callActive) {
@@ -1429,7 +1463,7 @@ index ec1c60c..86305fd 100644
          await endpoint.play(errUrl);
        }
      } catch (e) {
-@@ -447,6 +611,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -447,6 +632,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
        }
      }
    }
@@ -2299,10 +2333,10 @@ index 7447c27..f568659 100644
  
      // Include conversation stats for conversation mode
 diff --git a/voice-app/lib/sip-handler.js b/voice-app/lib/sip-handler.js
-index 3fd7e7b..1b66ee5 100644
+index 3fd7e7b..c1d006e 100644
 --- a/voice-app/lib/sip-handler.js
 +++ b/voice-app/lib/sip-handler.js
-@@ -4,32 +4,35 @@
+@@ -4,32 +4,37 @@
   */
  
  const { setTimeout: sleep } = require('node:timers/promises');
@@ -2318,6 +2352,8 @@ index 3fd7e7b..1b66ee5 100644
 +const { armarAnticipo, transcribirFrase } = require('./anticipo');
 +// Parche 38: el cronómetro de cada turno (de que dejas de hablar a oír a Jarvis).
 +const cronometro = require('./cronometro');
++// Parche 47: «Jarvis, apunta eso» lo cumple la llamada con lo que acaba de oír.
++const apunte = require('./apunte');
  
  // Audio cue URLs
 -const READY_BEEP_URL = 'http://127.0.0.1:3000/static/ready-beep.wav';
@@ -2356,7 +2392,7 @@ index 3fd7e7b..1b66ee5 100644
  ];
  
  function getRandomThinkingPhrase() {
-@@ -59,7 +62,7 @@ function extractDialedExtension(req) {
+@@ -59,7 +64,7 @@ function extractDialedExtension(req) {
  
  function isGoodbye(transcript) {
    const lower = transcript.toLowerCase().trim();
@@ -2365,7 +2401,7 @@ index 3fd7e7b..1b66ee5 100644
    return goodbyePhrases.some(function(phrase) {
      return lower === phrase || lower.includes(' ' + phrase) ||
             lower.startsWith(phrase + ' ') || lower.endsWith(' ' + phrase);
-@@ -118,13 +121,20 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
+@@ -118,13 +123,20 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
    const deviceName = deviceConfig ? deviceConfig.name : 'Morpheus';
    const devicePrompt = deviceConfig ? deviceConfig.prompt : null;
    const voiceId = (deviceConfig && deviceConfig.voiceId) ? deviceConfig.voiceId : DEFAULT_VOICE_ID;
@@ -2389,7 +2425,7 @@ index 3fd7e7b..1b66ee5 100644
      // Play device-specific greeting with device voice
      const greetingUrl = await ttsService.generateSpeech(greeting, voiceId);
      await endpoint.play(greetingUrl);
-@@ -146,105 +156,234 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
+@@ -146,105 +158,251 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
      // Main conversation loop
      let turnCount = 0;
      const MAX_TURNS = 20;
@@ -2407,7 +2443,7 @@ index 3fd7e7b..1b66ee5 100644
 +    const logTurno = function (m) { console.log('[' + new Date().toISOString() + '] ' + m); };
 +    // Parche 22: la escucha pasiva, y si sigue la llamada (para no escuchar a nadie tras colgar).
 +    const pasiva = new EscuchaPasiva({ log: logTurno });
-+    armarAnticipo(session, whisperClient, { activo: function () { return !pasiva.dormida(); } });
++    armarAnticipo(session, whisperClient, { activo: function (pausa) { return pasiva.anticipar(pausa, whisperClient); } });
 +    let viva = true;
 +    dialog.on('destroy', function () { viva = false; });
 +
@@ -2427,7 +2463,11 @@ index 3fd7e7b..1b66ee5 100644
 +      const crono = cronometro.turno(callUuid, 'entrante');
 +      if (pasiva.dormida()) {
 +        const oido = await pasiva.esperarPalabra({
-+          session: session, whisperClient: whisperClient, sigueActiva: function () { return viva; }
++          session: session, whisperClient: whisperClient, sigueActiva: function () { return viva; },
++          // Parche 46: el tono de «le he oído», mientras aún habla.
++          alNombrar: function () {
++            if (viva && process.env.ESCUCHA_PASIVA_TONO !== '0') endpoint.play(GOTIT_BEEP_URL).catch(function () {});
++          }
 +        });
 +        if (!oido) break;
 +        if (oido.tope) {
@@ -2438,7 +2478,10 @@ index 3fd7e7b..1b66ee5 100644
 +        llamado = true;
 +        if (oido.resto) {
 +          transcript = oido.resto;
-+          crono.marca('cierre').marca('texto');
++          // Parche 46: el despertar también se cronometra, desde que calló.
++          const uf = pasiva.ultimaFrase || {};
++          if (typeof uf.finHabla === 'number') crono.marca('finHabla', uf.finHabla);
++          crono.marca('cierre', uf.cierreEn).marca('texto', uf.textoEn);
 +        } else {
 +          await endpoint.play(await ttsService.generateSpeech(FRASES_PASIVA.despierta, voiceId));
 +        }
@@ -2552,8 +2595,6 @@ index 3fd7e7b..1b66ee5 100644
 -        format: 'pcm',
 -        sampleRate: 16000
 -      });
--
--      console.log('[' + new Date().toISOString() + '] WHISPER: "' + transcript + '"');
 +      // Parche 20: lo que contestas a «¿lo hago?» lo decide la voice-app, no Claude.
 +      if (pendienteConfirmar) {
 +        const pendiente = pendienteConfirmar;
@@ -2571,9 +2612,7 @@ index 3fd7e7b..1b66ee5 100644
 +        avisoLectura = rc.aviso + avisoLectura;
 +      }
  
--      if (!transcript || transcript.trim().length < 2) {
--        const clarifyUrl = await ttsService.generateSpeech("Sorry, I didn't catch that. Could you repeat?", voiceId);
--        await endpoint.play(clarifyUrl);
+-      console.log('[' + new Date().toISOString() + '] WHISPER: "' + transcript + '"');
 +      // Parche 24: «sigue», «siguiente», «ve a la de economía»… los cumple la llamada.
 +      const ordenLectura = await control.atender(transcript, {
 +        endpoint: endpoint, session: session, ttsService: ttsService, voiceId: voiceId,
@@ -2582,6 +2621,19 @@ index 3fd7e7b..1b66ee5 100644
 +      if (ordenLectura) {
 +        interrumpio = ordenLectura.interrumpio;
 +        avisoLectura = ordenLectura.aviso;
++        continue;
++      }
+ 
+-      if (!transcript || transcript.trim().length < 2) {
+-        const clarifyUrl = await ttsService.generateSpeech("Sorry, I didn't catch that. Could you repeat?", voiceId);
+-        await endpoint.play(clarifyUrl);
++      // Parche 47: «apunta eso»: lo oído en el último minuto y medio, al backend.
++      if (await apunte.atender(transcript, {
++        pasiva: pasiva, endpoint: endpoint, ttsService: ttsService, voiceId: voiceId,
++        log: logTurno, sigueActiva: function () { return viva; }
++      })) {
++        crono.cerrar('reflejo', logTurno);
++        pasiva.dormir();
          continue;
        }
  
@@ -2689,7 +2741,7 @@ index 3fd7e7b..1b66ee5 100644
        await endpoint.play(maxUrl);
      }
  
-@@ -252,7 +391,7 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
+@@ -252,7 +410,7 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
      console.error('[' + new Date().toISOString() + '] CONVERSATION Error:', error.message);
      try {
        if (session) session.setCaptureEnabled(false);

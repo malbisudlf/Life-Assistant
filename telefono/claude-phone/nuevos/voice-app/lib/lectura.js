@@ -1,6 +1,9 @@
 /**
  * Parches 18, 20, 24, 36 y 37: leer en voz alta lo que no cabe en una respuesta, y con mando.
  *
+ * Parche 48 (2026-11-12): y la pantalla del PC, `📖 LEER: pantalla pregunta=<pregunta>`, por
+ * lo mismo que internet: lo que hay en una pantalla lo ha escrito cualquiera.
+ *
  * Parche 37 (2026-11-05): también internet, `📖 LEER: internet pregunta=<pregunta>`. Una web
  * la escribe cualquiera y Claude tiene shell: la pregunta la pone él, y la respuesta la da
  * en el backend un modelo que solo tiene la web, y va de ahí al altavoz. Claude sabe qué se
@@ -54,11 +57,15 @@
 
 const { decirInterrumpible } = require('./turno-rapido');
 
-const QUE = ['briefing', 'semana', 'correo', 'tareas', 'whatsapp', 'internet'];
+const QUE = ['briefing', 'semana', 'correo', 'tareas', 'whatsapp', 'internet', 'pantalla'];
+// Parche 48: las que son una RESPUESTA a una pregunta (no un texto por secciones) y que
+// Claude no ve: internet (parche 37) y la pantalla del PC.
+const RESPUESTAS = ['internet', 'pantalla'];
 const MARCA = new RegExp('📖\\s*LEER:\\s*(' + QUE.join('|') + '|seguir)\\b([^\\n]*)', 'i');
 const NOMBRE = { briefing: 'el briefing', semana: 'la agenda de la semana',
                  correo: 'el parte del correo', tareas: 'tus tareas',
-                 whatsapp: 'tus WhatsApp', internet: 'la respuesta de internet' };
+                 whatsapp: 'tus WhatsApp', internet: 'la respuesta de internet',
+                 pantalla: 'lo que hay en su pantalla' };
 // El chat de `📖 LEER: whatsapp chat=…`: su número o su grupo, como los da el backend.
 const CHAT = '[\\d-]{5,40}@(?:s\\.whatsapp\\.net|g\\.us)';
 // Lo que el backend admite en `pregunta`.
@@ -85,7 +92,7 @@ function pedidoDeLectura(respuesta) {
   // La pregunta va la última y es texto libre: se quita antes de mirar lo demás, para que
   // «cómo seguir a un equipo» no sea `seguir` ni «desde=2» un número de sección.
   let pregunta = '';
-  if (m[1].toLowerCase() === 'internet') {
+  if (RESPUESTAS.indexOf(m[1].toLowerCase()) >= 0) {
     const p = resto.match(/pregunta\s*=\s*(.*)$/i);
     if (p) {
       pregunta = p[1];
@@ -95,6 +102,10 @@ function pedidoDeLectura(respuesta) {
       resto = '';
     }
     pregunta = pregunta.replace(/^[\s"'«“]+|[\s"'»”]+$/g, '').slice(0, PREGUNTA_MAX);
+    // «📖 LEER: pantalla» a secas es «¿qué hay?»: sin pregunta, el backend repetiría la última.
+    if (!pregunta && m[1].toLowerCase() === 'pantalla' && !/(^|\s)seguir\b/i.test(resto)) {
+      pregunta = '¿Qué hay en pantalla?';
+    }
   }
   const valor = function (clave, patron) {
     const r = resto.match(new RegExp(clave + '\\s*=\\s*(' + patron + ')'));
@@ -227,7 +238,7 @@ async function leer(pedido, c) {
                    texto: 'Sigo con ' + nombre + ', en «' + primero.titulo + '».' });
   }
   // Una respuesta no se cierra con «Eso es todo»: se contesta y ya.
-  const respuesta = que === 'internet';
+  const respuesta = RESPUESTAS.indexOf(que) >= 0;
   if (!respuesta) {
     cola.push({ n: ultimo.n, titulo: ultimo.titulo, trozo: ultimo.trozo, final: true,
                 texto: que === 'briefing' ? 'Hasta aquí el briefing.' : 'Eso es todo.' });
@@ -290,8 +301,11 @@ async function leer(pedido, c) {
     apuntarPosicion(lectura, ultimo, true, c);
     log('LECTURA: terminada (' + cola.length + ' trozos)');
     return { interrumpio: false, estado: estado,
-             aviso: '[La llamada le ha leído la respuesta de internet. No sabes qué decía, y no ' +
-                    'lo finjas: si repregunta, otra línea 📖 LEER: internet pregunta=…] ' };
+             aviso: que === 'pantalla'
+               ? '[La llamada le ha contado lo que hay en la pantalla de su PC. No sabes qué ha ' +
+                 'dicho, y no lo finjas: si repregunta, otra línea 📖 LEER: pantalla pregunta=…] '
+               : '[La llamada le ha leído la respuesta de internet. No sabes qué decía, y no ' +
+                 'lo finjas: si repregunta, otra línea 📖 LEER: internet pregunta=…] ' };
   }
   log('LECTURA: terminada (' + (cola.length - 1) + ' trozos)');
   return { interrumpio: false, estado: estado,

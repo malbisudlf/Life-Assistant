@@ -51,7 +51,7 @@ diff -ruN a/voice-app/lib/apunte.js b/voice-app/lib/apunte.js
 +};
 +
 +function urlBase() {
-+  return String(process.env.LECTURA_URL || '').replace(/\/+$/, '');
++  return String(process.env.LECTURA_URL || 'http://127.0.0.1:8080').replace(/\/+$/, '');
 +}
 +
 +async function mandar(texto, fetchImpl) {

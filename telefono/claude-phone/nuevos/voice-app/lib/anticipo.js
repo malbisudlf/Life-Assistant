@@ -24,7 +24,8 @@
  *   del texto. Sin small, el cierre lo decide turbo y el texto está listo al cerrar.
  *   ANTICIPO_RAPIDO=1 lo devuelve.
  * - No con la escucha pasiva dormida (`activo`): con la radio del coche las pausas no
- *   paran, y cada una sería una pasada más de la GPU de jacobo para nada.
+ *   paran, y cada una sería una pasada más de la GPU de jacobo para nada. Parche 46:
+ *   salvo que ya le hayan nombrado o lo dicho sea corto (`activo` recibe la pausa).
  */
 
 const OPCIONES = { format: 'pcm', sampleRate: 16000, language: 'es' };
@@ -47,7 +48,7 @@ function armarAnticipo(session, whisperClient, p) {
   if (!whisperClient || typeof whisperClient.oidoDisponible !== 'function') return function () {};
   const activo = p.activo || function () { return true; };
   const alPausar = function (pausa) {
-    if (!activo()) return;
+    if (!activo(pausa)) return;
     pausa.desde = Date.now();
     pausa.transcripcion = whisperClient.transcribe(pausa.audio, OPCIONES);
     // Que una pausa tirada que falla no acabe en un unhandledRejection.
