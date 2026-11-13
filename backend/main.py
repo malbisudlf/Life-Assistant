@@ -1582,7 +1582,13 @@ def _graph_fallo(r, contexto: str) -> dict | None:
             logger.error("Graph %s: respuesta no-JSON (%s)", contexto, r.status_code)
             return {"error": "Respuesta inesperada de Outlook"}
         return None
-    logger.error("Graph %s %s: %s", contexto, r.status_code, (r.text or "")[:500])
+    if r.status_code == 429 or r.status_code >= 500:
+        # Caída o límite de Microsoft, no código nuestro: el formato «Graph respondió NNN»
+        # es el que `_ERROR_DE_RED` reconoce, para que el vigilante no abra un issue (el
+        # antiguo «Graph X 504: » acababa en la firma como `# :` y parecía un fallo propio).
+        logger.error("Graph respondió %s en %s: %s", r.status_code, contexto, (r.text or "")[:500])
+    else:
+        logger.error("Graph %s %s: %s", contexto, r.status_code, (r.text or "")[:500])
     # `reconectar` es lo que el dashboard mira para ofrecer «Conectar Outlook»: solo
     # la sesión se arregla reconectando. Un 5xx o un 429 se pasan solos, y tratarlos
     # igual mandaba a rehacer el consentimiento de Microsoft por una caída de Graph.
@@ -18821,6 +18827,7 @@ _ERROR_DE_RED = re.compile(
     r"|sslerror|ssleoferror|handshake"
     # Y el tercero que contesta, pero mal
     r"|bad gateway|gateway time-?out|service unavailable"
+    r"|graph respondi[oó] (?:429|5\d\d)\b"
     r"|devolvi[oó] 50[234]|\u2192 50[234]|\(50[234]\)"
     r"|(?:status|code|c[oó]digo|http)\W{0,3}50[234]\b",
     re.I)

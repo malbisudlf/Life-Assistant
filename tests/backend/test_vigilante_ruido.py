@@ -49,6 +49,9 @@ class TestQueEsDeRedYQueEsDeCodigo:
         "ssl.SSLError: handshake operation timed out",
         DNS_CAIDO,
         # El servidor de correo que corta o no deja entrar (#244): pasa solo.
+        # Graph caído o con límite (#337): 504 con cuerpo vacío o 500 UnknownError.
+        "Graph respondió 504 en calendarView (ha/events/soon): ",
+        'Graph respondió 500 en me/calendars (uni): {"error":{"code":"UnknownError"}}',
         "Resumen diario: fallo al enviarlo por hora tope (SMTPServerDisconnected)",
         "Resumen diario: fallo al enviarlo por hora tope (SMTPConnectError 421)",
     ])
@@ -58,6 +61,7 @@ class TestQueEsDeRedYQueEsDeCodigo:
     @pytest.mark.parametrize("mensaje", [
         "Supabase devolvió 400",
         "Open-Meteo devolvió 500",
+        "Graph me/calendars 400: petición mala",
         "KeyError: 'sueno'",
         # El caso que obliga a exigir el código EN CONTEXTO: un traceback cualquiera lleva
         # números de línea, y un `\\b504\\b` suelto convertiría media avería real en red.
