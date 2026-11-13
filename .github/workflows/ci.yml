@@ -123,6 +123,10 @@ jobs:
               sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1 || break
               sleep 5
             done
+            # Y una pausa creciente: el 2026-11-11 el DNS del runner estuvo caído más de
+            # los tres intentos seguidos (9 min), y reintentar sin respiro no daba tiempo
+            # a que volviera. Si siguen cayendo, falla el paso igualmente.
+            sleep $((intento * 45))
           done
           exit 1
       - name: Tests end-to-end
