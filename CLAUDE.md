@@ -204,6 +204,9 @@ Ficheros clave:
 | `docs/DESPLIEGUE.md` | Guía de despliegue del kit para terceros |
 | `backend/.env.example` | Todas las variables del backend, documentadas una a una |
 | `backend/check_config.py` | Comprueba que la configuración del backend está completa |
+| `backend/anticipa.py` | La lógica pura de la anticipación: qué se apunta, qué es un patrón, la confianza y cuándo toca sugerir. Sin red ni reloj; el enganche está en `main.py`. Ver `docs/JARVIS_ANTICIPA.md` |
+| `backend/nucleo_seguridad.json` | **El núcleo de seguridad: solo lo cambia Mikel, a mano.** Qué puede sugerir Jarvis por un patrón, qué es irreversible y qué rutas y símbolos no puede tocar un parche suyo. Jarvis lo lee; ninguna herramienta lo escribe |
+| `espejo/` | El espejo de parches (`docs/JARVIS_PARCHES_ESPEJO.md`): `espejo.py` (la puerta, el informe y el rastro), `espejo.sh` y `comparar.py` (las pruebas en una copia sin red, EN `caja`) y `canario.sh` (encender un parche un día y apagarlo solo si falla) |
 
 ## Dónde está el resto de la guía
 
@@ -259,6 +262,8 @@ arquitectura, invariantes del backend, despliegue y convenciones. Lo demás:
 | `docs/IDEAS.md` | Ideas propuestas y sin hacer |
 | `docs/JARVIS_PROACTIVO.md` | Ideas para que Jarvis actúe sin que se lo pidan, más allá de lo ya implementado en `docs/JARVIS.md` |
 | `docs/EL_PROYECTO_EXPLICADO.md` | Explicación del proyecto entero para alguien de fuera: qué es, qué hace y por qué está construido así. No es guía de trabajo |
+| `docs/JARVIS_ANTICIPA.md` | **Antes de tocar la anticipación o `backend/nucleo_seguridad.json`.** Jarvis propone lo que sueles pedir, con Sí y No: qué se apunta (una lista cerrada, nunca tras leer texto ajeno), cómo sale un patrón y su confianza, cuándo calla, y por qué nada se ejecuta solo. Nace apagado |
+| `docs/JARVIS_PARCHES_ESPEJO.md` | **Antes de tocar `espejo/` o de dejar que una sesión cambie el backend sola.** El espejo de parches: la puerta que rechaza lo que toca el núcleo o amplía permisos, las pruebas en una copia sin red en `caja`, el informe de tres líneas, el rastro y el canario que se apaga solo |
 
 **Al añadir documentación, va al fichero de su área, no aquí.** Este solo crece si lo
 nuevo aplica a todo el repositorio. Si creas un fichero nuevo en `docs/`, añádelo a
