@@ -1,0 +1,69 @@
+{
+  "_": "El núcleo de seguridad de Jarvis. Este fichero SOLO lo cambia Mikel, a mano y en un commit suyo: Jarvis lo lee y no puede editarlo. Ninguna herramienta escribe en él, y el espejo de parches (docs/JARVIS_PARCHES_ESPEJO.md) rechaza cualquier parche que lo toque. Ver docs/JARVIS_ANTICIPA.md.",
+  "version": 1,
+
+  "anticipa": {
+    "_": "Lo que Jarvis puede SUGERIR por un patrón. Lista cerrada: una herramienta que no esté aquí ni se apunta en el registro ni se sugiere nunca. `nivel` es fijo y no lo decide ningún modelo.",
+    "acciones": {
+      "musica_poner":     {"nivel": "bajo",  "argumentos": ["que", "tipo", "dispositivo"]},
+      "tele":             {"nivel": "bajo",  "argumentos": ["accion", "valor"],
+                           "solo": {"accion": ["encender", "apagar", "abrir"]}},
+      "pc_abrir":         {"nivel": "bajo",  "argumentos": ["que"]},
+      "encender_pc":      {"nivel": "bajo",  "argumentos": []},
+      "lanzar_streaming": {"nivel": "bajo",  "argumentos": []},
+      "casa_ordenar":     {"nivel": "medio", "argumentos": ["servicio", "entidad", "datos"],
+                           "dominios": ["light", "fan", "climate", "media_player"],
+                           "datos": ["brightness_pct", "temperature", "hvac_mode", "color_temp_kelvin"]},
+      "recordarme":       {"nivel": "medio", "argumentos": ["texto", "hora"]}
+    },
+    "_ejecutar_sola": "Fase 1: nunca. Aunque alguien ponga esto a true, solo valdría para el nivel `bajo`: lo hace cumplir el código, no este fichero.",
+    "ejecutar_sola": false,
+    "limites": {
+      "espera_min_entre_sugerencias": 90,
+      "max_sugerencias_dia": 2,
+      "minutos_para_contestar": 10
+    }
+  },
+
+  "irreversible": {
+    "_": "Lo irreversible se propone, no se hace. Ninguna de estas herramientas puede salir de un patrón, de un parche en canario ni de nada que no sea una orden de Mikel con su confirmación de siempre.",
+    "herramientas": [
+      "whatsapp_enviar", "whatsapp_programar", "llamar_a_alguien", "recado_encargar",
+      "recado_seguir", "mandar_notificacion", "garaje", "camaras_vigilar", "camaras_mirar",
+      "pelis_pedir", "pelis_borrar", "borrar_evento", "borrar_idea", "cobrar_entrenamiento",
+      "desplegar", "arreglar_revision", "encargar_al_pc", "encargar_proyecto",
+      "encargar_a_una_sesion", "responder_a_la_sesion", "mcp_conectar", "mcp_usar",
+      "apagar_pc", "suspender_pc", "poner_alarma", "cancelar_alarma", "anular_noche"
+    ],
+    "dominios_casa": ["lock", "cover", "alarm_control_panel", "camera", "script", "scene",
+                      "switch", "input_boolean", "vacuum", "humidifier", "homeassistant"]
+  },
+
+  "parches": {
+    "_": "Rutas que un parche de Jarvis no puede tocar. Un parche que cambie una sola línea de aquí se rechaza sin probarlo y se avisa a Mikel.",
+    "rutas_protegidas": [
+      "backend/nucleo_seguridad.json",
+      "backend/anticipa.py",
+      "espejo/",
+      ".github/",
+      "backend/Dockerfile",
+      "backend/requirements.txt",
+      "telefono/RUNBOOK.md",
+      "telefono/claude-phone/",
+      "tests/backend/test_anticipa.py",
+      "tests/backend/test_espejo.py",
+      "tests/backend/test_ajeno.py",
+      "tests/backend/test_no_molestar.py",
+      "supabase/migrations/",
+      "CLAUDE.md"
+    ],
+    "simbolos_protegidos": [
+      "_ajeno_bloquea", "_HERRAMIENTAS_AJENAS", "_TRAS_AJENO_SE_PUEDE", "_AJENO_NI_CON_BOTON",
+      "_AJENO_SI_LO_PIDES", "_jarvis_confirma", "_casa_pide_confirmar", "_CASA_DIRECTOS",
+      "PREGUNTAS_ACCIONES", "WHATSAPP_NO_MOLESTAR", "_no_molestar", "_en_clase",
+      "verify_token", "_token_ok", "_jwt_de_usuario", "_anticipa_", "ANTICIPA", "ANTICIPA_"
+    ],
+    "canario_horas": 24,
+    "canario_errores_max": 3
+  }
+}

@@ -52,6 +52,9 @@ import uuid
 import io
 import zipfile
 
+# La lógica pura de la anticipación (docs/JARVIS_ANTICIPA.md): sin red, sin reloj.
+import anticipa
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("life-assistant")
 
@@ -13252,7 +13255,9 @@ def ha_brief_tick(request: Request, token: str = ""):
                # El WhatsApp programado que el puente no pudo mandar, para contártelo.
                **_avisar_whatsapp_programados_seguro(),
                # Los recados: la siguiente llamada de un asunto, o preguntarte si se hace.
-               **_recados_tick_seguro()}
+               **_recados_tick_seguro(),
+               # La anticipación: aprender una vez al día y, si toca, proponer lo de siempre.
+               **_anticipa_tick_seguro()}
     avisos  = {**_despachar_recordatorios(), **previos, **_informe_semanal_seguro(),
                # Y detrás del despacho: lo que el móvil no haya recogido a tiempo se
                # rescata por correo, para que cambiar de canal no pierda avisos.
@@ -14037,6 +14042,9 @@ TABLAS_CONOCIDAS = {
     "moodle_entregas":       "20261007_moodle",
     "jarvis_preguntas":      "20261011_jarvis_preguntas",
     "jarvis_recados":        "20261110_jarvis_recados",
+    "jarvis_eventos":        "20261115_jarvis_anticipa",
+    "jarvis_patrones":       "20261115_jarvis_anticipa",
+    "jarvis_anticipa_borrados": "20261115_jarvis_anticipa",
     "salud_familia":         "20261015_salud_familia",
     "salud_familia_envios":  "20261015_salud_familia",
     "lecturas_telefono":     "20261025_lecturas_telefono",
@@ -24103,6 +24111,443 @@ def _j_recado_dejar(recado: str) -> dict:
             "nota": "No vuelvo a llamar por esto. Si había una llamada en marcha, esa termina."}
 
 
+# ── JARVIS QUE SE ANTICIPA (fase 1, 2026-11-15) ───────────────────────────────
+# Jarvis propone lo que sueles pedir, un poco antes de que lo pidas: «Señor, entre semana,
+# sobre las 9:00, suele poner «lofi» en casa. ¿Lo hago?», con Sí y No. Diseño y números en
+# `docs/JARVIS_ANTICIPA.md`; la aritmética (qué es un patrón, cuánto sube un sí), en
+# `backend/anticipa.py`, que no toca red. Aquí está solo el enganche:
+#
+#   1. APUNTAR — cada herramienta que se ejecuta pasa por `_jarvis_despachar`, y de ahí
+#      sale el evento. Solo las de `nucleo_seguridad.json` y solo sus argumentos declarados.
+#   2. APRENDER — una vez al día, del reloj de HA: se recalculan los patrones y se repasa
+#      la confianza (lo que nadie confirma, decae).
+#   3. SUGERIR — en el mismo reloj: si un patrón es de ahora y de donde estás, una
+#      pregunta al móvil con dos botones. El «sí» ejecuta LO GUARDADO, no un texto.
+#
+# Lo que no es obvio:
+#  - **Un turno que ha leído texto de otros no enseña nada** (`tras_ajeno`). Es la misma
+#    frontera que `_ajeno_bloquea`: si un WhatsApp consiguiera que Jarvis pusiera música,
+#    esa música no puede acabar siendo «lo que Mikel suele pedir».
+#  - **Lo que se confirma no se aprende.** Si una herramienta pide botón, aquí no entra,
+#    aunque el núcleo la nombrara por error: se mira `_jarvis_confirma` otra vez.
+#  - **En fase 1 no se ejecuta nada sin tu «sí»**, y el «sí» caduca a los pocos minutos:
+#    pulsar a media tarde la música de las nueve no es contestar.
+#  - **Las reglas no están en este fichero ni en el prompt**: se leen de
+#    `nucleo_seguridad.json`. Si no se puede leer, la anticipación se queda apagada.
+#  - **Sale por el móvil**, que es el único canal con dos botones. Una sugerencia no se
+#    rescata por correo: media hora después ya no es de ahora.
+#  - **Nacen apagados los dos**: `ANTICIPA` (apuntar y aprender) y `ANTICIPA_SUGIERE`.
+ANTICIPA               = _flag("ANTICIPA", "0")
+ANTICIPA_SUGIERE       = _flag("ANTICIPA_SUGIERE", "0")
+ANTICIPA_HORA_APRENDER = 4
+ANTICIPA_EVENTOS_URL   = f"{SUPABASE_URL}/rest/v1/jarvis_eventos"
+ANTICIPA_PATRONES_URL  = f"{SUPABASE_URL}/rest/v1/jarvis_patrones"
+ANTICIPA_BORRADOS_URL  = f"{SUPABASE_URL}/rest/v1/jarvis_anticipa_borrados"
+ANTICIPA_MAX_EVENTOS   = 5000
+try:
+    _ANTICIPA_NUCLEO: Optional[dict] = anticipa.cargar_nucleo()
+except Exception as _e:
+    # Sin reglas no hay anticipación; pero el resto del backend (las alarmas, el resumen)
+    # no se cae por un fichero mal escrito.
+    logger.error("Anticipación: no se puede leer nucleo_seguridad.json (%s): queda apagada", _e)
+    _ANTICIPA_NUCLEO = None
+# Mientras se ejecuta el «sí» de una sugerencia: esa ejecución no es una petición nueva.
+_anticipa_repitiendo: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "anticipa_repitiendo", default=False)
+_anticipa_estado = {"aprendido": "", "sin_tabla": False, "pendientes": True}
+
+
+def _anticipa_activo() -> bool:
+    return bool(ANTICIPA and _ANTICIPA_NUCLEO)
+
+
+def _anticipa_ubicacion() -> str:
+    """La categoría del lugar firme, o "" si no se sabe: «no lo sé» no se apunta como «fuera»."""
+    lugar = _lugar_actual_seguro()
+    if not lugar:
+        return ""
+    return lugar["lugar"] if lugar["lugar"] in anticipa.UBICACIONES else "fuera"
+
+
+def _anticipa_sb(metodo: str, url: str, **kw):
+    """Una petición a Supabase que lanza si no sale bien. `RuntimeError`, como los recados."""
+    cabeceras = {**supabase_headers(), **kw.pop("cabeceras", {})}
+    r = getattr(http, metodo)(url, headers=cabeceras, **kw)
+    if r.status_code >= 300:
+        raise RuntimeError(f"Supabase devolvió {r.status_code}")
+    return r
+
+
+def _anticipa_leer(url: str, filtro: str = "") -> list:
+    r = _anticipa_sb("get", f"{url}?select=*" + (f"&{filtro}" if filtro else ""))
+    filas = r.json()
+    return filas if isinstance(filas, list) else []
+
+
+def _anticipa_guardar(fila: dict) -> None:
+    """Escribe un evento. Nunca lanza: es un registro, no la acción."""
+    try:
+        _anticipa_sb("post", ANTICIPA_EVENTOS_URL, json=fila, cabeceras={"Prefer": "return=minimal"})
+    except Exception as e:
+        if not _anticipa_estado["sin_tabla"]:
+            logger.warning("Anticipación: no se pudo apuntar el evento (%s). ¿Falta la "
+                           "migración 20261115_jarvis_anticipa?", e)
+        _anticipa_estado["sin_tabla"] = True
+
+
+def _anticipa_en_segundo_plano(fn, *args) -> None:
+    """En un hilo: apuntar no puede hacer esperar a quien ha pedido la música."""
+    threading.Thread(target=fn, args=args, daemon=True, name="anticipa").start()
+
+
+def _anticipa_apuntar(nombre: str, argumentos: dict, resultado, tras_ajeno: bool) -> None:
+    """Deja constancia de algo que Mikel ha pedido y se ha hecho. Nunca lanza.
+
+    Lo llama `_jarvis_despachar` después de ejecutar. Aquí se decide todo lo que NO se
+    apunta: lo que vino tras leer texto ajeno, lo que falló, lo que no es de la lista, lo
+    que se confirma, lo que hizo el sistema solo y lo que es el «sí» de una sugerencia.
+    """
+    try:
+        if not _anticipa_activo() or tras_ajeno or _anticipa_repitiendo.get():
+            return
+        if isinstance(resultado, dict) and (
+                resultado.get("error") or resultado.get("ok") is False or resultado.get("bloqueado")
+                or resultado.get("estado") in ("pendiente_de_confirmacion", "sin_confirmar")):
+            return
+        norm = anticipa.normalizar(nombre, argumentos, _ANTICIPA_NUCLEO)
+        if not norm or _jarvis_confirma(_JARVIS_HERRAMIENTAS[nombre], argumentos):
+            return
+        fila = anticipa.evento(_ahora_local(), _anticipa_ubicacion(), _boca_actual.get(), norm)
+        if fila:
+            _anticipa_en_segundo_plano(_anticipa_guardar, fila)
+    except Exception:
+        logger.exception("Anticipación: fallo al apuntar %s", nombre)
+
+
+def _anticipa_aprender(hoy: date) -> dict:
+    """El repaso diario: recalcula los patrones y mueve la confianza de cada uno."""
+    desde = (hoy - timedelta(days=anticipa.VENTANA_DIAS)).isoformat()
+    eventos = _anticipa_leer(ANTICIPA_EVENTOS_URL,
+                             f"dia=gte.{desde}&order=ts.asc&limit={ANTICIPA_MAX_EVENTOS}")
+    vistos = {p["clave"]: p for p in anticipa.detectar(eventos, hoy)}
+    guardados = {p["clave"]: p for p in _anticipa_leer(ANTICIPA_PATRONES_URL)}
+    nuevos = olvidados = 0
+    for clave, p in vistos.items():
+        g = guardados.get(clave)
+        if g is None:
+            _anticipa_sb("post", ANTICIPA_PATRONES_URL, cabeceras={"Prefer": "return=minimal"},
+                         json={**p, "confianza": anticipa.CONFIANZA_INICIAL,
+                               "repasado": hoy.isoformat()})
+            nuevos += 1
+            continue
+        cambios = {k: p[k] for k in ("minuto", "ocurrencias", "dias_posibles", "proporcion",
+                                     "ultima_vez")}
+        dias = (hoy - date.fromisoformat(str(g["repasado"])[:10])).days
+        if dias > 0:
+            cambios["confianza"] = anticipa.repasar(
+                float(g["confianza"]), dias, str(p["ultima_vez"]) >= str(g["repasado"])[:10])
+            cambios["repasado"] = hoy.isoformat()
+        _anticipa_sb("patch", f"{ANTICIPA_PATRONES_URL}?clave=eq.{quote(clave, safe='')}",
+                     json=cambios, cabeceras={"Prefer": "return=minimal"})
+    for clave, g in guardados.items():
+        if clave in vistos:
+            continue
+        # Ya no se sostiene con lo que hay en el registro: decae, y por debajo de un
+        # mínimo se olvida solo.
+        dias = (hoy - date.fromisoformat(str(g["repasado"])[:10])).days
+        if dias <= 0:
+            continue
+        confianza = anticipa.repasar(float(g["confianza"]), dias, False)
+        url = f"{ANTICIPA_PATRONES_URL}?clave=eq.{quote(clave, safe='')}"
+        if confianza < anticipa.U_OLVIDAR:
+            _anticipa_sb("delete", url)
+            olvidados += 1
+        else:
+            _anticipa_sb("patch", url, json={"confianza": confianza, "repasado": hoy.isoformat()},
+                         cabeceras={"Prefer": "return=minimal"})
+    if nuevos or olvidados:
+        logger.info("Anticipación: %d patrones nuevos, %d olvidados, %d en total",
+                    nuevos, olvidados, len(vistos))
+    return {"anticipa_patrones": len(vistos)} if vistos else {}
+
+
+def _anticipa_cerrar_ignoradas(ahora: datetime) -> None:
+    """Lo que no se contestó a tiempo queda como «ignorada», que no cuenta ni a favor ni en
+    contra. Solo se pregunta a la base si hay algo en el aire."""
+    if not _anticipa_estado["pendientes"]:
+        return
+    minutos = _ANTICIPA_NUCLEO["anticipa"]["limites"]["minutos_para_contestar"]
+    corte = (ahora - timedelta(minutes=minutos)).astimezone(timezone.utc).isoformat()
+    _anticipa_sb("patch", f"{ANTICIPA_EVENTOS_URL}?tipo=eq.sugerencia&respuesta=is.null"
+                          f"&ts=lt.{quote(corte, safe='')}",
+                 json={"respuesta": "ignorada"}, cabeceras={"Prefer": "return=minimal"})
+    quedan = _anticipa_leer(ANTICIPA_EVENTOS_URL, "tipo=eq.sugerencia&respuesta=is.null&limit=1")
+    _anticipa_estado["pendientes"] = bool(quedan)
+
+
+def _anticipa_callado(ahora: datetime) -> bool:
+    """Cuándo no se sugiere nada: de noche, dormido, en clase o sin móvil que lo recoja."""
+    if HORA_SILENCIO != (0, 0) and (ahora.hour, ahora.minute) >= HORA_SILENCIO:
+        return True
+    return not _telefono_puede_sonar(ahora)[0] or not _movil_vivo()
+
+
+def _anticipa_sugerir(patron: dict, ahora: datetime) -> bool:
+    """Manda la sugerencia de un patrón al móvil, con Sí y No. True si ha salido."""
+    norm = anticipa.normalizar(patron["herramienta"], patron.get("argumentos") or {}, _ANTICIPA_NUCLEO)
+    # El núcleo manda sobre lo aprendido: si esa acción ya no está en la lista (o ha
+    # cambiado), el patrón viejo no la resucita.
+    if not norm or norm["accion"] != patron["accion"]:
+        return False
+    if _jarvis_confirma(_JARVIS_HERRAMIENTAS[norm["herramienta"]], norm["argumentos"]):
+        return False
+    pid = str(uuid.uuid4())
+    texto = anticipa.frase({**patron, "argumentos": norm["argumentos"]})
+    minutos = _ANTICIPA_NUCLEO["anticipa"]["limites"]["minutos_para_contestar"]
+    caduca = datetime.now(timezone.utc) + timedelta(minutes=minutos)
+    if not _guardar_pregunta_con_accion(pid, texto, [PREGUNTA_SI, PREGUNTA_NO],
+                                        norm["herramienta"], norm["argumentos"], caduca,
+                                        extra={"anticipa": patron["clave"]}):
+        return False
+    fila = anticipa.evento(ahora, patron["ubicacion"], "sugerencia", norm, tipo="sugerencia",
+                           patron=patron["clave"], pregunta=pid)
+    # El evento antes que el aviso: es lo que cuenta para el tope del día. Si no se puede
+    # apuntar, no se sugiere: una sugerencia sin apuntar no tendría freno.
+    _anticipa_sb("post", ANTICIPA_EVENTOS_URL, json=fila, cabeceras={"Prefer": "return=minimal"})
+    _anticipa_estado["pendientes"] = True
+    acciones = [{"action": f"LA_APAGAR_{PREGUNTA_PREFIJO}{i}-{pid}", "title": op}
+                for i, op in enumerate((PREGUNTA_SI, PREGUNTA_NO), 1)]
+    _notificar("🤖 ¿Lo de siempre?", texto, aviso_id=pid, acciones=acciones, efimero=True)
+    _anticipa_sb("patch", f"{ANTICIPA_PATRONES_URL}?clave=eq.{quote(patron['clave'], safe='')}",
+                 json={"ultima_sugerencia": datetime.now(timezone.utc).isoformat()},
+                 cabeceras={"Prefer": "return=minimal"})
+    logger.info("Anticipación: sugerido %s (confianza %.2f)", patron["clave"], float(patron["confianza"]))
+    return True
+
+
+def _anticipa_tick() -> dict:
+    """El reloj de la anticipación (cada pocos minutos, desde `/ha/brief-tick`)."""
+    if not _anticipa_activo():
+        return {}
+    ahora = _ahora_local()
+    hoy = ahora.date()
+    hecho: dict = {}
+    if _anticipa_estado["aprendido"] != hoy.isoformat() and ahora.hour >= ANTICIPA_HORA_APRENDER:
+        # Se marca antes: si aprender falla, se reintenta mañana y no cada cinco minutos.
+        _anticipa_estado["aprendido"] = hoy.isoformat()
+        hecho = _anticipa_aprender(hoy)
+    if not ANTICIPA_SUGIERE:
+        return hecho
+    _anticipa_cerrar_ignoradas(ahora)
+    ubicacion = _anticipa_ubicacion()
+    if not ubicacion:
+        return hecho
+    minuto = ahora.hour * 60 + ahora.minute
+    patrones = _anticipa_leer(
+        ANTICIPA_PATRONES_URL,
+        f"ubicacion=eq.{ubicacion}&confianza=gte.{anticipa.U_SUGERIR}"
+        f"&minuto=gte.{minuto - anticipa.MARGEN_DESPUES}&minuto=lte.{minuto + anticipa.MARGEN_ANTES}"
+        "&order=confianza.desc")
+    candidatos = [p for p in patrones if anticipa.toca(p, ahora, ubicacion)]
+    if not candidatos:
+        return hecho
+    de_hoy = _anticipa_leer(ANTICIPA_EVENTOS_URL, f"dia=eq.{hoy.isoformat()}")
+    sugeridas = [e for e in de_hoy if e.get("tipo") == "sugerencia"]
+    ultima = max((_fecha_utc(e.get("ts")) for e in sugeridas if _fecha_utc(e.get("ts"))), default=None)
+    if not anticipa.puede_entregar(datetime.now(timezone.utc), ultima, len(sugeridas),
+                                   _anticipa_callado(ahora), _ANTICIPA_NUCLEO):
+        return hecho
+    # Lo que ya ha pedido hoy (o ya se le ha propuesto) no se propone: llegaría tarde.
+    ya = {e.get("accion") for e in de_hoy}
+    for patron in candidatos:
+        if patron["accion"] in ya:
+            continue
+        if _anticipa_sugerir(patron, ahora):
+            return {**hecho, "anticipa": "sugerido"}
+    return hecho
+
+
+def _anticipa_tick_seguro() -> dict:
+    """Como cada pieza del tick: un fallo aquí no puede dejar sin despachar los avisos."""
+    try:
+        return _anticipa_tick()
+    except RuntimeError as e:
+        # Casi siempre, la migración sin aplicar. Una vez, no cada cinco minutos.
+        if not _anticipa_estado["sin_tabla"]:
+            logger.warning("Anticipación: no puedo leer sus tablas (%s). ¿Falta la migración "
+                           "20261115_jarvis_anticipa?", e)
+        _anticipa_estado["sin_tabla"] = True
+        return {}
+    except Exception:
+        logger.exception("Anticipación: fallo inesperado en el tick")
+        return {}
+
+
+def _anticipa_ejecutar(herramienta: str, argumentos: dict) -> dict:
+    """Hace lo que decía una sugerencia aceptada, volviendo a mirar el núcleo: la fila está
+    en una tabla que la service key puede escribir."""
+    norm = anticipa.normalizar(herramienta, argumentos, _ANTICIPA_NUCLEO) if _anticipa_activo() else None
+    if not norm or _jarvis_confirma(_JARVIS_HERRAMIENTAS[herramienta], norm["argumentos"]):
+        return {"ok": False, "motivo": "Eso no se hace desde una sugerencia."}
+    args = dict(norm["argumentos"])
+    if herramienta == "recordarme":
+        ahora = _ahora_local()
+        if args["hora"] <= ahora.strftime("%H:%M"):
+            return {"ok": False, "motivo": f"Las {args['hora']} de hoy ya han pasado."}
+        args["fecha"] = ahora.date().isoformat()
+    marca, boca = _anticipa_repitiendo.set(True), _boca_actual.set("anticipa")
+    try:
+        resultado = _jarvis_despachar(herramienta, args)
+    finally:
+        _boca_actual.reset(boca)
+        _anticipa_repitiendo.reset(marca)
+    if not isinstance(resultado, dict):
+        return {"ok": True}
+    if resultado.get("error") or resultado.get("ok") is False:
+        return {"ok": False, "motivo": str(resultado.get("error") or resultado.get("motivo")
+                                           or "No ha salido.")[:200]}
+    return {**resultado, "ok": True}
+
+
+def _anticipa_respondida(pid: str, fila: dict, si: bool) -> dict:
+    """El botón de una sugerencia. El «sí» la ejecuta y sube la confianza del patrón; el
+    «no» la baja más. Lo llama `_responder_pregunta`, que ya ha apuntado la respuesta y
+    garantiza que solo vale la primera."""
+    accion = fila.get("accion") or {}
+    clave = str(accion.get("anticipa") or "")
+    herramienta = str(accion.get("herramienta") or "")
+    resultado: dict = {}
+    if si:
+        caduca = _fecha_utc(accion.get("caduca"))
+        if not caduca or datetime.now(timezone.utc) > caduca:
+            _acusar_recibo("🤖 Llegó tarde", "Esa sugerencia era de hace un rato: no hago nada.",
+                           efimero=True)
+            return {"ok": True, "hecho": False, "respuesta": "tarde"}
+        resultado = _anticipa_ejecutar(herramienta, accion.get("argumentos") or {})
+    try:
+        _anticipa_sb("patch", f"{ANTICIPA_EVENTOS_URL}?pregunta=eq.{pid}",
+                     json={"respuesta": "si" if si else "no"}, cabeceras={"Prefer": "return=minimal"})
+        patrones = _anticipa_leer(ANTICIPA_PATRONES_URL, f"clave=eq.{quote(clave, safe='')}")
+        if patrones:
+            nueva = anticipa.tras_respuesta(float(patrones[0]["confianza"]), "si" if si else "no")
+            _anticipa_sb("patch", f"{ANTICIPA_PATRONES_URL}?clave=eq.{quote(clave, safe='')}",
+                         json={"confianza": nueva, "repasado": _ahora_local().date().isoformat()},
+                         cabeceras={"Prefer": "return=minimal"})
+    except Exception as e:
+        # Lo pedido ya está hecho (o no): fallar aquí solo deja al patrón sin aprender de esta.
+        logger.warning("Anticipación: no se pudo apuntar la respuesta a %s (%s)", pid, e)
+    if not si:
+        _acusar_recibo("🤖 Entendido", "No lo hago, y lo propondré menos.", efimero=True)
+    elif resultado.get("ok"):
+        _acusar_recibo("🤖 Hecho", anticipa.describir(herramienta, accion.get("argumentos") or {})
+                       .capitalize() + ".", efimero=True)
+    else:
+        _acusar_recibo("🤖 No lo he podido hacer", str(resultado.get("motivo") or "Sin motivo")[:200])
+    logger.info("Anticipación: %s contestada con %s", clave, "sí" if si else "no")
+    return {"ok": True, "hecho": True, "respuesta": "si" if si else "no", "resultado": resultado}
+
+
+def _anticipa_patrones_ordenados() -> list:
+    return _anticipa_leer(ANTICIPA_PATRONES_URL, "order=confianza.desc,clave.asc")
+
+
+def _j_mis_patrones() -> dict:
+    if not _anticipa_activo():
+        return {"activo": False,
+                "nota": "La anticipación está apagada (ANTICIPA): no se apunta ni se aprende nada."}
+    try:
+        patrones = _anticipa_patrones_ordenados()
+        desde = (_ahora_local().date() - timedelta(days=14)).isoformat()
+        recientes = _anticipa_leer(ANTICIPA_EVENTOS_URL,
+                                   f"tipo=eq.sugerencia&dia=gte.{desde}&order=ts.desc&limit=200")
+        total = _total_de_content_range((getattr(_anticipa_sb(
+            "get", f"{ANTICIPA_EVENTOS_URL}?select=id&limit=0", cabeceras={"Prefer": "count=exact"}),
+            "headers", None) or {}).get("Content-Range"))
+    except RuntimeError:
+        return {"error": "No puedo leer los patrones ahora mismo. Si es la primera vez, falta "
+                         "aplicar la migración 20261115_jarvis_anticipa."}
+    por_clave = {p["clave"]: p for p in patrones}
+    ultima = next((s for s in recientes if s.get("patron") in por_clave), None)
+    return {
+        "activo": True,
+        "sugiere": bool(ANTICIPA_SUGIERE),
+        "patrones": [{
+            "numero": n,
+            "que": anticipa.describir(p["herramienta"], p.get("argumentos") or {}),
+            "por_que": anticipa.explicar(p),
+            "confianza": round(float(p["confianza"]), 2),
+            "se_propone": float(p["confianza"]) >= anticipa.U_SUGERIR,
+        } for n, p in enumerate(patrones, 1)],
+        "ultima_sugerencia": ({"que": anticipa.frase(por_clave[ultima["patron"]]),
+                               "por_que": anticipa.explicar(por_clave[ultima["patron"]]),
+                               "respuesta": ultima.get("respuesta") or "sin contestar"}
+                              if ultima else None),
+        "sugerencias_14_dias": anticipa.aceptacion(recientes),
+        "eventos_apuntados": total,
+        "nota": "Nada de esto se ejecuta solo: cada sugerencia se la pregunto. Para quitar "
+                "uno, olvidar_patron con su número; para borrarlo todo, borrar_anticipacion.",
+    }
+
+
+def _anticipa_borrar(url: str) -> int:
+    """Borra lo que case y devuelve cuántas filas eran."""
+    r = _anticipa_sb("delete", url, cabeceras={"Prefer": "return=representation"})
+    filas = r.json()
+    return len(filas) if isinstance(filas, list) else 0
+
+
+def _anticipa_acuse(que: str, eventos: int, patrones: int, quedan: int) -> None:
+    try:
+        _anticipa_sb("post", ANTICIPA_BORRADOS_URL, cabeceras={"Prefer": "return=minimal"},
+                     json={"que": que, "eventos": eventos, "patrones": patrones, "quedan": quedan})
+    except Exception as e:
+        logger.warning("Anticipación: borrado hecho, pero no se pudo dejar el acuse (%s)", e)
+
+
+def _j_olvidar_patron(numero: int) -> dict:
+    if not _anticipa_activo():
+        return {"error": "La anticipación está apagada."}
+    try:
+        patrones = _anticipa_patrones_ordenados()
+        if not isinstance(numero, int) or not 1 <= numero <= len(patrones):
+            return {"error": f"No hay un patrón con ese número: hay {len(patrones)}. "
+                             "Mira antes mis_patrones."}
+        p = patrones[numero - 1]
+        # El patrón y lo que lo sostenía: si se dejaran los eventos, mañana volvería a salir.
+        eventos = _anticipa_borrar(f"{ANTICIPA_EVENTOS_URL}?accion=eq.{quote(p['accion'], safe='')}"
+                                   f"&ubicacion=eq.{quote(p['ubicacion'], safe='')}&select=id")
+        borrados = _anticipa_borrar(f"{ANTICIPA_PATRONES_URL}?clave=eq.{quote(p['clave'], safe='')}"
+                                    "&select=clave")
+        quedan = len(_anticipa_leer(ANTICIPA_PATRONES_URL, f"clave=eq.{quote(p['clave'], safe='')}"))
+    except RuntimeError:
+        return {"error": "No he podido borrarlo ahora mismo."}
+    _anticipa_acuse("patron", eventos, borrados, quedan)
+    return {"ok": quedan == 0, "olvidado": anticipa.describir(p["herramienta"], p.get("argumentos") or {}),
+            "eventos_borrados": eventos,
+            "nota": "Borrado el patrón y lo que lo sostenía. Si lo vuelve a pedir a menudo, "
+                    "volverá a aprenderse desde cero."}
+
+
+def _j_borrar_anticipacion() -> dict:
+    if not _ANTICIPA_NUCLEO:
+        return {"error": "La anticipación no está disponible."}
+    try:
+        eventos = _anticipa_borrar(f"{ANTICIPA_EVENTOS_URL}?id=not.is.null&select=id")
+        patrones = _anticipa_borrar(f"{ANTICIPA_PATRONES_URL}?clave=not.is.null&select=clave")
+        # La comprobación: se vuelve a preguntar a la base, no se da por hecho.
+        quedan = (len(_anticipa_leer(ANTICIPA_EVENTOS_URL, "limit=1"))
+                  + len(_anticipa_leer(ANTICIPA_PATRONES_URL, "limit=1")))
+    except RuntimeError:
+        return {"error": "No he podido borrarlo ahora mismo. No doy nada por borrado."}
+    _anticipa_estado["pendientes"] = False
+    _anticipa_acuse("todo", eventos, patrones, quedan)
+    return {"ok": quedan == 0, "eventos_borrados": eventos, "patrones_borrados": patrones,
+            "comprobado": "He vuelto a mirar y no queda nada." if quedan == 0
+                          else "He vuelto a mirar y TODAVÍA queda algo: dilo tal cual.",
+            "nota": "Queda solo el acuse del borrado: la fecha y cuántos eran, sin contenido. "
+                    "A partir de ahora se vuelve a aprender desde cero."}
+
+
 # ── EL COPILOTO: tráfico en directo ──────────────────────────────────────────────────
 #
 # El 2026-11-12, en el coche: «Jarvis, ¿hay mucho tráfico?» → «No tengo tráfico en
@@ -25251,6 +25696,10 @@ def _responder_pregunta(pid: str, n: int) -> dict:
                        f"Contestaste «{previa}». Si quieres cambiarlo, díselo a Jarvis.",
                        efimero=True)
         return {"ok": True, "hecho": False, "respuesta": previa}
+    if isinstance(filas[0].get("accion"), dict) and filas[0]["accion"].get("anticipa"):
+        # Una sugerencia de la anticipación: su «sí» no pasa por `PREGUNTAS_ACCIONES`
+        # (poner música no se confirma), sino por el núcleo, y además enseña al patrón.
+        return _anticipa_respondida(pid, filas[0], n == 1)
     if filas[0].get("accion"):
         # Una pregunta con acción: el primer botón es el «sí» y la ejecuta; cualquier
         # otro es que no, y no hace nada más que quedar escrito.
@@ -25576,8 +26025,11 @@ def _args_de(herramienta: str, args: dict) -> dict:
 
 
 def _guardar_pregunta_con_accion(pid: str, texto: str, opciones: list, herramienta: str,
-                                 argumentos: dict, caduca: Optional[datetime] = None) -> bool:
-    accion = {"herramienta": herramienta, "argumentos": argumentos}
+                                 argumentos: dict, caduca: Optional[datetime] = None,
+                                 extra: Optional[dict] = None) -> bool:
+    # `extra` lo pone solo el backend (hoy, la anticipación: qué patrón originó la
+    # pregunta); nunca sale de lo que escribe un modelo.
+    accion = {**(extra or {}), "herramienta": herramienta, "argumentos": argumentos}
     if caduca:
         accion["caduca"] = caduca.astimezone(timezone.utc).isoformat()
     try:
@@ -36564,6 +37016,37 @@ _JARVIS_HERRAMIENTAS = {
         "obligatorios": ["clave"],
     },
 
+    # ── La anticipación: ver y borrar lo aprendido ───────────────────────────
+    "mis_patrones": {
+        "confirmar":   False,
+        "fn":          _j_mis_patrones,
+        "descripcion": "Lo que has aprendido de sus costumbres para anticiparte: cada patrón "
+                       "con su porqué en números y su confianza, la última sugerencia que le "
+                       "hiciste y cuántas acepta. Úsalo para «¿por qué me propones esto?», "
+                       "«¿qué patrones tienes?» o «¿qué has aprendido de mí?». Di los "
+                       "números tal cual vienen.",
+        "parametros":  {},
+    },
+    "olvidar_patron": {
+        "confirmar":   False,
+        "fn":          _j_olvidar_patron,
+        "descripcion": "Borra UN patrón aprendido y los apuntes que lo sostenían, por su "
+                       "número en mis_patrones. Solo si lo pide él.",
+        "parametros":  {"numero": {"type": "integer",
+                                   "description": "El número del patrón en mis_patrones."}},
+        "obligatorios": ["numero"],
+    },
+    "borrar_anticipacion": {
+        "confirmar":   False,
+        "fn":          _j_borrar_anticipacion,
+        "descripcion": "Borra TODO lo aprendido para anticiparte: el registro entero y todos "
+                       "los patrones, y comprueba que no queda nada. Solo si lo pide él con "
+                       "claridad («borra todo lo que has aprendido de mí», «olvida mis "
+                       "costumbres»). No se puede deshacer. Contesta con lo que diga "
+                       "`comprobado`.",
+        "parametros":  {},
+    },
+
     # ── Servidores MCP (cada alta la aprueba el usuario) ─────────────────────
     "mcp_servidores": {
         "confirmar":   False,
@@ -37337,7 +37820,7 @@ _TRAS_AJENO_SE_PUEDE = frozenset({
     "tareas", "cumpleanos", "donde_estoy", "entrenamiento", "plan_entreno", "finanzas", "estado_pc", "ideas",
     "moodle_entregas", "resumen_del_dia", "leer_briefing", "estado_resumen_diario",
     "turno_de_noche", "errores", "jobs", "contar_revision", "respuesta_notificacion",
-    "mis_reglas", "mis_vigilancias", "mis_recordatorios", "mis_alarmas",
+    "mis_reglas", "mis_vigilancias", "mis_recordatorios", "mis_alarmas", "mis_patrones",
     "casa_dispositivos", "casa_leer", "pc_ventanas", "pc_pantalla",
     "musica_que_suena", "musica_mis_listas", "jellyfin_seguir", "jellyfin_novedades",
     "jellyfin_buscar", "pelis_buscar", "pelis_descargas", "pelis_versiones",
@@ -37560,7 +38043,10 @@ def _jarvis_confirma(herramienta: dict, argumentos: dict) -> bool:
     return c(argumentos or {}) if callable(c) else bool(c)
 
 
-def _jarvis_despachar(nombre: str, argumentos: dict) -> dict:
+def _jarvis_despachar(nombre: str, argumentos: dict, tras_ajeno: bool = False) -> dict:
+    """`tras_ajeno` lo dice quien llama: si este turno ya ha leído texto escrito por otros.
+    Aquí solo sirve para una cosa, que lo hecho así no cuente como un hábito de Mikel
+    (`_anticipa_apuntar`); lo que se puede hacer o no tras leerlo lo decide `_ajeno_bloquea`."""
     herramienta = _JARVIS_HERRAMIENTAS.get(nombre)
     if not herramienta:
         return {"error": f"Herramienta desconocida: {nombre}"}
@@ -37576,7 +38062,9 @@ def _jarvis_despachar(nombre: str, argumentos: dict) -> dict:
         logger.warning("Jarvis: la herramienta %s se llamó sin %s", nombre, ", ".join(faltan))
         return {"error": f"Falta el argumento obligatorio: {', '.join(faltan)}"}
     try:
-        return herramienta["fn"](**limpios)
+        resultado = herramienta["fn"](**limpios)
+        _anticipa_apuntar(nombre, limpios, resultado, tras_ajeno)
+        return resultado
     except HTTPException as e:
         # El detalle de un 502 de Supabase ya viene saneado por _supabase_error.
         logger.warning("Jarvis: la herramienta %s falló (%s)", nombre, e.detail)
@@ -37792,7 +38280,7 @@ def _mcp_servidor_auth(request: Request, esperado: str = "") -> None:
 
 async def _mcp_servidor(request: Request, *, token: str, nombre_servidor: str,
                         herramientas, catalogo, al_confirmar, boca: str, al_usar=None,
-                        sanear=None, al_pedir=None, al_resultado=None):
+                        sanear=None, al_pedir=None, al_resultado=None, hay_ajeno=None):
     """Servidor MCP (Streamable HTTP, JSON-RPC 2.0) de una de las sesiones de Claude
     Code que hablan con Jarvis. Un único endpoint POST: no hace falta streaming
     servidor→cliente, así que se responde siempre JSON directo (nunca SSE).
@@ -37883,7 +38371,8 @@ async def _mcp_servidor(request: Request, *, token: str, nombre_servidor: str,
             # lo que apunte el gasto de lo que haga la herramienta tiene que ir a ESTA boca.
             marca = _boca_actual.set(boca)
             try:
-                return _jarvis_despachar(nombre, argumentos)
+                return _jarvis_despachar(nombre, argumentos,
+                                         tras_ajeno=bool(hay_ajeno and hay_ajeno()))
             finally:
                 _boca_actual.reset(marca)
 
@@ -38091,6 +38580,13 @@ async def mcp_chat(request: Request, turno: str = ""):
             if datos is not None:
                 datos.setdefault("ajeno", set()).add(nombre)
 
+    def _hay_ajeno() -> bool:
+        # Si este turno ya ha leído texto de otros. Un turno que ya no existe cuenta como
+        # que sí, igual que en `_al_pedir`.
+        with _chat_turnos_lock:
+            datos = _chat_turnos.get(turno)
+            return bool(datos.get("ajeno")) if datos is not None else True
+
     def _al_usar(nombre: str) -> None:
         # Lo que se usó va a la respuesta del turno: el dashboard lo enseña debajo del
         # mensaje, igual que con OpenAI.
@@ -38103,7 +38599,7 @@ async def mcp_chat(request: Request, turno: str = ""):
         request, token=JARVIS_MCP_CHAT_TOKEN, nombre_servidor="life-assistant-jarvis-chat",
         herramientas=_mcp_chat_herramientas, catalogo=_mcp_chat_catalogo,
         al_confirmar=_al_confirmar, boca="chat", al_usar=_al_usar, al_pedir=_al_pedir,
-        al_resultado=_al_resultado)
+        al_resultado=_al_resultado, hay_ajeno=_hay_ajeno)
 
 
 def _prompt_chat(body) -> str:
@@ -39025,7 +39521,7 @@ def _jarvis_turno_bruto(body: JarvisIn, destilar_luego: list):
                 # un turno de más con las manos atadas que uno de menos.
                 if c.function.name in _HERRAMIENTAS_AJENAS:
                     ajeno.add(c.function.name)
-                resultado = _jarvis_despachar(c.function.name, argumentos)
+                resultado = _jarvis_despachar(c.function.name, argumentos, tras_ajeno=bool(ajeno))
                 if _ajeno_en_resultado(resultado):
                     ajeno.add(c.function.name)
                 usadas.append(c.function.name)

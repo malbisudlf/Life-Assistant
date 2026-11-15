@@ -153,6 +153,11 @@ SIN_COPIA = frozenset({
     # decisión (2026-10-15): un volcado más es un sitio más donde viven, y Health Auto
     # Export puede reenviar su histórico si hiciera falta. Ver docs/SALUD_FAMILIA.md.
     "salud_familia", "salud_familia_envios",
+    # La anticipación: lo aprendido de tus costumbres. No se copia a propósito, porque
+    # «borra todo lo que has aprendido de mí» tiene que ser verdad: una copia semanal
+    # sería un sitio donde seguiría viviendo después de borrarlo. Y se regenera sola: en
+    # unas semanas de uso vuelve a haber patrones. Ver docs/JARVIS_ANTICIPA.md.
+    "jarvis_eventos", "jarvis_patrones", "jarvis_anticipa_borrados",
 })
 
 VERSION_FORMATO = 1
