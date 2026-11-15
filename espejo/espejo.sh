@@ -48,7 +48,9 @@ decir() { echo "== $*"; }
 cd "$REPO"
 git fetch --quiet origin main "$RAMA"
 MAIN_SHA=$(git rev-parse origin/main)
-RAMA_SHA=$(git rev-parse FETCH_HEAD)
+# No FETCH_HEAD: con dos ramas pedidas apunta a la primera, que es main, y el diff
+# salía vacío (visto en el primer ensayo, 2026-11-15).
+RAMA_SHA=$(git rev-parse "origin/$RAMA")
 git diff "$MAIN_SHA...$RAMA_SHA" > "$TRABAJO/salida/cambio.diff"
 decir "parche $ID: $RAMA (${RAMA_SHA:0:7}) contra main (${MAIN_SHA:0:7})"
 
