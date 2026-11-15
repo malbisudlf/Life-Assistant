@@ -2152,6 +2152,33 @@ el backend `562866c` ya desplegado, `COPILOTO=1` y `TRAFICO_LUGARES` en `backend
 (copia `backend.env.bak-20261112-antes-copiloto`) y la foto exportada. **Sin probar aún
 en una llamada real**: ni el despertar, ni el tono, ni «apunta eso», ni la pantalla.
 
+## El parche 49: el ESL y la administración de drachtio, solo en loopback
+
+Del 2026-11-15, en el `docker-compose.yml` como el 13 y el 33 (no toca código). El vigía
+de seguridad de `caja` llevaba desde octubre cantando dos puertos en todas las interfaces:
+el **8021** (el *event socket* de FreeSWITCH, con el que se originan llamadas) y el **9022**
+(la administración de drachtio). Los dos van con red del host, así que los alcanzaba
+cualquier equipo de la LAN y de la tailnet. La voice-app habla con ambos por `127.0.0.1`
+(`FREESWITCH_HOST`, `DRACHTIO_HOST`): no hacía falta más.
+
+- **drachtio**: `--address 127.0.0.1` en su línea de arranque.
+- **FreeSWITCH**: el `/entrypoint.sh` de la imagen reescribe `listen-ip` a `0.0.0.0` en
+  cada arranque, así que cambiar el XML no sirve. Se le corrige esa línea al propio
+  arranque, con un `sed`, justo antes de ejecutarlo.
+
+**Lo que no funciona, y ya se probó:** montar un `event_socket.conf.xml` propio como
+volumen. El arranque hace `sed -i` sobre ese directorio, `sed -i` renombra un temporal
+encima del fichero y sobre un fichero montado eso da «Device or resource busy»:
+FreeSWITCH entra en bucle de reinicios y el teléfono se queda sin audio.
+
+**La contraseña del ESL es la de fábrica de la imagen**, pública. Con el puerto en
+loopback ya no la alcanza nadie de fuera de `caja`, pero no es un secreto: no la trates
+como tal.
+
+**Comprobado:** `ss -tlnp` da `127.0.0.1` en 8021, 9022 y 3333, y la voice-app reconecta
+(«connected to freeswitch at 127.0.0.1»). Vuelta atrás: `docker-compose.yml.bak-20261115-antes-cierre`
+(sin ninguno de los dos) y `…-antes-esl` (solo drachtio) en `~/.claude-phone/`.
+
 ## Lo que además NO está en el repositorio original
 
 - **El servicio de systemd** `claude-phone-api` (`/etc/systemd/system/`), que levanta el

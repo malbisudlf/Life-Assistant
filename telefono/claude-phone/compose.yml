@@ -19,7 +19,7 @@ services:
       - |
         n=0
         until grep -qF "${EXTERNAL_IP}" /proc/net/fib_trie || [ $$n -ge 60 ]; do n=$$((n+1)); sleep 2; done
-        exec /entrypoint.sh drachtio --contact "sip:${EXTERNAL_IP}:5070;transport=tcp,udp" --contact "sip:127.0.0.1:5070;transport=tcp,udp" --secret ${DRACHTIO_SECRET} --port 9022 --loglevel info
+        exec /entrypoint.sh drachtio --contact "sip:${EXTERNAL_IP}:5070;transport=tcp,udp" --contact "sip:127.0.0.1:5070;transport=tcp,udp" --secret ${DRACHTIO_SECRET} --port 9022 --address 127.0.0.1 --loglevel info
 
   freeswitch:
     image: drachtio/drachtio-freeswitch-mrf:latest
@@ -36,6 +36,9 @@ services:
         n=0
         until grep -qF "${EXTERNAL_IP}" /proc/net/fib_trie || [ $$n -ge 60 ]; do n=$$((n+1)); sleep 2; done
         sed -i -e "s|name=\"rtp-ip\" value=\"[^\"]*\"|name=\"rtp-ip\" value=\"${EXTERNAL_IP}\"|" -e "s|name=\"ext-rtp-ip\" value=\"[^\"]*\"|name=\"ext-rtp-ip\" value=\"${EXTERNAL_IP}\"|" /usr/local/freeswitch/conf/sip_profiles/mrf.xml
+        # Parche 49: el ESL (8021) solo en loopback. El arranque de la imagen lo abre a
+        # todas las interfaces; se le corrige antes de ejecutarlo.
+        sed -i -e '/listen-ip/s/0[.]0[.]0[.]0/127.0.0.1/g' /entrypoint.sh
         exec /entrypoint.sh freeswitch --sip-port 5080 --rtp-range-start 30000 --rtp-range-end 30100
     # RTP ports 30000-30100 avoid conflict with 3CX SBC (uses 20000-20099)
     environment:
