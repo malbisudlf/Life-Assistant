@@ -57,8 +57,8 @@ jobs:
           # fijos, para que dos tiradas sean comparables.
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           # Los mismos modelos que producción salvo que se pidan otros a mano.
-          JARVIS_MODEL: ${{ vars.JARVIS_MODEL || 'gpt-4o-mini' }}
-          JARVIS_MODEL_ACCION: ${{ vars.JARVIS_MODEL_ACCION || 'gpt-5-mini' }}
+          JARVIS_MODEL: ${{ vars.JARVIS_MODEL || 'gpt-6-luna' }}
+          JARVIS_MODEL_ACCION: ${{ vars.JARVIS_MODEL_ACCION || 'gpt-6-luna' }}
           # Por env y no interpolados en el `run`: lo que escribe una persona en un
           # formulario no se pega dentro de un script de shell (la misma regla que en
           # el backend con lo que redacta un modelo).

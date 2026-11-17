@@ -115,13 +115,18 @@ class TestJarvisModelos:
 
 # ── Modo voz ──────────────────────────────────────────────────────────────────
 
+def _techo_enviado(peticion: dict) -> int:
+    """El techo de la respuesta, se llame como se llame en la familia del modelo."""
+    return peticion.get("max_tokens") or peticion["max_completion_tokens"]
+
+
 class TestJarvisVoz:
     def test_por_voz_cambian_el_prompt_y_el_techo(self, client, auth_headers, monkeypatch, mock_requests):
         cliente = _con_modelo(monkeypatch, [_mensaje("Hace 21 grados.")])
         client.post("/jarvis", json={"mensaje": "tiempo", "voz": True}, headers=auth_headers)
         sistema = cliente.recibido[0]["messages"][0]["content"]
         assert "CONVERSACIÓN HABLADA" in sistema
-        assert cliente.recibido[0]["max_tokens"] == main.JARVIS_MAX_TOKENS_VOZ
+        assert _techo_enviado(cliente.recibido[0]) == main.JARVIS_MAX_TOKENS_VOZ
 
     def test_por_escrito_no_viajan_esas_reglas(self, client, auth_headers, monkeypatch, mock_requests):
         """Se pagan por token en cada turno: no viajan cuando no se va a escuchar nada."""
@@ -129,7 +134,7 @@ class TestJarvisVoz:
         client.post("/jarvis", json={"mensaje": "tiempo"}, headers=auth_headers)
         sistema = cliente.recibido[0]["messages"][0]["content"]
         assert "CONVERSACIÓN HABLADA" not in sistema
-        assert cliente.recibido[0]["max_tokens"] == main.JARVIS_MAX_TOKENS
+        assert _techo_enviado(cliente.recibido[0]) == main.JARVIS_MAX_TOKENS
 
 
 # ── Conciencia de las propias capacidades ─────────────────────────────────────
@@ -156,6 +161,14 @@ class TestParametrosPorFamilia:
         assert main.JARVIS_RESERVA_RAZONAMIENTO > 0
         p = main._parametros_modelo("gpt-5-mini", main.JARVIS_MAX_TOKENS)
         assert p["max_completion_tokens"] > main.JARVIS_MAX_TOKENS
+
+    def test_la_familia_gpt6_no_piensa_y_no_lleva_minimal(self):
+        """gpt-6 rechaza `reasoning_effort: minimal` con un 400 (sus valores son
+        none/low/medium/high/xhigh), y `max_tokens` igual que los razonadores."""
+        for modelo in ("gpt-6-luna", "gpt-6-sol", "GPT-6.1-terra"):
+            p = main._parametros_modelo(modelo, 400)
+            assert p == {"max_completion_tokens": 400, "reasoning_effort": "none",
+                         "temperature": 0.3}, modelo
 
     def test_el_resto_sigue_igual(self):
         for modelo in ("gpt-4o-mini", "gpt-4o", "gemini-2.5-flash-lite"):

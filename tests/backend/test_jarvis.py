@@ -265,7 +265,10 @@ class TestJarvisNuncaSeQuedaMudo:
         assert r.json()["respuesta"].startswith("Perdona")
         # El reintento va sin herramientas (solo hay que redactar) y con más sitio.
         assert "tools" not in cliente.recibido[-1]
-        assert cliente.recibido[-1]["max_tokens"] > main.JARVIS_MAX_TOKENS
+        # El nombre del techo depende de la familia del modelo (ver _parametros_modelo).
+        enviado = cliente.recibido[-1]
+        techo = enviado.get("max_tokens") or enviado["max_completion_tokens"]
+        assert techo > main.JARVIS_MAX_TOKENS
 
     def test_tampoco_sale_vacio_tras_una_herramienta(self, client, auth_headers, monkeypatch):
         _herramienta(monkeypatch, "clima", lambda: {"ahora": 21})

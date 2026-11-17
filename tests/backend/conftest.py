@@ -90,7 +90,7 @@ os.environ["ANTICIPA_SUGIERE"] = "0"
 # vuelta con herramienta consumiría dos respuestas del guion del modelo simulado y todos
 # hablarían del enrutado en vez de de lo que prueban. El reparto tiene sus propios tests,
 # que lo encienden a mano (TestJarvisModelos).
-os.environ.setdefault("JARVIS_MODEL_ACCION", "gpt-4o-mini")
+os.environ.setdefault("JARVIS_MODEL_ACCION", "gpt-6-luna")
 # Las órdenes al PC por `caja`: sin fijarlo aquí, un backend/.env local con PC_DIR haría
 # que los tests de los flags de HA escribieran pedidos en un directorio real. Los tests de
 # caja lo apuntan a un tmp_path con monkeypatch (test_pc_caja.py).

@@ -134,7 +134,7 @@ backend/main.py (FastAPI + Uvicorn, en `caja`, UN SOLO FICHERO ~23.500 líneas)
     ├── Open-Meteo ── clima (gratis, sin API key)
     ├── Indexa Capital ── cartera de inversión (solo lectura, copia en memoria)
     ├── Moodle (Alud) ── entregas pendientes → calendario de clases y avisos
-    ├── OpenAI ── Whisper (transcripción), GPT-4o-mini (extracción de ideas
+    ├── OpenAI ── Whisper (transcripción), GPT-6 Luna (extracción de ideas
     │              y cerebro de Jarvis, con herramientas sobre el resto de endpoints)
     ├── Supabase REST ── ideas, clothing, jobs, pc_agents, training_*, health_metrics,
     │                    oauth_tokens, login_attempts, app_logs, presence, brief_envios

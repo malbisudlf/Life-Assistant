@@ -608,14 +608,18 @@ AUDIO_WINDOW_SECONDS = int(os.getenv("AUDIO_WINDOW_SECONDS", "300"))
 # relanza con el grande, que es quien la elige de verdad y encadena los pasos que hagan
 # falta. El cierre vuelve al pequeño. Así la conversación normal no paga al grande ni una
 # sola llamada, y las que sí actúan lo pagan solo donde se nota.
-JARVIS_MODEL         = os.getenv("JARVIS_MODEL", "gpt-4o-mini")
+#
+# Desde el 2026-11-17 los dos son gpt-6-luna: $0.10 entrada / $0.50 salida por millón de
+# tokens, más barato que gpt-4o-mini ($0.15/$0.60) y que gpt-5-mini ($0.25/$2.00), y de
+# una generación posterior a ambos. Con los dos iguales el reparto queda apagado: ya no
+# hay un grande caro que ahorrarse. Si una tirada de evals dice que elige peor entre
+# muchas herramientas, se sube solo JARVIS_MODEL_ACCION por entorno.
+JARVIS_MODEL         = os.getenv("JARVIS_MODEL", "gpt-6-luna")
 # El que decide y encadena. Ponerlo al mismo valor que JARVIS_MODEL desactiva el reparto
 # y deja el comportamiento de antes (todo con el pequeño), sin tocar código.
-# gpt-5-mini y no gpt-4o: cuesta la DÉCIMA parte ($0.25 contra $2.50 por millón de tokens
-# de entrada, agosto de 2026) y es dos generaciones más nuevo eligiendo herramientas, que
-# es justo para lo que está aquí. Ojo: es de la familia de razonamiento y no admite los
-# mismos parámetros — ver _parametros_modelo().
-JARVIS_MODEL_ACCION  = os.getenv("JARVIS_MODEL_ACCION", "gpt-5-mini")
+# Ojo: la familia gpt-6 no admite los mismos parámetros que gpt-4o — ver
+# _parametros_modelo().
+JARVIS_MODEL_ACCION  = os.getenv("JARVIS_MODEL_ACCION", "gpt-6-luna")
 # Vueltas máximas del bucle herramienta→modelo. Es un cortacircuitos de gasto, no un
 # límite de capacidad: cada vuelta es una llamada de pago y un modelo que se atasca
 # pidiendo la misma herramienta gastaría sin avanzar. Subió de 3 a 6 al darle memoria y
@@ -811,6 +815,7 @@ _TARIFAS_POR_DEFECTO = {
     "gpt-4.1-mini": [0.37, 0.09, 1.47],
     "gpt-5-mini":   [0.23, 0.02, 1.84],
     "gpt-5":        [1.15, 0.11, 9.20],
+    "gpt-6-luna":   [0.09, 0.01, 0.46],
     "whisper-1":    [0.0,  0.0,  0.0],
 }
 
@@ -4517,7 +4522,7 @@ def sugerencia_evento(idea_data: dict) -> dict | None:
 
 
 def extract_idea_from_text(text: str) -> dict:
-    """Extrae key/tag/full_text de un texto libre con GPT-4o mini.
+    """Extrae key/tag/full_text de un texto libre con el modelo pequeño de Jarvis.
 
     También intenta detectar si la nota es en realidad algo con fecha ("el martes
     tengo que llamar al dentista"). Se le da la fecha de hoy porque si no, no puede
@@ -4525,7 +4530,7 @@ def extract_idea_from_text(text: str) -> dict:
     """
     hoy = datetime.now(LOCAL_TZ)
     completion = get_openai_client().chat.completions.create(
-        model="gpt-4o-mini",
+        model=JARVIS_MODEL,
         messages=[
             {
                 "role": "system",
@@ -4544,10 +4549,9 @@ def extract_idea_from_text(text: str) -> dict:
             },
             {"role": "user", "content": text},
         ],
-        max_tokens=350,
-        temperature=0.3,
+        **_parametros_modelo(JARVIS_MODEL, 350),
     )
-    _apuntar_gasto(_boca_actual.get(), "gpt-4o-mini", getattr(completion, "usage", None))
+    _apuntar_gasto(_boca_actual.get(), JARVIS_MODEL, getattr(completion, "usage", None))
     raw = completion.choices[0].message.content.strip()
     raw = raw.replace("```json", "").replace("```", "").strip()
     try:
@@ -39108,9 +39112,20 @@ def _suena_a_negativa(texto) -> bool:
 # de la respuesta a secas es pedirles que contesten con lo que sobre de pensar, que
 # algunos turnos es nada — de ahí JARVIS_RESERVA_RAZONAMIENTO.
 _RE_RAZONADOR = re.compile(r"^(gpt-5|o\d)", re.I)
+# La familia gpt-6 tampoco admite `max_tokens`, y además RECHAZA `minimal` (sus valores
+# son none/low/medium/high/xhigh: comprobado contra la API el 2026-11-17). Con `none` no
+# piensa nada —0 tokens de razonamiento—, así que no necesita la reserva, y entonces sí
+# acepta `temperature`. Y `none` no es una elección de ahorro, es la única que vale:
+# con herramientas en /v1/chat/completions cualquier otro esfuerzo da un 400 («Function
+# tools with reasoning_effort are not supported… use /v1/responses»). Pensar más pide
+# migrar el bucle a la Responses API.
+_RE_GPT6 = re.compile(r"^gpt-6", re.I)
 
 
 def _parametros_modelo(modelo: str, techo: int) -> dict:
+    if _RE_GPT6.match(str(modelo or "")):
+        return {"max_completion_tokens": techo, "reasoning_effort": "none",
+                "temperature": 0.3}
     if _RE_RAZONADOR.match(str(modelo or "")):
         return {"max_completion_tokens": techo + JARVIS_RESERVA_RAZONAMIENTO,
                 "reasoning_effort": "minimal"}
