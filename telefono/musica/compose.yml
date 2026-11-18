@@ -17,6 +17,9 @@ services:
       MUSICA_GANANCIA: "70"
     volumes:
       - ${HOME}/musica/datos:/datos
+      # DNS por TCP (`use-vc`): el 2026-11-18 caja perdía la mitad de las respuestas DNS por
+      # UDP, y librespot se quedaba «conectando» en Spotify. Ver resolv.conf.
+      - ./resolv.conf:/etc/resolv.conf:ro
     read_only: true
     tmpfs:
       - /tmp

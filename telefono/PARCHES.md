@@ -2186,8 +2186,12 @@ Del 2026-11-18, `telefono/parche-50.diff` (voice-app) más un servicio nuevo,
 vuelta atrás: imagen `antes-p50` y los `*.bak-20261118-antes-p50`; RUNBOOK anterior en
 `CLAUDE.md.bak-20261118-antes-p50`), con el backend `531e0dd` desplegado. **Sin probar aún en
 una llamada real.** El servicio `musica` corre en caja desde ese día (imagen construida en
-jacobo, `librespot: vivo`) y `MUSICA_URL` está puesta (`.env.bak-20261118-antes-p50`); **falta el
-primer emparejado** (paso 3). Hasta entonces la llamada mezcla silencio. Si la escucha pasiva
+jacobo, `librespot: vivo`) y `MUSICA_URL` está puesta (`.env.bak-20261118-antes-p50`). Emparejado
+el mismo día, y **comprobado en una llamada que FreeSWITCH acepta la mezcla** (`MUSICA: suena`). Dos
+tropiezos de ese día, ya resueltos en el repo: la **0.6** de librespot ya no saca audio de Spotify
+(«Track should be available, but no alternatives found»; va la **0.8.0**, con Rust 1.85), y el DNS
+de caja por UDP perdía la mitad de las respuestas, con lo que Spotify enseñaba «Jarvis» conectando
+para siempre (el contenedor resuelve por TCP: `resolv.conf`, montado). Si la escucha pasiva
 se portara mal, quitar `MUSICA_URL` y `docker compose up -d voice-app` la deja como antes.
 
 **La música.** Mikel: «quiero tener a Jarvis en escucha pasiva mientras escucho música, que
@@ -2255,6 +2259,19 @@ da nada. Lo que lo arregla, en caliente y sin cortar nada:
 ```bash
 docker exec freeswitch fs_cli -H 127.0.0.1 -p '<la del ESL, la de fábrica>' -x "sofia profile drachtio_mrf start"
 ```
+
+**Desde ese día lo hace solo `telefono/vigilante-sip.sh`**, cada minuto desde el crontab de Mikel
+en caja (`~/telefono-vigilante/`, log en `vigilante.log`): si el perfil no está RUNNING, lo
+arranca, espera a verlo vivo (puede tardar un minuto) y avisa al móvil por `avisar.sh` de los
+vigías. **Nunca un segundo `start` encima de uno que arranca**: probado ese día, deja el agente
+SIP vivo en el 5080 pero fuera de la lista («Invalid Profile!»), y de ahí solo saca reiniciar
+FreeSWITCH. Por eso, si no arranca con la IP presente y sin llamadas, el vigilante reinicia el
+contenedor (unos 25 s; la voice-app reconecta sola). Probado tirando el perfil a mano dos veces.
+
+**Lo que queda debajo, sin arreglar:** la red de caja, a ratos, pierde paquetes UDP y algo de
+TCP (el 2026-11-18, DNS por UDP 1 de 10 frente a 10 de 10 del PC; poco después, todo bien). Con
+dos interfaces en la misma subred (el adaptador USB y el Wi-Fi), es candidato el ARP de las dos.
+Mirarlo pide `sudo` (tcpdump, `arp_ignore`/`arp_announce`, o apagar el Wi-Fi con cable puesto).
 
 ## Lo que además NO está en el repositorio original
 

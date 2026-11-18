@@ -5,8 +5,10 @@
 # (caja se calienta, ver «caja sin carga pesada»), y se lleva hecha:
 #   jacobo$ docker build -t musica:local .
 #   jacobo$ docker save musica:local | ssh caja docker load
-FROM rust:1.83-slim-bookworm AS librespot
-ARG LIBRESPOT_VERSION=0.6.0
+# 0.8.0, no la 0.6: con la 0.6 Spotify ya no da el audio («Track should be available, but no
+# alternatives found» en cada canción, 2026-11-18). La 0.8 pide Rust 1.85.
+FROM rust:1.85-slim-bookworm AS librespot
+ARG LIBRESPOT_VERSION=0.8.0
 RUN apt-get update \
  && apt-get install -y --no-install-recommends pkg-config libasound2-dev libssl-dev \
  && rm -rf /var/lib/apt/lists/*
