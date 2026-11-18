@@ -2209,7 +2209,17 @@ ser Soloist**, el cliente Connect oficial de Spotify para Linux (agosto de 2026)
 - **El ffmpeg 7 de Debian 13 necesita `-probesize 32 -analyzeduration 0`**: sin ellos se queda
   analizando la tubería y no saca ni un byte.
 
-La imagen de librespot queda en caja como `musica:librespot-0.8` (`MUSICA_MOTOR=librespot`). Si la escucha pasiva
+La imagen de librespot queda en caja como `musica:librespot-0.8` (`MUSICA_MOTOR=librespot`).
+
+**La calidad, el mismo día.** Sonaba «peor que de normal» porque la llamada iba en **PCMU a 8
+kHz**: el SBC del 3CX ofrece G.729, G.722, PCMU, PCMA y Opus, pero FreeSWITCH negocia con su
+orden (`greedy`), que traía PCMU delante. Ahora arranca con `--codec-list OPUS,G722,PCMU,PCMA`
+(en `compose.yml`, copia en `~/.claude-phone/docker-compose.yml.bak-20261118-antes-codecs`), y
+la primera llamada salió en **Opus a 48 kHz**. Va bien también al oído, que ya pedía 16 kHz. PCMU y
+PCMA siguen detrás para lo que no sepa otra cosa (la O2). Con eso, el MP3 de la música pasó de
+22 kHz y 64 kbps a 44,1 kHz y 128 kbps (`MUSICA_MP3_HZ`, `MUSICA_KBPS`). Lo que no depende de
+caja: el tramo del iPhone a la centralita (la app de 3CX) y el manos libres del coche, que por
+Bluetooth suele ir en banda estrecha. Si la escucha pasiva
 se portara mal, quitar `MUSICA_URL` y `docker compose up -d voice-app` la deja como antes.
 
 **La música.** Mikel: «quiero tener a Jarvis en escucha pasiva mientras escucho música, que

@@ -29,8 +29,9 @@ iPhone: los dos no suenan a la vez. Así que la música va DENTRO de la llamada:
 - **Solo en loopback** (`MUSICA_ESCUCHA`, 127.0.0.1): lo pide FreeSWITCH desde la misma
   máquina. No lleva llave porque no sale de caja.
 
-Lo que se oye es audio de teléfono: la llamada va en banda estrecha, y en el coche por
-Bluetooth también. Es la radio de una centralita, no un equipo de música.
+La llamada va en Opus a 48 kHz desde el 2026-11-18 (FreeSWITCH con `--codec-list
+OPUS,G722,PCMU,PCMA`); antes iba en PCMU y sonaba a teléfono. En el coche, el manos libres
+por Bluetooth puede seguir recortándolo.
 """
 import array
 import base64
@@ -56,7 +57,10 @@ PUERTO   = int(os.getenv("MUSICA_PUERTO", "8095"))
 ESCUCHA  = os.getenv("MUSICA_ESCUCHA", "127.0.0.1")
 NOMBRE   = os.getenv("MUSICA_NOMBRE", "Jarvis")
 DATOS    = os.getenv("MUSICA_DATOS", "/datos")
-KBPS     = os.getenv("MUSICA_KBPS", "64")
+# Desde el 2026-11-18 la llamada va en Opus a 48 kHz (antes, PCMU a 8): el MP3 ya no puede
+# ir a 22 kHz y 64 kbps, que cortaba por encima de ~10 kHz.
+KBPS     = os.getenv("MUSICA_KBPS", "128")
+MP3_HZ   = os.getenv("MUSICA_MP3_HZ", "44100")
 # 0-100: cuánto suena por debajo de la voz de Jarvis. El volumen fino, en la app de Spotify.
 GANANCIA = max(0, min(100, int(os.getenv("MUSICA_GANANCIA", "70")))) / 100
 MOTOR    = os.getenv("MUSICA_MOTOR", "soloist")
@@ -417,7 +421,7 @@ def orden_codificador() -> list:
     de una tubería en directo no saca nada (probado el 2026-11-18: 0 bytes en 3 s)."""
     return ["ffmpeg", "-hide_banner", "-loglevel", "error", "-probesize", "32",
             "-analyzeduration", "0", "-f", "s16le", "-ar", str(FRECUENCIA), "-ac", str(CANALES),
-            "-i", "pipe:0", "-ac", "1", "-ar", "22050", "-b:a", f"{KBPS}k",
+            "-i", "pipe:0", "-ac", "1", "-ar", MP3_HZ, "-b:a", f"{KBPS}k",
             "-f", "mp3", "-flush_packets", "1", "pipe:1"]
 
 

@@ -39,7 +39,9 @@ services:
         # Parche 49: el ESL (8021) solo en loopback. El arranque de la imagen lo abre a
         # todas las interfaces; se le corrige antes de ejecutarlo.
         sed -i -e '/listen-ip/s/0[.]0[.]0[.]0/127.0.0.1/g' /entrypoint.sh
-        exec /entrypoint.sh freeswitch --sip-port 5080 --rtp-range-start 30000 --rtp-range-end 30100
+        # Códecs de banda ancha primero (2026-11-18): el SBC del 3CX ofrece Opus y G.722, y con
+        # PCMU delante FreeSWITCH elegía siempre el de 8 kHz. PCMU y PCMA quedan detrás para la O2.
+        exec /entrypoint.sh freeswitch --sip-port 5080 --rtp-range-start 30000 --rtp-range-end 30100 --codec-list OPUS,G722,PCMU,PCMA
     # RTP ports 30000-30100 avoid conflict with 3CX SBC (uses 20000-20099)
     environment:
       - EXTERNAL_IP=${EXTERNAL_IP}
