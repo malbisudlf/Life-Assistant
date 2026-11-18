@@ -163,7 +163,7 @@ test('20: lee la frase del BACKEND y pregunta', conToken(async function () {
   const r = await preguntarSiLoPide('🗣️ VOICE_RESPONSE: Te lo leo.\n✅ CONFIRMAR: ' + ID, {
     endpoint: ep, session: sesionFalsa([], []), ttsService: ttsFalso(), voiceId: 'v',
     fetchImpl: backendFalso(pedidos) });
-  assert.deepStrictEqual(r.pendiente, { id: ID, frase: FRASE });
+  assert.deepStrictEqual(r.pendiente, { id: ID, frase: FRASE, pregunta: '' });
   assert.deepStrictEqual(interrumpibles(ep), ['play tts:' + FRASE + ' ¿Lo hago?']);
   assert.strictEqual(pedidos[0].auth, 'Bearer confirmar');
 }));
@@ -174,7 +174,7 @@ test('44: si el backend manda la pregunta corta, se dice esa y nada más', conTo
     endpoint: ep, session: sesionFalsa([], []), ttsService: ttsFalso(), voiceId: 'v',
     fetchImpl: backendFalso([], { ver: { ok: true, frase: FRASE, pregunta: '¿Abro la puerta del garaje?' } }) });
   // La frase entera se guarda: es la que se le cuenta a Claude en el turno siguiente.
-  assert.deepStrictEqual(r.pendiente, { id: ID, frase: FRASE });
+  assert.deepStrictEqual(r.pendiente, { id: ID, frase: FRASE, pregunta: '¿Abro la puerta del garaje?' });
   assert.deepStrictEqual(interrumpibles(ep), ['play tts:¿Abro la puerta del garaje?']);
 }));
 

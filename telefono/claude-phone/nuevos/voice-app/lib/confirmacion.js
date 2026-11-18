@@ -30,6 +30,13 @@
  * repetir pasa de «Perdone, señor, no le he oído bien. ¿Lo hago? Diga sí o no.» a
  * «Perdone, señor, ¿sí o no?».
  *
+ * Parche 50 (2026-11-18): que sea listo. Mikel: «que no solo le valga un sí, sino también un
+ * sí hazlo, un sí dale…». La misma lógica que `_respuesta_si_no` del backend y
+ * `respuestaHablada` del dashboard (las tres a la vez si se cambia): frases hechas («por
+ * supuesto», «ni de coña»), imperativos con pronombre («llámala», «bórralas», «mándaselo»),
+ * y las palabras de la propia pregunta como relleno: a «¿Llamo a Saioa?», «sí, llama a
+ * Saioa» es un sí. Lo que matiza («pero», «mejor», «espera») sigue yendo a Claude.
+ *
  * Variables: LECTURA_URL (el backend, como la lectura), CONFIRMAR_TOKEN y
  * CONFIRMAR_ESPERA_MS.
  */
@@ -55,55 +62,96 @@ const NO = new Set([
 
 // Parche 35: palabra a palabra. Las de sí y las de no deciden; el relleno, solo, no dice nada
 // («perfecto» o «anda» sueltos siguen sin ser un sí), y mezclar sí y no es «no lo sé».
-const PALABRAS_SI = new Set([
-  'si', 'sip', 'vale', 'venga', 'va', 'dale', 'adelante', 'claro', 'hazlo', 'confirmo',
-  'confirmado', 'ok', 'okey', 'oka', 'procede', 'tira', 'mandalo', 'mandaselo', 'envialo',
-  'enviaselo', 'crealo', 'apuntalo', 'ponlo', 'pidelo', 'reservalo', 'programalo', 'guardalo'
-]);
-const PALABRAS_NO = new Set([
-  'no', 'dejalo', 'cancela', 'cancelalo', 'olvidalo', 'anula', 'anulalo', 'quita', 'para'
-]);
-const RELLENO = new Set([
+const PALABRAS_SI = new Set((
+  'si sii sip sisi vale venga va dale adelante claro hazlo confirmo confirmado ok okey oka ' +
+  'okay okis procede tira afirmativo obvio obviamente vamos yes llama borra abre cierra ' +
+  'enciende apaga pon manda envia crea apunta reserva programa guarda pide lanza'
+).split(' '));
+const PALABRAS_NO = new Set((
+  'no nop dejalo deja cancela cancelalo cancelala anula anulalo olvidalo olvidate quita para ' +
+  'negativo'
+).split(' '));
+const RELLENO = new Set((
+  'anda ando tio tia hombre joder hostia ostia cono ya pues eh ah oye mira bueno perfecto que ' +
+  'senor ahora mismo todo toda todos todas eso esto lo la los las le les a al el ella ellas ' +
+  'ellos tambien rapido cuando puedas porfa gracias genial muy bien y e con de'
+).split(' '));
+// El de antes del parche 50, para `pareceSi`: con artículos y preposiciones de relleno,
+// «Sí, a las nueve» parecería un sí mal oído, y es otra cosa.
+const RELLENO_CORTO = new Set([
   'anda', 'ando', 'tio', 'tia', 'hombre', 'joder', 'hostia', 'ostia', 'cono', 'ya', 'pues',
   'eh', 'ah', 'oye', 'mira', 'bueno', 'perfecto', 'que', 'senor', 'ahora', 'mismo'
 ]);
 // Lo que convierte un sí en otra cosa: esto nunca se vuelve a preguntar, va a Claude.
-const MATIZA = new Set(['pero', 'mejor', 'espera', 'cambia', 'aunque', 'antes', 'despues', 'nunca', 'nada']);
+const MATIZA = new Set(['pero', 'mejor', 'espera', 'cambia', 'aunque', 'antes', 'despues', 'nunca',
+  'nada', 'luego', 'otro', 'otra']);
+// Parche 50: frases hechas que se reducen a una palabra antes de mirar palabra a palabra.
+const FRASES_HECHAS = [
+  ['por supuesto', 'claro'], ['sin duda', 'claro'], ['claro que si', 'si'], ['como no', 'claro'],
+  ['de acuerdo', 'vale'], ['a tope', 'vale'], ['venga va', 'venga'], ['dale cana', 'dale'],
+  ['adelante con ello', 'adelante'], ['manos a la obra', 'vale'], ['ni de cona', 'no'],
+  ['ni hablar', 'no'], ['para nada', 'no'], ['mejor no', 'no'], ['ahora no', 'no'],
+  ['todavia no', 'no'], ['aun no', 'no'], ['no lo hagas', 'no'], ['no hagas nada', 'no'],
+  ['dejalo estar', 'dejalo'], ['que va', 'no']
+].map(function (par) { return [new RegExp('\\b' + par[0] + '\\b', 'g'), par[1]]; });
+// Un imperativo con su pronombre («llámala», «bórralas», «mándaselo»), de verbos conocidos:
+// «pastilla» o «regalo» acaban igual y no son un sí.
+const PRONOMBRE = '[ae]?(?:me|te|se)?(?:lo|la|los|las|le|les)$';
+const IMPERATIVO_SI = new RegExp('^(?:llam|borr|quit|abr|cierr|enciend|apag|pon|mand|envi|cre|apunt' +
+  '|reserv|program|guard|pid|lanz|met|anad|agreg|compr|descarg|hazl?)' + PRONOMBRE);
+const IMPERATIVO_NO = new RegExp('^(?:cancel|anul|olvid|dej|par|qued)' + PRONOMBRE);
+
+function esSi(p) { return PALABRAS_SI.has(p) || IMPERATIVO_SI.test(p); }
+function esNo(p) { return PALABRAS_NO.has(p) || IMPERATIVO_NO.test(p); }
 
 // Lo que se espera un sí o un no. Los 8 s de seguir hablando en el modo coche se acababan
 // con la respuesta a medias y se dormía sin oírla (2026-11-05).
 const ESPERA_RESPUESTA_MS = 20000;
 
 function normalizar(texto) {
-  return String(texto || '')
+  let t = String(texto || '')
     .toLowerCase()
     .normalize('NFD').replace(/\p{Diacritic}/gu, '')
-    .replace(/[.,;:!?¡¿"«»]/g, ' ')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
     .replace(/\b(por favor|porfa|porfi|gracias|jarvis)\b/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+  for (const [frase, una] of FRASES_HECHAS) t = t.replace(frase, una);
+  return t;
 }
 
-/** 'si', 'no' o null. Null es «no lo sé», y entonces no se confirma nada. */
-function siONo(texto) {
+/**
+ * 'si', 'no' o null. Null es «no lo sé», y entonces no se confirma nada. `contexto` es lo
+ * que se preguntó (parche 50): sus palabras cuentan como relleno.
+ */
+function siONo(texto, contexto) {
   const t = normalizar(texto);
   if (NO.has(t)) return 'no';
   if (SI.has(t)) return 'si';
   const palabras = t ? t.split(' ') : [];
-  const conocida = function (p) { return PALABRAS_SI.has(p) || PALABRAS_NO.has(p) || RELLENO.has(p); };
-  if (!palabras.every(conocida)) return null;
-  const si = palabras.some(function (p) { return PALABRAS_SI.has(p); });
-  const no = palabras.some(function (p) { return PALABRAS_NO.has(p); });
+  if (!palabras.length || palabras.length > 12) return null;
+  const dePregunta = new Set(normalizar(contexto).split(' ').filter(Boolean));
+  let si = false;
+  let no = false;
+  for (const p of palabras) {
+    if (MATIZA.has(p)) return null;
+    if (esNo(p)) no = true;
+    else if (esSi(p)) si = true;
+    else if (!RELLENO.has(p) && !dePregunta.has(p)) return null;
+  }
   if (si === no) return null;
   return si ? 'si' : 'no';
 }
 
 /** Casi todo es un sí y nada lo matiza: una palabra mal oída, no otra idea. */
-function pareceSi(texto) {
+function pareceSi(texto, contexto) {
   const palabras = normalizar(texto).split(' ').filter(Boolean);
-  if (!palabras.some(function (p) { return PALABRAS_SI.has(p); })) return false;
-  if (palabras.some(function (p) { return PALABRAS_NO.has(p) || MATIZA.has(p); })) return false;
-  const buenas = palabras.filter(function (p) { return PALABRAS_SI.has(p) || RELLENO.has(p); }).length;
+  const dePregunta = new Set(normalizar(contexto).split(' ').filter(Boolean));
+  if (!palabras.some(esSi)) return false;
+  if (palabras.some(function (p) { return esNo(p) || MATIZA.has(p); })) return false;
+  const buenas = palabras.filter(function (p) {
+    return esSi(p) || RELLENO_CORTO.has(p) || dePregunta.has(p);
+  }).length;
   return buenas / palabras.length >= 0.6;
 }
 
@@ -170,7 +218,8 @@ async function preguntarSiLoPide(respuesta, c) {
   // vez de la frase del botón entera más «¿Lo hago? Di sí o no.». Con un backend anterior,
   // que no manda `pregunta`, la frase de siempre sin la coletilla.
   const interrumpio = await decir(c, datos.pregunta || (datos.frase + ' ¿Lo hago?'));
-  return { pendiente: { id: id, frase: datos.frase }, interrumpio: interrumpio };
+  return { pendiente: { id: id, frase: datos.frase, pregunta: datos.pregunta || '' },
+           interrumpio: interrumpio };
 }
 
 /**
@@ -180,12 +229,14 @@ async function preguntarSiLoPide(respuesta, c) {
  */
 async function resolverConfirmacion(pendiente, transcript, c) {
   const log = c.log || function () {};
-  const respuesta = siONo(transcript);
-  if (!respuesta && !pendiente.repetida && pareceSi(transcript)) {
+  const contexto = (pendiente.pregunta || '') + ' ' + (pendiente.frase || '');
+  const respuesta = siONo(transcript, contexto);
+  if (!respuesta && !pendiente.repetida && pareceSi(transcript, contexto)) {
     log('CONFIRMAR: ' + pendiente.id + ' suena a sí pero no está claro, lo pregunto otra vez');
     const cortada = await decir(c, 'Perdone, señor, ¿sí o no?');
     return { resuelta: true, interrumpio: cortada, aviso: '',
-             pendiente: { id: pendiente.id, frase: pendiente.frase, repetida: true } };
+             pendiente: { id: pendiente.id, frase: pendiente.frase, pregunta: pendiente.pregunta,
+                          repetida: true } };
   }
   if (!respuesta) {
     log('CONFIRMAR: ' + pendiente.id + ' sin un sí o un no claro, sigue pendiente');

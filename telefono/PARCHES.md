@@ -2182,8 +2182,13 @@ como tal.
 ## El parche 50: música en la escucha pasiva, y el sí listo
 
 Del 2026-11-18, `telefono/parche-50.diff` (voice-app) más un servicio nuevo,
-`telefono/musica/`. **Escrito y probado en una copia (`/tmp/p50` en caja, 246 de 246); SIN
-APLICAR**: ni la voice-app, ni el servicio, ni la imagen están en producción.
+`telefono/musica/`. **La voice-app, aplicada el 2026-11-18** (246 de 246 sobre el árbol real;
+vuelta atrás: imagen `antes-p50` y los `*.bak-20261118-antes-p50`; RUNBOOK anterior en
+`CLAUDE.md.bak-20261118-antes-p50`), con el backend `531e0dd` desplegado. **Sin probar aún en
+una llamada real.** El servicio `musica` corre en caja desde ese día (imagen construida en
+jacobo, `librespot: vivo`) y `MUSICA_URL` está puesta (`.env.bak-20261118-antes-p50`); **falta el
+primer emparejado** (paso 3). Hasta entonces la llamada mezcla silencio. Si la escucha pasiva
+se portara mal, quitar `MUSICA_URL` y `docker compose up -d voice-app` la deja como antes.
 
 **La música.** Mikel: «quiero tener a Jarvis en escucha pasiva mientras escucho música, que
 puedo controlar desde el móvil o el coche, y que en cualquier momento diga "Jarvis…" y me
@@ -2234,6 +2239,22 @@ artículos, «Sí, a las nueve» parecería un sí mal oído. La pregunta del ba
    RUNBOOK a `~/telefono-jarvis/CLAUDE.md`.
 
 Sin `MUSICA_URL` la voice-app es la de siempre: el parche se puede aplicar antes que el servicio.
+
+## Avería del 2026-11-18: FreeSWITCH sin perfil SIP, y nadie se enteró
+
+De las 15:19 a las 16:13 (hora de Madrid) **todas las llamadas fallaron con 503**, las de Mikel
+y las de Jarvis. La red de `caja` va por un adaptador Ethernet USB (`enx…`, que ya iba por el
+índice 42: se cae y vuelve). Al caerse, `192.168.1.x` desapareció un momento; FreeSWITCH
+reinició su perfil `drachtio_mrf`, no pudo enlazar el 5080 («Error Creating SIP UA… ATTEMPT 3») y
+**se rindió sin volver a intentarlo**. El contenedor seguía `Up`, drachtio recibía el INVITE,
+y el `Connection refused` al 5080 salía como 503. Ni Uptime Kuma ni los vigías lo miran.
+
+Lo que lo delata: `fs_cli -x "sofia status"` da `0 profiles`, y `ss -tulnp | grep 5080` no
+da nada. Lo que lo arregla, en caliente y sin cortar nada:
+
+```bash
+docker exec freeswitch fs_cli -H 127.0.0.1 -p '<la del ESL, la de fábrica>' -x "sofia profile drachtio_mrf start"
+```
 
 ## Lo que además NO está en el repositorio original
 
