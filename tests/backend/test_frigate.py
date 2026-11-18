@@ -230,12 +230,12 @@ def test_otra_camara_u_otra_cosa_no_dispara(cuando):
     assert main._frigate_reglas_pasada([_regla()]) == 0
 
 
-def test_confianza_baja_espera_a_la_siguiente_pasada(cuando):
-    respuestas = iter([FakeResponse([_ev("c1", camara="garaje", etiqueta="car", puntos=0.5)]),
-                       FakeResponse([_ev("c1", camara="garaje", etiqueta="car", puntos=0.8)])])
-    cuando.add("GET", "/api/events", lambda url, **k: next(respuestas))
-    assert main._frigate_reglas_pasada([_regla()]) == 0
-    assert main._frigate_reglas_pasada([_regla()]) == 1
+def test_la_regla_se_fia_del_umbral_de_frigate(cuando):
+    # Un evento que Frigate ya dio por bueno (con el umbral de esa cámara) dispara aunque su
+    # confianza quede por debajo de FRIGATE_AVISO_PUNTOS: dentro de casa no llegaba nada.
+    cuando.add("GET", "/api/events", FakeResponse([_ev("p1", camara="salon", etiqueta="person",
+                                                       puntos=0.62)]))
+    assert main._frigate_reglas_pasada([_regla(camara="salon", etiquetas=["person"])]) == 1
 
 
 def test_casa_manda_la_orden_y_lo_cuenta(cuando):

@@ -1986,8 +1986,9 @@ a su API.
   - La mira el mismo vigía, cada minuto (`_frigate_reglas_pasada`), con las reglas en una
     caché de 2 minutos que se vacía al crear o quitar una. Una vez por defecto (se apaga al
     dispararse); con `siempre`, `FRIGATE_AVISO_PAUSA_MIN` entre disparos. Caduca a las
-    `horas` (24; máximo 30 días). Hace falta `FRIGATE_AVISO_PUNTOS`; un evento que aún no
-    llega no se da por visto, porque su confianza sube mientras dura.
+    `horas` (24; máximo 30 días). **Sin umbral propio**: un evento existe porque Frigate
+    ya lo dio por bueno con el umbral de esa cámara, que se ajusta en su config. Con un
+    segundo listón aquí (0,72) no llegó nada cuando Mikel se puso delante del salón.
   - **«Entrar» no se distingue de «salir»**: es un coche NUEVO en la imagen. Uno aparcado no
     dispara (Frigate no abre un evento por algo quieto), y lo de antes de crearla o de
     arrancar el backend, tampoco.

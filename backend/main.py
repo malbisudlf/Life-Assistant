@@ -33889,11 +33889,10 @@ def _frigate_reglas_pasada(reglas: list) -> int:
                     or float(e.get("start_time") or 0) < desde
                     or (clave, eid) in _frigate_reglas_vistos):
                 continue
-            # Un evento empieza flojo y su confianza sube mientras dura: si aún no llega,
-            # no se da por visto, y la pasada siguiente lo vuelve a mirar.
-            if float((e.get("data") or {}).get("top_score") or e.get("top_score") or 0) \
-                    < FRIGATE_AVISO_PUNTOS:
-                continue
+            # Sin umbral propio: el evento ya existe porque Frigate lo dio por bueno con el
+            # de esa cámara (`objects.filters.<qué>.threshold` en su config), que es donde
+            # se ajusta. Un segundo listón aquí, por encima, dejaba fuera justo lo de
+            # dentro de casa: el 2026-11-18 Mikel se puso delante del salón y no llegó nada.
             _frigate_reglas_vistos[(clave, eid)] = ahora_ts
             if ahora_ts - _frigate_reglas_disparo.get(clave, 0) < FRIGATE_AVISO_PAUSA_MIN * 60:
                 continue
