@@ -2188,10 +2188,28 @@ vuelta atrás: imagen `antes-p50` y los `*.bak-20261118-antes-p50`; RUNBOOK ante
 una llamada real.** El servicio `musica` corre en caja desde ese día (imagen construida en
 jacobo, `librespot: vivo`) y `MUSICA_URL` está puesta (`.env.bak-20261118-antes-p50`). Emparejado
 el mismo día, y **comprobado en una llamada que FreeSWITCH acepta la mezcla** (`MUSICA: suena`). Dos
-tropiezos de ese día, ya resueltos en el repo: la **0.6** de librespot ya no saca audio de Spotify
-(«Track should be available, but no alternatives found»; va la **0.8.0**, con Rust 1.85), y el DNS
-de caja por UDP perdía la mitad de las respuestas, con lo que Spotify enseñaba «Jarvis» conectando
-para siempre (el contenedor resuelve por TCP: `resolv.conf`, montado). Si la escucha pasiva
+tropiezos de ese día: el DNS de caja por UDP perdía la mitad de las respuestas, con lo que Spotify
+enseñaba «Jarvis» conectando para siempre (el contenedor resuelve por TCP: `resolv.conf`, montado);
+y **librespot no sirve para la cuenta de Mikel**: la 0.6 ya no encontraba el audio, y la 0.8.0 lo
+encuentra pero Spotify le niega la clave de cada canción («error audio key 0 1», salta de una a
+otra sin sonar). Es del lado de Spotify y por cuentas (librespot#1649, abierto). **El motor pasa a
+ser Soloist**, el cliente Connect oficial de Spotify para Linux (agosto de 2026):
+
+- Pide una **clave de Spotify for Developers** (`developer.spotify.com/dashboard/soloist`, con
+  Premium), que pone Mikel en `~/musica/soloist.env` (`SOLOIST_API_KEY=…`, fuera del repo). Sin
+  ella, el servicio arranca y sirve silencio (`/estado` lo dice).
+- **El binario no va en la imagen**: Spotify pide no redistribuirlo y caduca a los 90 días.
+  `servidor.py` lo baja a `~/musica/datos/soloist/bin` al arrancar, y otra vez si sale con 10
+  (caducado). Debian 13 (glibc 2.38, `libatomic1`) y un PulseAudio propio del contenedor, con un
+  altavoz de mentira («musica») cuyo monitor lee `parec`.
+- **La pausa, por su WebSocket local** (`--ws 127.0.0.1:8097`): Soloist no se para porque nadie
+  lo lea, así que al irse el último oyente se le manda `pause` (solo si estaba sonando) y al
+  volver, `play` (solo si la pausa fue nuestra). Lo que suena sin oyentes se tira, para no oír
+  lo viejo al volver.
+- **El ffmpeg 7 de Debian 13 necesita `-probesize 32 -analyzeduration 0`**: sin ellos se queda
+  analizando la tubería y no saca ni un byte.
+
+La imagen de librespot queda en caja como `musica:librespot-0.8` (`MUSICA_MOTOR=librespot`). Si la escucha pasiva
 se portara mal, quitar `MUSICA_URL` y `docker compose up -d voice-app` la deja como antes.
 
 **La música.** Mikel: «quiero tener a Jarvis en escucha pasiva mientras escucho música, que

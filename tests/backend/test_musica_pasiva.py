@@ -124,3 +124,144 @@ def test_el_mp3_y_el_estado_por_http(monkeypatch):
         stream.close()
     finally:
         http_srv.shutdown()
+
+
+# --- Soloist (2026-11-18): librespot ya no recibe la clave de audio en la cuenta de Mikel ---
+
+def test_los_oyentes_avisan_del_primero_y_del_ultimo():
+    cambios = []
+    oyentes = srv.Oyentes(al_cambiar=cambios.append)
+    a = oyentes.alta()
+    b = oyentes.alta()
+    oyentes.baja(a)
+    assert cambios == [True]
+    oyentes.baja(b)
+    oyentes.baja(b)              # una baja repetida no vuelve a avisar
+    assert cambios == [True, False]
+
+
+def test_sin_oyentes_se_tira_lo_que_suena_si_la_fuente_no_espera():
+    """parec no se para: lo que suena sin nadie escuchando no puede quedarse para luego."""
+    oyentes = srv.Oyentes()
+    fuente = FuenteContada()
+    grifo = srv.Grifo(fuente, Sumidero(), oyentes, descartar=True)
+    hilo = threading.Thread(target=grifo.leer, daemon=True)
+    hilo.start()
+    time.sleep(0.2)
+    assert fuente.leido > 0 and grifo.cola.qsize() == 0
+    grifo.parar.set()
+
+
+def test_los_marcos_websocket():
+    marco = srv.marco_ws('{"type":"command","command":"pause"}')
+    assert marco[0] == 0x81 and marco[1] & 0x80          # texto, y enmascarado
+    n, mascara = marco[1] & 0x7F, marco[2:6]
+    texto = bytes(b ^ mascara[i % 4] for i, b in enumerate(marco[6:6 + n])).decode()
+    assert texto == '{"type":"command","command":"pause"}'
+    largo = "x" * 300
+    assert srv.marco_ws(largo)[1] & 0x7F == 126
+    # Del servidor: sin máscara, dos seguidos y uno a medias.
+    m1, m2 = b'{"a":1}', b'{"b":2}'
+    datos = bytes([0x81, len(m1)]) + m1 + bytes([0x81, len(m2)]) + m2 + bytes([0x81, 50]) + b"abc"
+    mensajes, resto = srv.leer_marcos(datos)
+    assert mensajes == ['{"a":1}', '{"b":2}'] and resto == bytes([0x81, 50]) + b"abc"
+
+
+class SoloistFalso:
+    """Un WebSocket que se porta como el de Soloist: saluda, manda auth_state y
+    playback_state, y apunta los comandos que recibe."""
+
+    def __init__(self, estado="playing"):
+        import socket
+        self.estado, self.comandos = estado, []
+        self.srv = socket.socket()
+        self.srv.bind(("127.0.0.1", 0))
+        self.srv.listen()
+        self.puerto = self.srv.getsockname()[1]
+        threading.Thread(target=self._atender, daemon=True).start()
+
+    def _atender(self):
+        import base64
+        import hashlib
+        import json as _json
+        while True:
+            c, _ = self.srv.accept()
+            peticion = b""
+            while b"\r\n\r\n" not in peticion:
+                peticion += c.recv(4096)
+            clave = [l.split(b": ", 1)[1] for l in peticion.split(b"\r\n")
+                     if l.lower().startswith(b"sec-websocket-key")][0]
+            acepta = base64.b64encode(hashlib.sha1(
+                clave + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest())
+            c.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                      b"Connection: Upgrade\r\nSec-WebSocket-Accept: " + acepta + b"\r\n\r\n")
+            for ev in ({"type": "auth_state", "logged_in": True},
+                       {"type": "playback_state", "status": self.estado}):
+                m = _json.dumps(ev).encode()
+                c.sendall(bytes([0x81, len(m)]) + m)
+            c.settimeout(1)
+            try:
+                d = c.recv(4096)
+                while d and d[0] == 0x81:
+                    n, mascara = d[1] & 0x7F, d[2:6]
+                    self.comandos.append(_json.loads(bytes(
+                        b ^ mascara[i % 4] for i, b in enumerate(d[6:6 + n])))["command"])
+                    d = d[6 + n:] or c.recv(4096)
+            except OSError:
+                pass
+            c.close()
+
+
+def test_el_mando_lee_el_estado_y_manda_el_comando():
+    falso = SoloistFalso("playing")
+    mando = srv.Mando(puerto=falso.puerto)
+    assert mando.ordenar("pause", solo_si="playing") == "playing"
+    time.sleep(0.3)
+    assert falso.comandos == ["pause"]
+
+
+def test_el_mando_no_pausa_lo_que_ya_estaba_parado():
+    falso = SoloistFalso("paused")
+    assert srv.Mando(puerto=falso.puerto).ordenar("pause", solo_si="playing") == "paused"
+    time.sleep(0.3)
+    assert falso.comandos == []
+
+
+class MandoApuntado:
+    def __init__(self, estado):
+        self.estado, self.ordenes = estado, []
+
+    def ordenar(self, comando, solo_si=""):
+        self.ordenes.append(comando)
+        return self.estado
+
+
+def test_el_pausador_solo_reanuda_lo_que_paro_el():
+    sonando = MandoApuntado("playing")
+    p = srv.Pausador(sonando, hilo=False)
+    p.aplicar(False)          # Jarvis despierta: se pausa
+    p.aplicar(True)           # Jarvis duerme: vuelve
+    assert sonando.ordenes == ["pause", "play"]
+
+    parada = MandoApuntado("paused")      # Mikel la había pausado
+    p = srv.Pausador(parada, hilo=False)
+    p.aplicar(False)
+    p.aplicar(True)
+    assert parada.ordenes == ["pause"]    # el «pause» va con solo_si: no la toca, ni la reanuda
+
+
+def test_el_pausador_no_se_cae_sin_soloist():
+    class Roto:
+        def ordenar(self, *a, **k):
+            raise ConnectionRefusedError("no hay nadie")
+    p = srv.Pausador(Roto(), hilo=False)
+    p.aplicar(False)
+    p.aplicar(True)
+    assert p.pausada_por_mi is False
+
+
+def test_el_codificador_no_se_queda_analizando():
+    """ffmpeg 7 (Debian 13) no saca nada de una tubería en directo sin esto (2026-11-18)."""
+    orden = srv.orden_codificador()
+    i = orden.index("-i")
+    assert "-probesize" in orden[:i] and "-analyzeduration" in orden[:i]

@@ -10,6 +10,11 @@ services:
     container_name: musica
     restart: unless-stopped
     network_mode: host
+    # SOLOIST_API_KEY=… (Spotify for Developers → Soloist API Key). NO va en el repo: lo crea
+    # Mikel a mano en ~/musica/soloist.env. Sin él, el servicio arranca y sirve silencio.
+    env_file:
+      - path: soloist.env
+        required: false
     environment:
       MUSICA_ESCUCHA: 127.0.0.1
       MUSICA_PUERTO: "8095"
