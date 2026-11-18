@@ -1932,3 +1932,41 @@ sea seguro» y «que pueda vigilar las cámaras cuando yo se lo pida».
   `CAMARA_AVISO_PAUSA_SEG` entre avisos; lo que ya se veía al empezar (el coche aparcado)
   no avisa. Al acabar sin nada, «sin novedad». Cinco fallos seguidos de la cámara la paran
   y lo dice. Vive en memoria: un reinicio del backend la corta sin aviso.
+
+### `camaras_detecciones` y los avisos de Frigate (2026-11-18)
+
+`camaras_mirar` mira AHORA con un modelo de visión; esto es lo que **ha pasado**. Frigate
+corre en jacobo (HomeLab, `jacobo/frigate/`) y detecta todo el rato personas, coches, motos,
+bicis y animales en cada cámara, y apunta cada detección como un evento. Jarvis le pregunta
+a su API.
+
+- **Por qué la detección va en la CPU y no en la RX 580**: Frigate 0.17 usa ROCm 7.1, que no
+  tiene nada para gfx803 (Polaris); su imagen ROCm ya ni siquiera trae gfx900. OpenVINO
+  solo sabe de gráficas Intel. Así que la GPU **descodifica** (VAAPI: la C200 en HEVC
+  1080p20 cuesta un 5 % de un núcleo, frente al 71 % por CPU) y la **detección** es OpenVINO
+  en el i5-9400F: SSDLite MobileNet v2, **10 ms por inferencia**. Probado con una
+  transcodificación HEVC tipo Jellyfin a la vez durante 90 s: ni un `ring uvd timeout`.
+- **Sin MQTT**: no hay broker en casa, y la API basta para las dos cosas: la pregunta y el
+  vigía de avisos, que mira los eventos nuevos cada minuto con el tick de las alarmas
+  (`_frigate_vig_lanzar`, como la vigilancia de WhatsApp).
+- **Usuario de solo lectura** (`viewer`) y solo por Tailscale (`FRIGATE_URL`,
+  `FRIGATE_USUARIO`, `FRIGATE_CLAVE`). El login de Frigate da un JWT que va como
+  `Bearer`, vive 12 h en memoria y se renueva solo con un 401. Sin las tres, la
+  herramienta ni se anuncia.
+- **Campos cerrados**: cámara, qué (de `_FRIGATE_QUE`), hora, cuánto duró, si sigue y la
+  confianza. No hay texto de la imagen ni reconocimiento facial, así que está en
+  `_TRAS_AJENO_SE_PUEDE` y en lo de solo lectura del teléfono.
+- **«La puerta» no es una cámara**: si pide una que no existe, mira todas y lo dice en
+  `nota`, en vez de contestar «no tengo esa cámara».
+- **Los avisos nacen apagados**: solo las cámaras de `FRIGATE_AVISOS` y lo de
+  `FRIGATE_AVISOS_QUE` (persona y coche), con confianza ≥ `FRIGATE_AVISO_PUNTOS` (0,72) y
+  `FRIGATE_AVISO_PAUSA_MIN` (10) entre dos avisos de lo mismo en la misma cámara. **Por
+  defecto solo con él fuera de casa** (`presencia_vigente`): con él dentro, quien cruza el
+  jardín es casi siempre la familia, y su ir y venir no es cosa de Jarvis
+  (`FRIGATE_AVISOS_SIEMPRE=1` lo cambia). Van por `_apuntar_aviso` con la regla `camaras`
+  (se silencia como cualquier otra) y la huella del evento, urgentes, y salen al momento
+  con `_entregar_aviso_ya` salvo en clase, donde esperan como todo.
+- **Las cámaras** (2026-11-18): el jardín (Tapo C320WS) y el garaje (Tapo C410) llegan por
+  el HLS que ya sirve Home Assistant (`ha_hls.py` le pide la URL por websocket con su
+  token, porque su RTSP pide la cuenta de la cámara y la C410 ni lo tiene); la C200 del
+  salón, por el go2rtc de caja. El salón se detecta **sin fotos guardadas y sin avisos**.

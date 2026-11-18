@@ -466,6 +466,10 @@ class TestJarvisDespachador:
         monkeypatch.setattr(main, "GARAJE_SENSOR", "binary_sensor.puerta_garaje")
         monkeypatch.setattr(main, "GARAJE_MOVIL", "device_tracker.movil")
         monkeypatch.setattr(main, "CAMARAS", "garaje=camera.garaje")
+        # Y Frigate, que sin URL, usuario y clave no tiene detecciones que dar.
+        monkeypatch.setattr(main, "FRIGATE_URL", "http://frigate.test:8971")
+        monkeypatch.setattr(main, "FRIGATE_USUARIO", "jarvis")
+        monkeypatch.setattr(main, "FRIGATE_CLAVE", "clave")
         # Y los recados, que nacen apagados y van encima de las llamadas a otros.
         monkeypatch.setattr(main, "RECADOS", True)
         esquema = main._jarvis_esquema()

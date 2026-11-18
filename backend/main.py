@@ -17927,6 +17927,8 @@ def ha_alarma_tick(request: Request, token: str = ""):
     # La vigilancia de WhatsApp, por la misma razón: «he quedado en 10 minutos» no aguanta
     # los cinco del brief-tick.
     _wa_vig_lanzar()
+    # Y el de Frigate: «hay alguien en el jardín» tampoco aguanta cinco minutos.
+    _frigate_vig_lanzar()
     if not _alarma_hay_que_mirar():
         # El caso normal: 1.400 veces al día no hay nada que hacer y no se consulta nada.
         # Y mientras una alarma esté escalada se repite la última escalada, que es un
@@ -33420,6 +33422,289 @@ def _j_camaras_vigilar(camara: str, minutos: int = 30, que: str = "") -> dict:
                      "aviso al móvil; si no, le digo al acabar que sin novedad."}
 
 
+# ── Lo que han visto las cámaras: Frigate en jacobo (2026-11-18) ─────────────
+# Mikel: «que Jarvis pueda vigilar las cámaras de casa». `camaras_mirar` mira AHORA, con un
+# modelo de visión; esto es lo que HA PASADO: Frigate, en jacobo, detecta todo el rato
+# personas, coches y animales en cada cámara (OpenVINO en la CPU; la RX 580 descodifica) y
+# apunta cada detección como un evento. Jarvis le pregunta a su API. Ver «Frigate» en
+# docs/JARVIS.md y `jacobo/frigate/` en HomeLab.
+#
+#  - **Sin MQTT**: no hay broker en casa, y la API de eventos basta para las dos cosas, la
+#    pregunta («¿ha pasado alguien por la puerta?») y el vigía de los avisos, que mira cada
+#    minuto con el tick de las alarmas, como la vigilancia de WhatsApp.
+#  - **Usuario de solo lectura** (`viewer`) y solo por Tailscale. El login de Frigate da un
+#    JWT que va como `Bearer` y vive en memoria hasta que caduca o da 401.
+#  - **Lo que vuelve son campos cerrados**: cámara, qué (de una lista), hora y confianza.
+#    Frigate no lee texto ni sabe quién es nadie (no hay reconocimiento facial), así que
+#    preguntar no cuenta como leer algo ajeno y va también por teléfono.
+#  - **Los avisos nacen apagados** (`FRIGATE_AVISOS`, las cámaras que avisan) y por defecto
+#    solo salen con él fuera de casa: con él dentro, quien cruza el jardín es casi siempre la
+#    familia, y su ir y venir no es cosa de Jarvis. Pasan por `_apuntar_aviso` (se silencian
+#    como cualquier regla, la huella del evento impide repetir) y en clase esperan.
+FRIGATE_URL             = os.getenv("FRIGATE_URL", "").rstrip("/")
+FRIGATE_USUARIO         = os.getenv("FRIGATE_USUARIO", "")
+FRIGATE_CLAVE           = os.getenv("FRIGATE_CLAVE", "")
+FRIGATE_AVISOS          = os.getenv("FRIGATE_AVISOS", "")
+FRIGATE_AVISOS_QUE      = os.getenv("FRIGATE_AVISOS_QUE", "person,car")
+FRIGATE_AVISOS_SIEMPRE  = os.getenv("FRIGATE_AVISOS_SIEMPRE", "") == "1"
+FRIGATE_AVISO_PUNTOS    = float(os.getenv("FRIGATE_AVISO_PUNTOS", "0.72"))
+FRIGATE_AVISO_PAUSA_MIN = int(os.getenv("FRIGATE_AVISO_PAUSA_MIN", "10"))
+FRIGATE_VIG_CADA_SEG    = 50
+FRIGATE_JWT_HORAS       = 12
+REGLA_CAMARAS           = "camaras"
+_FRIGATE_CAMARA_RE      = re.compile(r"^[a-z0-9_]{1,32}$")
+# Lo que Frigate sabe reconocer (los de `objects.track` en su config), en español.
+_FRIGATE_QUE = {"person": "persona", "car": "coche", "motorcycle": "moto",
+                "bicycle": "bici", "dog": "perro", "cat": "gato", "bird": "pájaro"}
+# De cómo lo pide él a las etiquetas de Frigate. Vacío = todo.
+_FRIGATE_PEDIR = {
+    "persona": ["person"], "personas": ["person"], "alguien": ["person"],
+    "gente": ["person"], "nadie": ["person"],
+    "coche": ["car"], "coches": ["car"], "vehiculo": ["car", "motorcycle"],
+    "vehiculos": ["car", "motorcycle"], "moto": ["motorcycle"], "motos": ["motorcycle"],
+    "bici": ["bicycle"], "bicicleta": ["bicycle"], "perro": ["dog"], "perros": ["dog"],
+    "gato": ["cat"], "gatos": ["cat"], "pajaro": ["bird"], "pajaros": ["bird"],
+    "animal": ["dog", "cat", "bird"], "animales": ["dog", "cat", "bird"],
+}
+_frigate_jwt: dict = {"token": "", "hasta": 0.0}
+_frigate_lock = threading.Lock()
+_frigate_vig_lock = threading.Lock()
+_frigate_vig_corriendo = False
+_frigate_vig_ultima = 0.0
+_frigate_vistos: dict = {}           # id de evento → cuándo se vio (para no repetir)
+_frigate_ultimo_aviso: dict = {}     # (cámara, etiqueta) → epoch del último aviso
+
+
+def _frigate_configurado() -> bool:
+    return bool(FRIGATE_URL and FRIGATE_USUARIO and FRIGATE_CLAVE)
+
+
+def _frigate_token(renovar: bool = False) -> str:
+    with _frigate_lock:
+        if not renovar and _frigate_jwt["token"] and time.time() < _frigate_jwt["hasta"]:
+            return _frigate_jwt["token"]
+    r = http.post(f"{FRIGATE_URL}/api/login", json={"user": FRIGATE_USUARIO,
+                                                    "password": FRIGATE_CLAVE}, timeout=10)
+    if r.status_code != 200:
+        raise RuntimeError(f"Frigate no aceptó el usuario ({r.status_code})")
+    token = ""
+    galletas = getattr(r, "cookies", None)
+    if galletas is not None:
+        token = galletas.get("frigate_token") or ""
+    if not token:
+        m = re.search(r"frigate_token=([^;\s]+)", str((r.headers or {}).get("Set-Cookie", "")))
+        token = m.group(1) if m else ""
+    if not token:
+        raise RuntimeError("Frigate no devolvió el token")
+    with _frigate_lock:
+        _frigate_jwt.update(token=token, hasta=time.time() + FRIGATE_JWT_HORAS * 3600)
+    return token
+
+
+def _frigate_get(ruta: str, params: Optional[dict] = None):
+    """GET a la API de Frigate con el JWT; si caducó (401), se renueva una vez."""
+    url = f"{FRIGATE_URL}{ruta}" + (f"?{urlencode(params)}" if params else "")
+    for intento in (0, 1):
+        r = http.get(url, headers={"Authorization": f"Bearer {_frigate_token(intento == 1)}"},
+                     timeout=10)
+        if r.status_code == 401 and intento == 0:
+            continue
+        if r.status_code != 200:
+            raise RuntimeError(f"Frigate contestó {r.status_code}")
+        return r.json()
+    raise RuntimeError("Frigate no acepta el token")
+
+
+def _frigate_camaras() -> dict:
+    """{cámara: da imagen ahora} según las estadísticas de Frigate."""
+    stats = _frigate_get("/api/stats") or {}
+    return {str(c): float((v or {}).get("camera_fps") or 0) > 0
+            for c, v in (stats.get("cameras") or {}).items() if _FRIGATE_CAMARA_RE.match(str(c))}
+
+
+def _frigate_etiquetas(que: str) -> list:
+    """Las etiquetas de Frigate para lo que pide («alguien», «un coche»…). [] = todo."""
+    palabras = re.findall(r"[a-z]+", _sin_acentos(str(que or "")).lower())
+    etiquetas: list = []
+    for p in palabras:
+        for e in _FRIGATE_PEDIR.get(p, []):
+            if e not in etiquetas:
+                etiquetas.append(e)
+    return etiquetas
+
+
+def _frigate_hora(epoch, ahora: datetime) -> str:
+    momento = datetime.fromtimestamp(float(epoch), LOCAL_TZ)
+    hora = momento.strftime("%H:%M")
+    if momento.date() == ahora.date():
+        return hora
+    if momento.date() == (ahora - timedelta(days=1)).date():
+        return f"ayer a las {hora}"
+    return f"el {momento.strftime('%d/%m')} a las {hora}"
+
+
+def _frigate_evento(e: dict, ahora: datetime) -> dict:
+    """Un evento de Frigate en campos cerrados. Nada de texto libre de la imagen."""
+    datos = e.get("data") or {}
+    inicio, fin = e.get("start_time"), e.get("end_time")
+    puntos = datos.get("top_score") or e.get("top_score") or 0
+    return {
+        "camara":   str(e.get("camera") or "")[:32],
+        "que":      _FRIGATE_QUE.get(str(e.get("label") or ""), "otra cosa"),
+        "hora":     _frigate_hora(inicio, ahora) if inicio else "",
+        "segundos": int(float(fin) - float(inicio)) if inicio and fin else None,
+        "en_curso": fin is None,
+        "seguro":   round(float(puntos), 2),
+        "zonas":    [str(z)[:32] for z in (e.get("zones") or [])[:4]],
+    }
+
+
+def _j_camaras_detecciones(camara: str = "", que: str = "", horas: float = 24) -> dict:
+    if not _frigate_configurado():
+        return {"ok": False, "motivo": "No tengo Frigate conectado (faltan FRIGATE_*)."}
+    try:
+        camaras = _frigate_camaras()
+    except Exception as e:   # noqa: BLE001
+        logger.warning("Frigate: no contesta (%s)", type(e).__name__)
+        return {"ok": False, "motivo": "Frigate, en jacobo, no contesta ahora mismo."}
+    if not camaras:
+        return {"ok": False, "motivo": "Frigate no tiene ninguna cámara."}
+    pedida = _sin_acentos(str(camara or "")).strip().lower()
+    nota = ""
+    elegidas = list(camaras)
+    if pedida and pedida not in ("todas", "todo"):
+        coinciden = [c for c in camaras if pedida in c or c in pedida]
+        if coinciden:
+            elegidas = coinciden
+        else:
+            # «¿Ha pasado alguien por la puerta?»: ninguna cámara se llama «puerta», y
+            # contestar «no tengo esa cámara» no le sirve. Se mira en todas y se dice.
+            nota = (f"No tengo una cámara «{str(camara)[:40]}»: he mirado todas "
+                    f"({', '.join(camaras)}).")
+    try:
+        horas = min(max(float(horas), 0.25), 24 * 7)
+    except (TypeError, ValueError):
+        horas = 24
+    ahora = _ahora_local()
+    params = {"cameras": ",".join(elegidas), "after": int(time.time() - horas * 3600),
+              "limit": 100, "include_thumbnails": 0}
+    etiquetas = _frigate_etiquetas(que)
+    if etiquetas:
+        params["labels"] = ",".join(etiquetas)
+    try:
+        crudos = _frigate_get("/api/events", params) or []
+    except Exception as e:   # noqa: BLE001
+        logger.warning("Frigate: no se pudieron leer los eventos (%s)", type(e).__name__)
+        return {"ok": False, "motivo": "Frigate no ha dado sus detecciones."}
+    eventos = [_frigate_evento(e, ahora) for e in crudos
+               if isinstance(e, dict) and not e.get("false_positive")]
+    por_tipo: dict = {}
+    for ev in eventos:
+        clave = f"{ev['que']} en {ev['camara']}"
+        por_tipo[clave] = por_tipo.get(clave, 0) + 1
+    sin_imagen = [c for c in elegidas if not camaras.get(c)]
+    respuesta = {"ok": True, "camaras": elegidas, "ultimas_horas": horas,
+                 "total": len(eventos), "por_tipo": por_tipo,
+                 # Frigate las da de la más nueva a la más vieja.
+                 "detecciones": eventos[:15],
+                 "aviso": "Son detecciones automáticas (qué y cuándo), sin saber quién."}
+    if len(eventos) >= 100:
+        respuesta["hay_mas"] = True
+    if sin_imagen:
+        respuesta["sin_imagen_ahora"] = sin_imagen
+    if nota:
+        respuesta["nota"] = nota
+    return respuesta
+
+
+def _frigate_vig_camaras() -> set:
+    return {c.strip().lower() for c in FRIGATE_AVISOS.split(",")
+            if _FRIGATE_CAMARA_RE.match(c.strip().lower())}
+
+
+def _frigate_vig_pasada() -> int:
+    """Una mirada a los eventos nuevos de las cámaras que avisan. Devuelve cuántos avisó."""
+    camaras = _frigate_vig_camaras()
+    etiquetas = [e.strip() for e in FRIGATE_AVISOS_QUE.split(",") if e.strip() in _FRIGATE_QUE]
+    if not camaras or not etiquetas:
+        return 0
+    ahora_ts = time.time()
+    # Los de los últimos 5 minutos, aunque ya se hayan visto: un evento empieza flojo y su
+    # confianza sube mientras dura. Lo ya avisado no se repite (memoria y huella).
+    crudos = _frigate_get("/api/events", {
+        "cameras": ",".join(sorted(camaras)), "labels": ",".join(etiquetas),
+        "after": int(ahora_ts - 300), "limit": 50, "include_thumbnails": 0}) or []
+    for eid, visto in list(_frigate_vistos.items()):
+        if visto < ahora_ts - 3600:
+            _frigate_vistos.pop(eid, None)
+    nuevos = [e for e in crudos if isinstance(e, dict) and str(e.get("id") or "")
+              and str(e.get("id")) not in _frigate_vistos and not e.get("false_positive")
+              and float((e.get("data") or {}).get("top_score") or e.get("top_score") or 0)
+              >= FRIGATE_AVISO_PUNTOS]
+    if not nuevos:
+        return 0
+    if not FRIGATE_AVISOS_SIEMPRE:
+        try:
+            p = presencia_vigente()
+        except Exception:   # noqa: BLE001 — sin saber dónde está, se avisa
+            p = None
+        if p and p.get("en_casa"):
+            for e in nuevos:
+                _frigate_vistos[str(e["id"])] = ahora_ts
+            return 0
+    avisados = 0
+    ahora = _ahora_local()
+    for e in sorted(nuevos, key=lambda x: float(x.get("start_time") or 0)):
+        eid = str(e["id"])
+        _frigate_vistos[eid] = ahora_ts
+        ev = _frigate_evento(e, ahora)
+        clave = (ev["camara"], str(e.get("label") or ""))
+        if ahora_ts - _frigate_ultimo_aviso.get(clave, 0) < FRIGATE_AVISO_PAUSA_MIN * 60:
+            continue
+        texto = f"📹 {ev['que'].capitalize()} en {ev['camara']} a las {ev['hora']}."
+        pid = str(uuid.uuid4())
+        if not _apuntar_aviso(REGLA_CAMARAS, texto, prioridad=PRIO_URGENTE, id=pid,
+                              huella=f"frigate:{eid[:64]}",
+                              caduca=datetime.now(timezone.utc) + timedelta(minutes=15),
+                              motivo={"evento": eid[:64], "camara": ev["camara"],
+                                      "etiqueta": clave[1], "seguro": ev["seguro"]}):
+            continue
+        _frigate_ultimo_aviso[clave] = ahora_ts
+        avisados += 1
+        logger.info("Frigate: aviso de %s en %s (%.2f)", clave[1], ev["camara"], ev["seguro"])
+        if not _en_clase():
+            _entregar_aviso_ya(pid)
+    return avisados
+
+
+def _frigate_vig_hilo() -> None:
+    global _frigate_vig_corriendo
+    try:
+        _frigate_vig_pasada()
+    except Exception as e:   # noqa: BLE001 — el vigía no puede tumbar nada
+        logger.warning("Frigate: el vigía no pudo mirar (%s)", type(e).__name__)
+    finally:
+        with _frigate_vig_lock:
+            _frigate_vig_corriendo = False
+
+
+def _frigate_vig_lanzar() -> None:
+    """Del tick de las alarmas, en su hilo, como la vigilancia de WhatsApp."""
+    global _frigate_vig_corriendo, _frigate_vig_ultima
+    if not _frigate_configurado() or not _frigate_vig_camaras():
+        return
+    with _frigate_vig_lock:
+        if _frigate_vig_corriendo or time.time() - _frigate_vig_ultima < FRIGATE_VIG_CADA_SEG:
+            return
+        _frigate_vig_corriendo, _frigate_vig_ultima = True, time.time()
+    try:
+        threading.Thread(target=_frigate_vig_hilo, daemon=True, name="frigate-vigia").start()
+    except Exception as e:   # noqa: BLE001
+        logger.warning("Frigate: no se pudo lanzar el vigía (%s)", type(e).__name__)
+        with _frigate_vig_lock:
+            _frigate_vig_corriendo = False
+
+
 # La cámara de la vista J.A.R.V.I.S.: con «Jarvis ve» encendido, cada mensaje lleva un
 # fotograma. No se le pasa al modelo que piensa (Claude Code por `-p` no recibe imágenes,
 # y el bucle de OpenAI tendría que pagarla en cada vuelta): se describe UNA vez aquí, con
@@ -37617,6 +37902,20 @@ _JARVIS_HERRAMIENTAS = {
         "obligatorios": ["camara"],
         "requiere_camaras": True,
     },
+    "camaras_detecciones": {
+        # Ver «Lo que han visto las cámaras»: campos cerrados de Frigate, nada de texto.
+        "confirmar":   False,
+        "fn":          _j_camaras_detecciones,
+        "descripcion": "Lo que HAN DETECTADO las cámaras de casa (Frigate): personas, coches, "
+                       "motos, bicis y animales, con cámara, hora, cuánto duró y si sigue ahí. "
+                       "Úsalo para «¿ha pasado alguien por la puerta?», «¿ha venido algún "
+                       "coche?», «¿qué ha pasado en el jardín esta tarde?». Para ver cómo "
+                       "está AHORA una cámara, `camaras_mirar`. No sabe quién es nadie.",
+        "parametros":  {"camara": {"type": "string", "description": "«jardín», «salón»… vacío = todas."},
+                        "que": {"type": "string", "description": "«alguien», «coche», «animal»… vacío = todo."},
+                        "horas": {"type": "number", "description": "Cuántas horas atrás. Por defecto, 24 (máximo, una semana)."}},
+        "requiere_frigate": True,
+    },
 
     # ── Recordatorios ────────────────────────────────────────────────────────
     "recordarme": {
@@ -38090,6 +38389,8 @@ _TRAS_AJENO_SE_PUEDE = frozenset({
     "buscar_documentos", "leer_documento", "ver_proyectos", "github_prs",
     # La visión describe, no copia texto de la imagen: ver `_CAMARA_OJOS`.
     "camaras_mirar",
+    # Frigate solo da cámara, etiqueta de una lista, hora y confianza.
+    "camaras_detecciones",
     # Una búsqueda la ve el buscador, no quien escribió el mensaje. Lo que puede sacar datos
     # es abrir una URL que alguien ha elegido (`leer_pagina`), y esa sigue en `_AJENO_WEB`.
     "buscar_en_internet",
@@ -38295,7 +38596,8 @@ def _jarvis_esquema() -> list:
         and (_tele_configurada() or not h.get("requiere_tele"))
         and (_ha_directo() or not h.get("requiere_ha_directo"))
         and ((_ha_directo() and _garaje_configurado()) or not h.get("requiere_garaje"))
-        and ((_ha_directo() and bool(_camaras())) or not h.get("requiere_camaras"))]
+        and ((_ha_directo() and bool(_camaras())) or not h.get("requiere_camaras"))
+        and (_frigate_configurado() or not h.get("requiere_frigate"))]
 
 
 def _jarvis_confirma(herramienta: dict, argumentos: dict) -> bool:
@@ -38397,6 +38699,8 @@ _MCP_SERVIDOR_SOLO_LECTURA = {
     # 2026-11-08: mirar las cámaras de fuera. Vuelve una descripción de la visión, que no
     # copia el texto de la imagen (`_CAMARA_OJOS`): nada escrito por otro llega a la shell.
     "camaras_mirar",
+    # 2026-11-18: lo que ha detectado Frigate. Campos cerrados, como lo anterior.
+    "camaras_detecciones",
     # 2026-10-30: buscar un chat de WhatsApp, para «avisa a Aimar» (el envío va con el
     # botón o el sí hablado, en `PREGUNTAS_ACCIONES`). Solo nombres recortados.
     #
@@ -40486,6 +40790,7 @@ _JARVIS_RELLENOS = {
     "mcp_usar":           "Lo consulto.",
     "camaras_mirar":      "Miro las cámaras.",
     "camaras_vigilar":    "Me pongo a vigilar.",
+    "camaras_detecciones": "Miro lo que han visto las cámaras.",
     "crear_evento":       "Lo apunto.",
     "crear_tarea":        "Lo apunto.",
 }
