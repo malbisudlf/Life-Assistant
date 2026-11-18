@@ -484,6 +484,50 @@ class TestTelegramBotones:
         (_, editado, _), = _api(telegram, "editMessageText")
         assert "Cancelado" in editado["text"]
 
+    def test_si_dale_escrito_vale_como_el_boton(self, client, telegram, monkeypatch):
+        """2026-11-18: «que no solo le valga un sí, sino también un sí hazlo, un sí dale»."""
+        hechas = []
+        _herramienta(monkeypatch, "cobrar_entrenamiento", lambda: hechas.append(1) or {"ok": True})
+        _propone(monkeypatch)
+        _post(client, _mensaje_tg("cóbrame", update_id=1))
+        pid = _pid(telegram)
+        # Si llegara al modelo, propondría otra vez: no tiene que llegar.
+        monkeypatch.setattr(main, "_jarvis_chat", lambda body, **kw: pytest.fail("al modelo"))
+        _post(client, _mensaje_tg("Sí, dale", update_id=2))
+        assert hechas == [1]
+        assert pid not in main._telegram_pendientes
+        (_, editado, _), = _api(telegram, "editMessageText")
+        assert editado["message_id"] == 77 and editado["reply_markup"] == {"inline_keyboard": []}
+        assert _api(telegram, "sendMessage")[-1][1]["text"].startswith("Hecho, señor.")
+
+    def test_no_escrito_cancela(self, client, telegram, monkeypatch):
+        hechas = []
+        _herramienta(monkeypatch, "cobrar_entrenamiento", lambda: hechas.append(1) or {"ok": True})
+        _propone(monkeypatch)
+        _post(client, _mensaje_tg("cóbrame", update_id=1))
+        _post(client, _mensaje_tg("no, déjalo", update_id=2))
+        assert not hechas and not main._telegram_pendientes
+        assert "no lo hago" in _api(telegram, "sendMessage")[-1][1]["text"]
+
+    def test_un_si_con_matiz_va_al_modelo(self, client, telegram, monkeypatch):
+        hechas = []
+        _herramienta(monkeypatch, "cobrar_entrenamiento", lambda: hechas.append(1) or {"ok": True})
+        _propone(monkeypatch)
+        _post(client, _mensaje_tg("cóbrame", update_id=1))
+        vistos = []
+        monkeypatch.setattr(main, "_jarvis_chat", lambda body, **kw: vistos.append(body.mensaje)
+                            or {"respuesta": "Entendido."})
+        _post(client, _mensaje_tg("sí, pero solo las de octubre", update_id=2))
+        assert not hechas and vistos == ["sí, pero solo las de octubre"]
+
+    def test_un_si_sin_nada_pendiente_va_al_modelo(self, client, telegram, monkeypatch):
+        vistos = []
+        monkeypatch.setattr(main, "_telegram_pendientes", {})
+        monkeypatch.setattr(main, "_jarvis_chat", lambda body, **kw: vistos.append(body.mensaje)
+                            or {"respuesta": "¿A qué, señor?"})
+        _post(client, _mensaje_tg("sí, dale", update_id=2))
+        assert vistos == ["sí, dale"]
+
     def test_caducado_no_ejecuta(self, client, telegram, monkeypatch):
         hechas = []
         _herramienta(monkeypatch, "cobrar_entrenamiento", lambda: hechas.append(1) or {"ok": True})

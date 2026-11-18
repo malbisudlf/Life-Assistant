@@ -239,6 +239,11 @@ turno destila igual que en el chat.
   toques no ejecutan dos veces. **Caduca** a los `TELEGRAM_BOTON_MIN` (30), como un botón
   del móvil (`PREGUNTA_ACCION_VIGENCIA_MIN`). Un botón de antes de un reinicio dice «ya no
   está pendiente».
+- **Escribirlo también vale** (2026-11-18): con una propuesta viva, «sí, dale», «hazlo» o
+  «no, déjalo» —escrito o en una nota de voz— es pulsar el botón de la **última**
+  (`_telegram_si_escrito`, con `_respuesta_si_no`): se ejecuta, se le quitan los botones y se
+  contesta con lo hecho. Lo que no es un sí o un no claro («sí, pero solo las de octubre»)
+  sigue al modelo como siempre. Ver «El sí listo» en `docs/JARVIS.md`.
 
 ### El formato
 

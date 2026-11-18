@@ -2472,6 +2472,22 @@ describe("confirmar hablando", () => {
     }
   });
 
+  test("es listo: un sí hazlo, un sí dale o un imperativo también valen (2026-11-18)", () => {
+    for (const dicho of ["Sí, hazlo", "sí, dale", "Dale caña", "Por supuesto", "claro que sí",
+                         "sí, sí, adelante", "perfecto, hazlo", "Llámala", "sí, bórralas",
+                         "quítalas todas", "mándaselo", "Hazlo ya, por favor", "Sí señor"]) {
+      expect(esConfirmacionHablada(dicho)).toBe(true);
+    }
+    for (const dicho of ["ni de coña", "cancélalo", "ahora no", "que va"]) {
+      expect(esNegacionHablada(dicho)).toBe(true);
+    }
+    // Las palabras de lo propuesto cuentan; las de otra cosa, no.
+    expect(esConfirmacionHablada("sí, llama a Saioa", '{"nombre":"Saioa"}')).toBe(true);
+    expect(esConfirmacionHablada("sí, llama a Saioa", '{"nombre":"Erik"}')).toBe(false);
+    // Lo que acaba como un imperativo y no lo es no confirma nada.
+    expect(esConfirmacionHablada("la pastilla")).toBe(false);
+  });
+
   test("un no a secas descarta", () => {
     for (const dicho of ["no", "No.", "déjalo", "cancela", "olvídalo", "mejor no",
                          "no lo hagas", "no, gracias"]) {

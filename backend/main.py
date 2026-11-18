@@ -2149,13 +2149,26 @@ def callback(code: str, state: str = ""):
 
 @app.get("/calendar/events")
 def get_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    ahora = datetime.now(timezone.utc)
+    return _eventos_entre(ahora.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                          (ahora + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+
+# Páginas de `calendarView` que se siguen como mucho al mirar el pasado (`agenda_pasada`):
+# un año de agenda son unos cientos de eventos, y esto viaja luego dentro de un prompt.
+CALENDARIO_PAGINAS_MAX = 5
+
+
+def _eventos_entre(start: str, end: str, paginas: int = 1) -> dict:
+    """Los eventos de Outlook entre dos instantes UTC (`…Z`), de todos los calendarios que
+    son tu agenda. Lo de siempre de `/calendar/events` (los próximos 30 días) y, desde el
+    2026-11-18, también el pasado para Jarvis («¿qué hice el martes?»). Con `paginas` > 1
+    sigue el `@odata.nextLink` de Graph."""
     token = get_valid_token()
     if not token:
         return {"error": "No autenticado. Ve a /auth/login primero", "reconectar": True}
-    
+
     headers = {"Authorization": f"Bearer {token}"}
-    start = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    end = (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
     consulta = (f"/calendarView?startDateTime={start}&endDateTime={end}&$top=100&$select=subject,start,end,location,body,bodyPreview,isAllDay,isOrganizer,attendees&$orderby=start/dateTime")
     # El de por defecto y, con los calendarios por tipo, Deporte y Uni: lo que se movió
     # allí sigue siendo tu agenda. Un fallo en cualquiera es un fallo de todo, como
@@ -2166,30 +2179,37 @@ def get_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)
 
     events = []
     for tipo_fijo, url in fuentes:
-        response = http.get(url, headers=headers)
-        response.encoding = "utf-8"
-        fallo = _graph_fallo(response, f"calendarView ({tipo_fijo})" if tipo_fijo else "calendarView")
-        if fallo:
-            return fallo
-        for event in response.json().get("value", []):
-            alud_url = _extraer_alud_url(event)
-            events.append({
-                "id": event.get("id"),
-                "title": _clean_class_title(event.get("subject", "")),
-                "start": normalize_graph_dt(event.get("start", {})),
-                "end": normalize_graph_dt(event.get("end", {})),
-                "location": event.get("location", {}).get("displayName"),
-                "preview": event.get("bodyPreview"),
-                "alud_url": alud_url,
-                "isAllDay": event.get("isAllDay"),
-                # Si la cita es tuya y si hay alguien más en ella. Lo mira «vas tarde» antes
-                # de ofrecer moverla: mover la reunión de otro no se puede, y mover una con
-                # invitados les manda a todos la actualización. Sin el dato, no se ofrece.
-                "organizo": event.get("isOrganizer"),
-                "invitados": len(event.get("attendees") or []),
-                # El calendario manda sobre el asunto: si lo pusiste en Deporte, es deporte.
-                "tipo": tipo_fijo or tipo_evento(event.get("subject", "")),
-            })
+        for _pagina in range(max(1, paginas)):
+            response = http.get(url, headers=headers)
+            response.encoding = "utf-8"
+            fallo = _graph_fallo(response, f"calendarView ({tipo_fijo})" if tipo_fijo else "calendarView")
+            if fallo:
+                return fallo
+            datos = response.json()
+            for event in datos.get("value", []):
+                alud_url = _extraer_alud_url(event)
+                events.append({
+                    "id": event.get("id"),
+                    "title": _clean_class_title(event.get("subject", "")),
+                    "start": normalize_graph_dt(event.get("start", {})),
+                    "end": normalize_graph_dt(event.get("end", {})),
+                    "location": event.get("location", {}).get("displayName"),
+                    "preview": event.get("bodyPreview"),
+                    "alud_url": alud_url,
+                    "isAllDay": event.get("isAllDay"),
+                    # Si la cita es tuya y si hay alguien más en ella. Lo mira «vas tarde» antes
+                    # de ofrecer moverla: mover la reunión de otro no se puede, y mover una con
+                    # invitados les manda a todos la actualización. Sin el dato, no se ofrece.
+                    "organizo": event.get("isOrganizer"),
+                    "invitados": len(event.get("attendees") or []),
+                    # El calendario manda sobre el asunto: si lo pusiste en Deporte, es deporte.
+                    "tipo": tipo_fijo or tipo_evento(event.get("subject", "")),
+                })
+            # El pasado puede no caber en una página: se sigue el enlace de Graph, que ya
+            # trae la misma consulta.
+            url = datos.get("@odata.nextLink") or ""
+            if not url.startswith("https://graph.microsoft.com/"):
+                break
     if len(fuentes) > 1:
         events.sort(key=lambda e: str(e.get("start") or ""))
 
@@ -2382,6 +2402,14 @@ def _id_calendario_clases(headers: dict) -> tuple:
 
 @app.get("/calendar/classes")
 def get_class_events(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
+    # Inicio del día en hora local del usuario para no perder clases de hoy
+    today_start = datetime.now(LOCAL_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    return _clases_entre(today_start, today_start + timedelta(days=60))
+
+
+def _clases_entre(desde: datetime, hasta: datetime) -> dict:
+    """Las clases entre dos instantes con zona: los próximos 60 días de siempre y, desde el
+    2026-11-18, el pasado para `agenda_pasada`."""
     global _clases_cal_cache
     token = get_valid_token()
     if not token:
@@ -2391,10 +2419,8 @@ def get_class_events(credentials: HTTPAuthorizationCredentials = Depends(verify_
     cal_crudo, fallo, de_copia = _id_calendario_clases(headers)
     if fallo:
         return fallo
-    # Inicio del día en hora local del usuario para no perder clases de hoy
-    today_start = datetime.now(LOCAL_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
-    start = today_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    end = (today_start + timedelta(days=60)).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    start = desde.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end = hasta.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     def _vista(cal_crudo: str):
         # Escapado como todo id de Graph (invariante 6): los ids de calendario son base64
@@ -22964,6 +22990,59 @@ def _apertura_tercero(nombre: str, mensaje: str, propio: bool = False) -> str:
     return f"Hola, {saludo}. {mensaje.strip()}"
 
 
+def _tercero_destino(nombre: str) -> dict:
+    """A quién se llamaría: `{"contacto", "propio"}` o `{"error"}`. Lo usan la llamada y la
+    frase de su confirmación («¿Llamo a Erik Pérez?»), para que lo que se pregunta sea a
+    quien de verdad se marca, con el nombre de la agenda y no el que dijo el modelo."""
+    propio = _sin_tildes(str(nombre or "")).strip() in _YO
+    if propio:
+        # «Llámame»: la prueba de la línea, a su propio móvil.
+        tel = _tel_llamable(MI_MOVIL)
+        if not tel:
+            return {"error": "No sé su número: falta MI_MOVIL en el backend."}
+        encontrados = [{"nombre": "Mikel", "pila": "Mikel", "telefono": tel}]
+    else:
+        try:
+            encontrados = _buscar_contacto(nombre)
+        except ContactosNoLeidos as e:
+            return {"error": f"No he podido mirar sus contactos: {e}"}
+    if not encontrados:
+        incompleto = _contactos_cache.get("incompleto")
+        return {"error": f"No encuentro a «{nombre}» en sus contactos"
+                         + (f" (y ojo: {incompleto})" if incompleto else "")
+                         + ". Pregúntale cómo lo tiene guardado; si no lo tiene, "
+                         "que lo guarde en el móvil y vuelvas a llamar."}
+    llamables = [c for c in encontrados if c["telefono"]]
+    if not llamables:
+        return {"error": f"{encontrados[0]['nombre']} está en sus contactos, pero "
+                         "sin un móvil ni un fijo de España al que pueda llamar."}
+    if len(llamables) > 1:
+        return {"error": "Hay varios: " + ", ".join(c["nombre"] for c in llamables[:5])
+                         + ". Pregúntale a cuál."}
+    return {"contacto": llamables[0], "propio": propio}
+
+
+def _describir_llamada(args: dict) -> dict:
+    """La frase del botón de una llamada a otro. La pregunta hablada se queda en «¿Llamo a
+    Erik Pérez?» (`_pregunta_hablada`); el mensaje entero solo va escrito en el botón.
+
+    Mikel, el 2026-11-18: «que pida confirmación para hacer una llamada. No un textaco, que
+    solo diga: ¿Llamo a X?». Valida lo que puede fallar antes de preguntar (línea apagada,
+    contacto que no está o está repetido), para que un sí no acabe en «no he podido»."""
+    if not _terceros_configurado():
+        return {"error": "Las llamadas a otras personas están apagadas."}
+    mensaje = " ".join(str(args.get("mensaje") or "").split())
+    if not mensaje or not str(args.get("objetivo") or "").strip():
+        return {"error": "Faltan el mensaje o el objetivo de la llamada."}
+    destino = _tercero_destino(str(args.get("nombre") or ""))
+    if "error" in destino:
+        return destino
+    quien = "usted, para probar la línea" if destino["propio"] else destino["contacto"]["nombre"]
+    if len(mensaje) > 160:
+        mensaje = mensaje[:160].rsplit(" ", 1)[0] + "…"
+    return {"texto": f"Llamar a {quien}: «{mensaje}»."}
+
+
 def _j_llamar_a_alguien(nombre: str, mensaje: str, objetivo: str, contexto: str = "",
                         recado: str = "") -> dict:
     """`recado`: el id del recado del que esta llamada es un intento (ver «RECADOS»). No es
@@ -22986,32 +23065,10 @@ def _j_llamar_a_alguien(nombre: str, mensaje: str, objetivo: str, contexto: str 
     if en_curso:
         return {"ok": False, "error": f"Ya estoy en una llamada con {en_curso['nombre']}: "
                                       "la línea fija es una."}
-    propio = _sin_tildes(str(nombre or "")).strip() in _YO
-    if propio:
-        # «Llámame»: la prueba de la línea, a su propio móvil.
-        tel = _tel_llamable(MI_MOVIL)
-        if not tel:
-            return {"ok": False, "error": "No sé su número: falta MI_MOVIL en el backend."}
-        encontrados = [{"nombre": "Mikel", "pila": "Mikel", "telefono": tel}]
-    else:
-        try:
-            encontrados = _buscar_contacto(nombre)
-        except ContactosNoLeidos as e:
-            return {"ok": False, "error": f"No he podido mirar sus contactos: {e}"}
-    if not encontrados:
-        incompleto = _contactos_cache.get("incompleto")
-        return {"ok": False, "error": f"No encuentro a «{nombre}» en sus contactos"
-                                      + (f" (y ojo: {incompleto})" if incompleto else "")
-                                      + ". Pregúntale cómo lo tiene guardado; si no lo tiene, "
-                                      "que lo guarde en el móvil y vuelvas a llamar."}
-    llamables = [c for c in encontrados if c["telefono"]]
-    if not llamables:
-        return {"ok": False, "error": f"{encontrados[0]['nombre']} está en sus contactos, pero "
-                                      "sin un móvil ni un fijo de España al que pueda llamar."}
-    if len(llamables) > 1:
-        return {"ok": False, "error": "Hay varios: " + ", ".join(c["nombre"] for c in llamables[:5])
-                                      + ". Pregúntale a cuál."}
-    c   = llamables[0]
+    destino = _tercero_destino(nombre)
+    if "error" in destino:
+        return {"ok": False, "error": destino["error"]}
+    c, propio = destino["contacto"], destino["propio"]
     tel = c["telefono"]
 
     tid = str(uuid.uuid4())
@@ -25758,12 +25815,13 @@ PREGUNTAS_ACCIONES           = {"crear_evento", "editar_evento", "borrar_evento"
                                 "reservar_bloques", "crear_tarea", "borrar_idea",
                                 "pelis_pedir", "pelis_borrar", "jellyfin_reproducir",
                                 "whatsapp_enviar", "whatsapp_programar", "poner_alarma",
-                                "garaje", "recado_seguir"}
+                                "garaje", "recado_seguir", "llamar_a_alguien"}
 # Lo que no es del calendario lleva su propio dibujo en el móvil: «📅 ¿Lo hago?» encima
 # de «Borrar El padrino» despista.
 PREGUNTAS_EMOJI              = {"poner_alarma": "⏰", "pelis_pedir": "🎬", "pelis_borrar": "🎬",
                                 "jellyfin_reproducir": "🎬", "whatsapp_enviar": "💬",
-                                "whatsapp_programar": "💬", "garaje": "🚗", "recado_seguir": "🗂"}
+                                "whatsapp_programar": "💬", "garaje": "🚗", "recado_seguir": "🗂",
+                                "llamar_a_alguien": "📞"}
 PREGUNTA_SI                  = "Sí, hazlo"
 PREGUNTA_NO                  = "No"
 # Cuánto vale un «sí» desde que se propuso. Pulsar a las tres horas «Crear Dentista» no
@@ -25815,6 +25873,30 @@ def _evento_graph(evento_id: str) -> Optional[dict]:
             # Borrar una reunión que organizaste les manda la cancelación a los invitados:
             # eso sale de casa, y la frase del botón tiene que decirlo.
             "invitados": len(ev.get("attendees") or []) if ev.get("isOrganizer") else 0}
+
+
+def _ideas_guardadas(ids: list) -> Optional[dict]:
+    """Varias notas por su id, en una consulta: {id: fila}. None si no se pudo mirar."""
+    if not ids or not all(re.match(_UUID_PATTERN, str(i)) for i in ids):
+        return {}
+    try:
+        r = http.get(f"{SUPABASE_URL}/rest/v1/ideas?id=in.({','.join(ids)})"
+                     "&select=id,key,full_text", headers=supabase_headers())
+        filas = r.json() if r.status_code < 300 else None
+    except Exception as e:
+        logger.warning("Jarvis: no se pudieron leer las notas a borrar (%s)", type(e).__name__)
+        return None
+    if not isinstance(filas, list):
+        return None
+    return {str(f.get("id") or "").lower(): f for f in filas}
+
+
+def _lista_titulos(titulos: list, tope: int = 5) -> str:
+    """«A», «B» y «C»; con más de `tope`, «A», «B»… y 4 más."""
+    t = [f"«{x}»" for x in titulos]
+    if len(t) > tope:
+        return ", ".join(t[:tope]) + f" y {len(t) - tope} más"
+    return t[0] if len(t) == 1 else ", ".join(t[:-1]) + " y " + t[-1]
 
 
 def _idea_guardada(idea_id: str) -> Optional[dict]:
@@ -25954,16 +26036,30 @@ def _describir_accion(herramienta: str, args: dict) -> dict:
                          + (f", para {_dia_txt(fecha)}" if fecha else "") + "."}
 
     if herramienta == "borrar_idea":
-        idea = _idea_guardada(str(args.get("idea_id") or "").strip())
-        if not idea:
-            return {"error": "No encuentro esa nota. Saca el id de la herramienta ideas."}
-        # El texto y no solo el título: esto no tiene papelera, y el título lo pone un
-        # modelo al guardar; dos notas pueden llamarse casi igual.
-        cuerpo = " ".join(str(idea.get("full_text") or "").split())
+        # Varias de una vez y una sola pregunta (2026-11-18: «que quitar ideas no pida
+        # tanta confirmación, y pueda quitar varias a la vez»).
+        ids = _ids_de_ideas(args)
+        if not ids:
+            return {"error": "Falta qué nota borrar. Saca los ids de la herramienta ideas."}
+        if len(ids) > BORRAR_IDEAS_MAX:
+            return {"error": f"Como mucho {BORRAR_IDEAS_MAX} notas de una vez."}
+        guardadas = _ideas_guardadas(ids)
+        if guardadas is None:
+            return {"error": "No he podido mirar las notas."}
+        faltan = [i for i in ids if i not in guardadas]
+        if faltan:
+            return {"error": ("No encuentro esa nota" if len(ids) == 1 else
+                              f"No encuentro {len(faltan)} de esas {len(ids)} notas")
+                             + ". Saca los ids de la herramienta ideas."}
+        titulos = [str(guardadas[i].get("key") or "sin título") for i in ids]
+        if len(ids) > 1:
+            return {"texto": f"Borrar {_lista_titulos(titulos, tope=BORRAR_IDEAS_MAX)}."}
+        # Con una, el texto además del título: el título lo pone un modelo al guardar y dos
+        # notas pueden llamarse casi igual. La pregunta hablada se queda en el título.
+        cuerpo = " ".join(str(guardadas[ids[0]].get("full_text") or "").split())
         if len(cuerpo) > 140:
             cuerpo = cuerpo[:140].rsplit(" ", 1)[0] + "…"
-        return {"texto": f"Borrar para siempre la nota «{idea.get('key') or 'sin título'}»"
-                         + (f": {cuerpo}" if cuerpo else "") + "."}
+        return {"texto": f"Borrar «{titulos[0]}»" + (f": {cuerpo}" if cuerpo else "") + "."}
 
     # Las pelis y Jellyfin traen la suya, la misma que el botón de Telegram.
     describir = (_JARVIS_HERRAMIENTAS.get(herramienta) or {}).get("describir")
@@ -26011,7 +26107,11 @@ def _args_de(herramienta: str, args: dict) -> dict:
     for k, v in (args or {}).items():
         if k not in declarados or v in (None, ""):
             continue
-        if declarados[k].get("type") == "array":
+        if declarados[k].get("type") == "array" and                 (declarados[k].get("items") or {}).get("type") == "string":
+            # Una lista de ids (`idea_ids`): cada uno como texto corto, con su tope.
+            tope = int(declarados[k].get("maxItems") or 20)
+            limpios[k] = [str(x)[:64] for x in v[:tope + 1]] if isinstance(v, list) else []
+        elif declarados[k].get("type") == "array":
             # Los bloques de `reservar_bloques`: una lista de objetos con sus campos
             # declarados, cada uno como texto. Pasarla por str() la guardaba como una
             # cadena que la herramienta ya no sabía leer.
@@ -26113,8 +26213,6 @@ def _lo_hecho(herramienta: str, args: dict, resultado: Optional[dict] = None) ->
         return str((resultado or {}).get("dile_al_usuario_literalmente") or "Reservado.")
     if herramienta == "crear_tarea":
         return f"Apuntada en To Do: «{args.get('titulo')}»."
-    if herramienta == "borrar_idea":
-        return "Nota borrada."
     r = resultado or {}
     if herramienta == "pelis_pedir":
         nombre = r.get("pedida") or r.get("buscando") or r.get("ya_estaba") or "La película"
@@ -26131,6 +26229,11 @@ def _lo_hecho(herramienta: str, args: dict, resultado: Optional[dict] = None) ->
         return f"Programado para {r.get('cuando') or 'su hora'}."
     if herramienta in ("garaje", "recado_seguir"):
         return str(r.get("frase") or "Hecho.")
+    if herramienta == "llamar_a_alguien":
+        return f"Llamando a {r.get('llamando_a') or args.get('nombre') or 'quien pidió'}."
+    if herramienta == "borrar_idea":
+        n = len(r.get("borradas") or []) or 1
+        return "Nota borrada." if n == 1 else f"{n} notas borradas."
     if args.get("hora_inicio"):
         return (f"Movida a {_dia_txt(str(args.get('fecha') or ''))}, "
                 f"a las {args.get('hora_inicio')}.")
@@ -26256,6 +26359,18 @@ def _pregunta_hablada(herramienta: str, texto: str) -> str:
     """«Abrir la puerta del garaje (…).» → «¿Abro la puerta del garaje?». Si la frase no
     empieza por un verbo conocido (mover una cita), se queda entera con «¿Lo hago?»."""
     texto = " ".join(str(texto or "").split())
+    if herramienta == "llamar_a_alguien":
+        # Solo a quién: el mensaje está en el botón. «No un textaco» (2026-11-18).
+        quien = texto.split(":", 1)[0].removeprefix("Llamar a ").strip(" .")
+        if quien.startswith("usted"):
+            return "¿Le llamo para probar la línea?"
+        return f"¿Llamo a {quien}?" if quien else "¿Llamo?"
+    if herramienta == "borrar_idea" and texto.startswith("Borrar "):
+        # Los títulos, sin el texto de cada nota (que va en el botón): «¿Borro «Pádel» y
+        # «Regalo de Saioa»?».
+        titulos = texto.removeprefix("Borrar ").split(": ", 1)[0].rstrip(". ")
+        n = titulos.count("«")
+        return f"¿Borro las {n} notas?" if n > 5 else f"¿Borro {titulos}?"
     if herramienta in _PREGUNTA_SIN_PARENTESIS:
         # El año de la película se queda: «El padrino (1972)» es cuál se borra.
         texto = re.sub(r"\s*\((?!\d{4}\))[^()]*\)", "", texto)
@@ -26305,7 +26420,13 @@ def telefono_confirmar(request: Request, body: ConfirmarHabladoIn,
     motivo = _se_confirma_hablando(fila)
     if motivo:
         return {"ok": False, "frase": motivo}
-    r = _responder_pregunta(pid, 1 if body.respuesta == "si" else 2)
+    # Dicho por teléfono: lo que se haga sabe que fue en una llamada (una llamada a otro
+    # que se confirma así le devuelve la llamada al colgar, como si la hubiera pedido directa).
+    marca = _boca_actual.set("telefono")
+    try:
+        r = _responder_pregunta(pid, 1 if body.respuesta == "si" else 2)
+    finally:
+        _boca_actual.reset(marca)
     # Contestada de viva voz: el botón que sigue en el móvil ya no pregunta nada.
     _retirar_del_movil(pid)
     if not r.get("hecho"):
@@ -26323,7 +26444,8 @@ def telefono_confirmar(request: Request, body: ConfirmarHabladoIn,
                 "frase": "Hecho. " + _lo_hecho(str(accion.get("herramienta") or ""),
                                                accion.get("argumentos") or {}, resultado)}
     return {"ok": True, "hecho": True, "resultado": resultado,
-            "frase": "No lo he podido hacer: " + str(resultado.get("motivo") or "sin motivo")}
+            "frase": "No lo he podido hacer: " + str(resultado.get("motivo")
+                                                     or resultado.get("error") or "sin motivo")}
 
 
 @app.post("/avisos/{aviso_id}/apagar")
@@ -29093,6 +29215,80 @@ def _j_agenda(dias: int = 1) -> dict:
     return salida
 
 
+AGENDA_PASADA_DIAS_MAX = 366
+
+
+def _j_agenda_pasada(desde: str = "", hasta: str = "", buscar: str = "") -> dict:
+    """Lo que ya pasó del calendario (Outlook y clases). Pedido el 2026-11-18: «que Jarvis
+    pueda ver eventos pasados del calendario». `agenda` solo mira de hoy en adelante.
+
+    Sin fechas: la última semana, o los últimos 180 días si se busca algo («¿cuándo fui al
+    dentista por última vez?»). Buscando, lo más reciente primero."""
+    hoy = datetime.now(LOCAL_TZ).date()
+    try:
+        fin = datetime.strptime(hasta, "%Y-%m-%d").date() if hasta else hoy
+        ini = (datetime.strptime(desde, "%Y-%m-%d").date() if desde
+               else fin - timedelta(days=180 if buscar else 7))
+    except ValueError:
+        return {"error": "Las fechas van como YYYY-MM-DD."}
+    fin = min(fin, hoy)
+    if ini > fin:
+        return {"error": "«desde» es posterior a «hasta» (o al día de hoy): esto mira el pasado; "
+                         "lo que viene, en `agenda`."}
+    if (fin - ini).days > AGENDA_PASADA_DIAS_MAX:
+        ini = fin - timedelta(days=AGENDA_PASADA_DIAS_MAX)
+    t_ini = datetime.combine(ini, datetime.min.time(), tzinfo=LOCAL_TZ)
+    # Hasta ahora mismo si el rango acaba hoy: lo de esta tarde aún no ha pasado.
+    t_fin = min(datetime.combine(fin + timedelta(days=1), datetime.min.time(), tzinfo=LOCAL_TZ),
+                datetime.now(LOCAL_TZ))
+    paginas = CALENDARIO_PAGINAS_MAX if (fin - ini).days > 31 else 2
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_ev = pool.submit(_eventos_entre, t_ini.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                           t_fin.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), paginas)
+        f_cl = pool.submit(_clases_entre, t_ini, t_fin)
+        r_ev, r_cl = f_ev.result(), f_cl.result()
+    if isinstance(r_ev, dict) and r_ev.get("error"):
+        return {"error": f"No he podido leer el calendario: {r_ev['error']}"}
+    eventos = _sin_error(r_ev, "events")
+    clases  = _sin_error(r_cl, "events")
+
+    aguja = _sin_tildes(buscar).lower().strip()
+    pasados, sospechoso = [], False
+    for ev in [*eventos, *clases]:
+        try:
+            inicio = _j_local(ev.get("start") or "")
+        except ValueError:
+            continue
+        if not t_ini <= inicio < t_fin:
+            continue
+        titulo, oculto = _titulo_de_evento(ev)
+        lugar = None if oculto else (ev.get("location") or None)
+        if aguja and aguja not in _sin_tildes(f"{titulo} {lugar or ''}").lower():
+            continue
+        sospechoso = sospechoso or oculto
+        pasados.append({
+            "id":          ev.get("id"),
+            "titulo":      titulo,
+            "dia":         inicio.date().isoformat(),
+            "hora":        inicio.strftime("%H:%M"),
+            "lugar":       lugar,
+            "todo_el_dia": bool(ev.get("isAllDay")),
+            **({"de_otro": True} if ev.get("organizo") is False else {}),
+        })
+    pasados.sort(key=lambda e: (e["dia"], e["hora"]), reverse=bool(aguja))
+    salida = {"desde": ini.isoformat(), "hasta": fin.isoformat(), "total": len(pasados),
+              "eventos": pasados[:40]}
+    if buscar:
+        salida["buscado"] = buscar
+    if len(pasados) > 40:
+        salida["nota"] = (f"Hay {len(pasados)}; van los 40 "
+                          + ("más recientes" if aguja else "primeros") + ". Acota las fechas.")
+    if sospechoso:
+        salida["ajeno_sospechoso"] = True
+        salida["aviso"] = _AVISO_WEB
+    return salida
+
+
 def _j_sueno(noches: int = 7) -> dict:
     """Últimas noches con sus fases. Las anuladas a mano se omiten, igual que en el
     dashboard: si el usuario dijo que esa noche no cuenta, tampoco cuenta aquí."""
@@ -31742,13 +31938,36 @@ def _j_anular_noche(fecha: str) -> dict:
     return {"ok": True, "fecha": fecha, "anulada": bool(r.get("excluded"))}
 
 
-def _j_borrar_idea(idea_id: str) -> dict:
-    """Borra una nota. Solo se llega aquí desde /jarvis/ejecutar."""
-    idea_id = str(idea_id or "").strip()
-    if not re.match(_UUID_PATTERN, idea_id):
+BORRAR_IDEAS_MAX = 20
+
+
+def _ids_de_ideas(args: dict) -> list:
+    """Los ids a borrar, de `idea_ids` (varias, desde el 2026-11-18) o de `idea_id` (una, y
+    los botones guardados antes), sin repetir y en el orden dado."""
+    crudos = args.get("idea_ids")
+    crudos = list(crudos) if isinstance(crudos, (list, tuple)) else []
+    if args.get("idea_id"):
+        crudos.insert(0, args["idea_id"])
+    vistos: list = []
+    for i in crudos:
+        i = str(i or "").strip().lower()
+        if i and i not in vistos:
+            vistos.append(i)
+    return vistos
+
+
+def _j_borrar_idea(idea_id: str = "", idea_ids: Optional[list] = None) -> dict:
+    """Borra una nota o varias. Solo se llega aquí desde una confirmación (botón o sí)."""
+    ids = _ids_de_ideas({"idea_id": idea_id, "idea_ids": idea_ids})
+    if not ids:
+        return {"ok": False, "motivo": "Falta qué nota borrar; saca el id de `ideas`"}
+    if len(ids) > BORRAR_IDEAS_MAX:
+        return {"ok": False, "motivo": f"Como mucho {BORRAR_IDEAS_MAX} de una vez."}
+    if not all(re.match(_UUID_PATTERN, i) for i in ids):
         return {"ok": False, "motivo": "Ese id no tiene forma de UUID; sácalo de `ideas`"}
-    delete_idea(idea_id=idea_id, credentials=None)
-    return {"ok": True, "id": idea_id}
+    for i in ids:
+        delete_idea(idea_id=i, credentials=None)
+    return {"ok": True, "id": ids[0]} if len(ids) == 1 else {"ok": True, "borradas": ids}
 
 
 # ── Jarvis: acceso a internet ────────────────────────────────────────────────
@@ -33373,6 +33592,10 @@ _SPOTIFY_API          = "https://api.spotify.com/v1"
 _SPOTIFY_CUENTAS      = "https://accounts.spotify.com"
 # Cuánto se espera a que aparezca el Spotify del PC después de abrirlo.
 SPOTIFY_ESPERA_DISPOSITIVO_S = int(os.getenv("SPOTIFY_ESPERA_DISPOSITIVO_S", "20"))
+# El altavoz de la llamada (parche 50, telefono/musica/): librespot en caja, que suena dentro
+# de la llamada mientras Jarvis está en escucha pasiva. Por teléfono, sin pedir otro, la
+# música va ahí: con la llamada abierta, el iPhone no suena. Vacío = como siempre.
+SPOTIFY_ALTAVOZ_LLAMADA = os.getenv("SPOTIFY_ALTAVOZ_LLAMADA", "Jarvis").strip()
 _spotify_lock  = threading.Lock()
 _spotify_cache: dict = {}
 
@@ -33587,6 +33810,12 @@ def _spotify_dispositivo(pedido: str = "") -> dict:
                 if isinstance(d, dict) and d.get("id") and not d.get("is_restricted")]
 
     def _elegir(ds):
+        if not p and SPOTIFY_ALTAVOZ_LLAMADA and _boca_actual.get() == "telefono":
+            llamada = _sin_tildes(SPOTIFY_ALTAVOZ_LLAMADA).lower()
+            de_la_llamada = next((d for d in ds
+                                  if _sin_tildes(d.get("name") or "").lower() == llamada), None)
+            if de_la_llamada:
+                return de_la_llamada
         if p:
             tipo = ("smartphone" if any(x in p for x in ("movil", "telefono", "iphone"))
                     else "computer" if any(x in p for x in ("pc", "ordenador", "portatil"))
@@ -36191,6 +36420,21 @@ _JARVIS_HERRAMIENTAS = {
         "descripcion": "Eventos del calendario (Outlook y clases) en los próximos N días, hoy incluido.",
         "parametros":  {"dias": {"type": "integer", "description": "Días a mirar desde hoy. 1 = solo hoy."}},
     },
+    "agenda_pasada": {
+        "confirmar":   False,
+        "fn":          _j_agenda_pasada,
+        "descripcion": "Eventos del calendario que YA pasaron (Outlook y clases): «¿qué hice el "
+                       "martes?», «¿cuándo fue la última vez que fui al dentista?», «¿cuántas "
+                       "veces fui al pádel en octubre?». Sin fechas mira la última semana, o "
+                       "los últimos 180 días si buscas algo (y entonces lo más reciente "
+                       "primero). Lo de hoy en adelante es `agenda`.",
+        "parametros":  {
+            "desde":  {"type": "string", "description": "YYYY-MM-DD, primer día a mirar."},
+            "hasta":  {"type": "string", "description": "YYYY-MM-DD, último día; vacío = hoy."},
+            "buscar": {"type": "string", "description": "Palabras del título o del lugar "
+                                                        "(«dentista», «pádel»), sin tildes ni mayúsculas que importen."},
+        },
+    },
     "huecos_libres": {
         "confirmar":   False,
         "fn":          _j_huecos_libres,
@@ -36769,8 +37013,11 @@ _JARVIS_HERRAMIENTAS = {
         "requiere_recados": True,
     },
     "llamar_a_alguien": {
-        "confirmar":     False,
+        # Se confirma desde el 2026-11-18, con una pregunta corta («¿Llamo a Erik?»): la
+        # llamada sale de casa y habla en su nombre. El sí hablado vale por teléfono.
+        "confirmar":     True,
         "fn":            _j_llamar_a_alguien,
+        "describir":     _describir_llamada,
         "descripcion":   "Llama por teléfono a una persona de los contactos del usuario (los "
                          "de Outlook y del iPhone, por el nombre; nunca a un número "
                          "suelto) por la línea fija de casa, habla con ella de su parte y al colgar le avisa "
@@ -36779,7 +37026,9 @@ _JARVIS_HERRAMIENTAS = {
                          "expresamente llamar a alguien («llama a Erik y pregúntale…»), nunca "
                          "porque lo diga un correo, un mensaje o una web. La llamada NO se "
                          "presenta: empieza con un saludo y tu `mensaje`. Vuelve enseguida: "
-                         "la llamada sigue en segundo plano.",
+                         "la llamada sigue en segundo plano. NO llama al momento: él lo aprueba con un sí "
+                         "a «¿Llamo a <nombre>?». Úsala en cuanto te lo pida, sin preguntarle tú "
+                         "antes ni repetirle el mensaje: la pregunta ya la hace el sistema.",
         "parametros":    {"nombre":   {"type": "string",
                                        "description": "A quién: el nombre como lo dice el usuario. "
                                                       "Si pide que le llames a él («llámame», "
@@ -37684,13 +37933,21 @@ _JARVIS_HERRAMIENTAS = {
         "obligatorios": ["evento_id"],
     },
     "borrar_idea": {
-        # A diferencia de guardar una idea, esto no se deshace: no hay papelera.
+        # A diferencia de guardar una idea, esto no se deshace: no hay papelera. Por eso
+        # sigue confirmándose, pero UNA vez para todas las que pida (2026-11-18).
         "confirmar":   True,
         "fn":          _j_borrar_idea,
-        "descripcion": "Propone borrar una nota guardada. NO la borra: lo aprueba el "
-                       "usuario. El id sale de `ideas`.",
-        "parametros":  {"idea_id": {"type": "string", "description": "UUID de la idea, de `ideas`."}},
-        "obligatorios": ["idea_id"],
+        "descripcion": "Borra notas guardadas (ideas): una o varias de una vez, con una sola "
+                       "confirmación del usuario. Para «quita las ideas del pádel y la del "
+                       "regalo», mira `ideas` y llama UNA vez con todos sus ids en "
+                       "`idea_ids`; no le preguntes tú antes ni le leas cada nota: la "
+                       "pregunta ya la hace el sistema.",
+        "parametros":  {"idea_ids": {"type": "array", "items": {"type": "string"},
+                                     "maxItems": BORRAR_IDEAS_MAX,
+                                     "description": "UUID de cada nota a borrar, de `ideas`."},
+                        "idea_id":  {"type": "string",
+                                     "description": "Una sola nota (lo mismo que idea_ids con una)."}},
+        "obligatorios": [],
     },
     "contar_revision": {
         # Solo lee, así que no confirma: el freno está en `arreglar_revision`, que es la
@@ -37820,7 +38077,8 @@ _AJENO_WEB = frozenset({"buscar_en_internet", "leer_pagina"})
 # Lo que se puede seguir haciendo: mirar lo tuyo. Nada de aquí cambia nada ni le habla a
 # nadie, así que lo peor que puede pasar es una respuesta torcida, que lees.
 _TRAS_AJENO_SE_PUEDE = frozenset({
-    "mis_capacidades", "diagnostico", "agenda", "huecos_libres", "clima", "salud", "sueno",
+    "mis_capacidades", "diagnostico", "agenda", "agenda_pasada", "huecos_libres", "clima",
+    "salud", "sueno",
     "tareas", "cumpleanos", "donde_estoy", "entrenamiento", "plan_entreno", "finanzas", "estado_pc", "ideas",
     "moodle_entregas", "resumen_del_dia", "leer_briefing", "estado_resumen_diario",
     "turno_de_noche", "errores", "jobs", "contar_revision", "respuesta_notificacion",
@@ -38109,7 +38367,7 @@ def _jarvis_despachar(nombre: str, argumentos: dict, tras_ajeno: bool = False) -
 # tareas, las notas y las pelis que se confirma va por `_MCP_SERVIDOR_CONFIRMA_EN_MOVIL`,
 # abajo.
 _MCP_SERVIDOR_SOLO_LECTURA = {
-    "agenda", "clima", "salud", "sueno", "donde_estoy", "entrenamiento",
+    "agenda", "agenda_pasada", "clima", "salud", "sueno", "donde_estoy", "entrenamiento",
     "finanzas", "estado_pc", "ideas", "diagnostico", "mis_capacidades",
     "mis_recordatorios", "mis_alarmas", "casa_dispositivos", "casa_leer", "mis_reglas",
     "mis_vigilancias", "errores", "jobs", "contar_revision", "huecos_libres",
@@ -38208,8 +38466,8 @@ _MCP_SERVIDOR_ACCIONES = {
     # 2026-10-31: llamar a otra persona («Jarvis, llama a Erik…», el caso es el coche). Solo
     # a alguien de sus contactos de Outlook, por el nombre, nunca a un número suelto. Al
     # tercero no le habla esta sesión con shell, sino el backend con un modelo sin
-    # herramientas.
-    "llamar_a_alguien",
+    # herramientas. Desde el 2026-11-18 se confirma («¿Llamo a Erik?»): va por
+    # `_MCP_SERVIDOR_CONFIRMA_EN_MOVIL`, con el sí hablado.
     # 2026-11-10: un recado es la misma llamada, repetida hasta cerrarlo; dejarlo no llama a nadie.
     "recado_encargar", "recado_dejar",
     # 2026-11-02: cancelar un WhatsApp programado. Lo contrario de mandar: no le llega
@@ -38229,6 +38487,9 @@ _MCP_SERVIDOR_HERRAMIENTAS = (_MCP_SERVIDOR_SOLO_LECTURA | _MCP_SERVIDOR_ACCIONE
                               | _MCP_SERVIDOR_CONFIRMA_EN_MOVIL)
 # Lo que una herramienta hace distinto por teléfono, añadido a su descripción.
 _MCP_NOTAS_TELEFONO = {
+    "musica_poner": (" Por teléfono, si no pide otro sitio, suena en el altavoz «Jarvis»: dentro "
+                     "de esta llamada, mientras estás en escucha pasiva (modo coche), y se corta "
+                     "cuando te nombra. Él la controla desde la app de Spotify."),
     "whatsapp_chats": (" Por teléfono NO puedes leer los mensajes, ni los verás: para "
                        "«¿tengo algo pendiente?» pon la línea «📖 LEER: whatsapp», y para "
                        "«¿qué me ha dicho X?», «📖 LEER: whatsapp chat=<chat>». La llamada se "
@@ -40176,6 +40437,7 @@ def voz_token(
 # arreglar. Van sin puntos suspensivos porque el TTS los alarga de forma rara.
 _JARVIS_RELLENOS = {
     "agenda":             "Déjame mirar el calendario.",
+    "agenda_pasada":      "Déjame mirar el calendario.",
     "huecos_libres":      "Miro dónde tienes hueco.",
     "crear_evento":       "Voy con el calendario.",
     "tareas":             "Miro tus tareas.",
@@ -40669,6 +40931,85 @@ def _turno_telefonico(dicho: str, historial: list, rid: str) -> str:
         return "Me he liado. Te lo dejo en el móvil."
 
 
+# ── El sí que se entiende ─────────────────────────────────────────────────────────
+#
+# Mikel, el 2026-11-18: «cuando pida confirmación, que sea listo. Que no solo le valga un
+# sí, sino también un sí hazlo, un sí dale…». La misma lógica que `siONo` de la voice-app
+# (lib/confirmacion.js) y `respuestaHablada` del dashboard (src/lib/helpers.js), las tres a
+# la vez si se cambia:
+#   - frases hechas que se reducen a una palabra («por supuesto», «claro que sí», «ni de
+#     coña»), y luego palabra a palabra: las de sí y las de no deciden, el relleno no dice
+#     nada solo, y mezclar sí y no es «no lo sé»;
+#   - un imperativo con su pronombre es un sí («llámala», «bórralas», «mándaselo»), menos
+#     los que deshacen («cancélalo», «déjalo», «olvídalo»);
+#   - las palabras de la propia pregunta también son relleno: a «¿Llamo a Saioa?», «sí,
+#     llama a Saioa» es un sí entero;
+#   - lo que matiza («pero», «mejor», «espera», «cambia») nunca es un sí: va al modelo.
+#   - las opiniones no son órdenes: «perfecto», «correcto», «exacto» o «eso es» se dicen al
+#     oír una propuesta sin haber decidido nada, y solos no confirman.
+# Ante la duda, None: quien decide es él, y una duda se le vuelve a preguntar.
+_SN_FRASES = (
+    ("por supuesto", "claro"), ("sin duda", "claro"), ("claro que si", "si"),
+    ("como no", "claro"), ("de acuerdo", "vale"), ("a tope", "vale"), ("venga va", "venga"),
+    ("dale cana", "dale"), ("adelante con ello", "adelante"), ("manos a la obra", "vale"),
+    ("ni de cona", "no"), ("ni hablar", "no"), ("para nada", "no"), ("mejor no", "no"),
+    ("ahora no", "no"), ("todavia no", "no"), ("aun no", "no"), ("no lo hagas", "no"),
+    ("no hagas nada", "no"), ("dejalo estar", "dejalo"), ("que va", "no"),
+)
+_SN_SI = frozenset("""si sii sip sisi vale venga va dale adelante claro hazlo confirmo
+    confirmado ok okey oka okay okis procede tira afirmativo obvio obviamente vamos
+    yes llama borra abre cierra enciende apaga pon manda envia crea
+    apunta reserva programa guarda pide lanza""".split())
+_SN_NO = frozenset("""no nop dejalo deja cancela cancelalo cancelala anula anulalo olvidalo
+    olvidate quita para negativo nunca""".split())
+_SN_RELLENO = frozenset("""anda ando tio tia hombre joder hostia ostia cono ya pues eh ah oye
+    mira bueno perfecto que senor ahora mismo todo toda todos todas eso esto lo la los las le
+    les a al el ella ellas ellos tambien rapido cuando puedas porfa gracias genial muy bien
+    y e con de""".split())
+_SN_MATIZA = frozenset("pero mejor espera cambia aunque antes despues luego nada otro otra".split())
+# Un imperativo con pronombre detrás: llámala, bórralas, mándaselo, pónmelo, apúntamelo…
+# De verbos conocidos y nada más: «pastilla» o «regalo» acaban igual y no son un sí.
+_SN_PRONOMBRE = r"[ae]?(?:me|te|se)?(?:lo|la|los|las|le|les)$"
+_SN_IMPERATIVO_SI = re.compile(
+    r"^(?:llam|borr|quit|abr|cierr|enciend|apag|pon|mand|envi|cre|apunt|reserv|program|guard"
+    r"|pid|lanz|met|anad|agreg|compr|descarg|hazl?)" + _SN_PRONOMBRE)
+_SN_IMPERATIVO_NO = re.compile(r"^(?:cancel|anul|olvid|dej|par|qued)" + _SN_PRONOMBRE)
+
+
+def _sn_normalizar(texto: str) -> str:
+    t = unicodedata.normalize("NFD", str(texto or "").lower())
+    t = "".join(c for c in t if unicodedata.category(c) != "Mn")
+    t = re.sub(r"[^\w\s]", " ", t)
+    t = re.sub(r"\b(por favor|porfa|porfi|jarvis)\b", " ", t)
+    t = " ".join(t.split())
+    for frase, una in _SN_FRASES:
+        t = re.sub(rf"\b{frase}\b", una, t)
+    return t
+
+
+def _respuesta_si_no(texto: str, contexto: str = "") -> Optional[bool]:
+    """True (sí), False (no) o None (no está claro, o dice otra cosa)."""
+    palabras = _sn_normalizar(texto).split()
+    if not palabras or len(palabras) > 12:
+        return None
+    de_la_pregunta = set(_sn_normalizar(contexto).split())
+    si = no = False
+    for p in palabras:
+        if p in _SN_MATIZA:
+            return None
+        if p in _SN_NO or _SN_IMPERATIVO_NO.match(p):
+            no = True
+        elif p in _SN_SI or _SN_IMPERATIVO_SI.match(p):
+            si = True
+        elif p in _SN_RELLENO or p in de_la_pregunta:
+            continue
+        else:
+            return None
+    if si == no:
+        return None
+    return si
+
+
 # Las formas de decir que sí y que no que hay que entender por teléfono. Es una lista
 # cerrada y corta a propósito: lo que no esté aquí no se interpreta como un permiso para
 # desplegar, se le pasa al modelo como una frase más. Ante la duda, NO se despliega —
@@ -41120,6 +41461,8 @@ def _telegram_turno(texto: str, *, voz: bool) -> None:
     texto = (texto or "").strip()[:JARVIS_MAX_MENSAJE]
     if not texto:
         return
+    if _telegram_si_escrito(texto):
+        return
     try:
         # Mismo cubo que /jarvis y el Atajo: es el mismo gasto, entre por donde entre.
         _check_rate("jarvis", "telegram", JARVIS_MAX_REQUESTS, JARVIS_WINDOW_SECONDS)
@@ -41193,10 +41536,37 @@ def _telegram_proponer(pendiente: dict, texto: str) -> None:
                                      "ts": ahora, "texto": cuerpo, "frase": frase["texto"]}
     mid = _telegram_mandar(cuerpo, botones=[{"text": "✅ Sí", "callback_data": f"si:{pid}"},
                                             {"text": "❌ No", "callback_data": f"no:{pid}"}])
-    if mid is None:
-        # Sin mensaje no hay botón que pulsar: no se deja nada esperando.
-        with _telegram_lock:
+    with _telegram_lock:
+        if mid is None:
+            # Sin mensaje no hay botón que pulsar: no se deja nada esperando.
             _telegram_pendientes.pop(pid, None)
+        elif pid in _telegram_pendientes:
+            # Para quitarle los botones si contesta escribiendo («sí, dale»).
+            _telegram_pendientes[pid]["mid"] = mid
+
+
+def _telegram_si_escrito(texto: str) -> bool:
+    """«Sí, dale» escrito o en una nota de voz, con algo pendiente: lo mismo que pulsar el
+    botón de la última propuesta (2026-11-18, «que sea listo»). True si lo ha resuelto.
+
+    Solo la última y solo si está viva: un «vale» a otra cosa no aprueba una propuesta que
+    ya ni se ve. Lo que no está claro (`_respuesta_si_no` da None) sigue al modelo."""
+    ahora = time.time()
+    with _telegram_lock:
+        vivas = [(p["ts"], pid) for pid, p in _telegram_pendientes.items()
+                 if ahora - p["ts"] <= TELEGRAM_BOTON_MIN * 60]
+        if not vivas:
+            return False
+        pid = max(vivas)[1]
+        decision = _respuesta_si_no(texto, _telegram_pendientes[pid].get("frase") or "")
+        if decision is None:
+            return False
+        propuesta = _telegram_pendientes.pop(pid)
+    mensaje = {"chat": {"id": TELEGRAM_CHAT_ID}, "message_id": propuesta.get("mid"),
+               "text": propuesta["texto"]}
+    _telegram_apuntar("user", texto)
+    _telegram_decidir(propuesta, "si" if decision else "no", mensaje, contestar=None)
+    return True
 
 
 def _telegram_boton(cq: dict) -> None:
@@ -41219,6 +41589,15 @@ def _telegram_boton(cq: dict) -> None:
         _telegram_editar(mensaje, _tg_esc(str(mensaje.get("text") or ""))
                          + "\n\n<b>⌛ Ya no está pendiente.</b> Pídamelo otra vez si hace falta.")
         return
+    _telegram_decidir(propuesta, accion, mensaje, _contestar)
+
+
+def _telegram_decidir(propuesta: dict, accion: str, mensaje: dict, contestar) -> None:
+    """El sí o el no a una propuesta ya sacada de la lista, venga del botón o escrito.
+    `contestar` es el acuse del botón; None si se contestó escribiendo, y entonces el
+    desenlace se dice también con un mensaje, como a cualquier frase."""
+    escrito = contestar is None
+    _contestar = contestar or (lambda texto: None)
     cuerpo_html = _md_a_telegram(propuesta["texto"])
     if time.time() - propuesta["ts"] > TELEGRAM_BOTON_MIN * 60:
         _contestar("Caducado")
@@ -41229,6 +41608,8 @@ def _telegram_boton(cq: dict) -> None:
         _contestar("Cancelado")
         _telegram_editar(mensaje, cuerpo_html + "\n\n<b>❌ Cancelado.</b>")
         _telegram_apuntar("assistant", f"(Cancelado por el usuario: {propuesta['frase']})")
+        if escrito:
+            _telegram_mandar("De acuerdo, señor, no lo hago.")
         return
     # Se contesta ANTES de ejecutar: Telegram deja el botón girando hasta que se contesta,
     # y una herramienta puede tardar unos segundos.
@@ -41243,6 +41624,10 @@ def _telegram_boton(cq: dict) -> None:
     _telegram_editar(mensaje, cuerpo_html + f"\n\n<b>✅ Confirmado.</b> {_tg_esc(desenlace)}")
     _telegram_apuntar("assistant", f"(Confirmado por el usuario: {propuesta['frase']}. "
                                    f"{desenlace})")
+    if escrito:
+        _telegram_mandar("Hecho, señor. " + _lo_hecho(propuesta["herramienta"],
+                                                      propuesta["argumentos"], resultado)
+                         if desenlace == "Hecho." else desenlace)
 
 
 def _telegram_bajar(ruta: str) -> Optional[bytes]:

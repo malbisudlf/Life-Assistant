@@ -1,0 +1,517 @@
+--- a/voice-app/lib/confirmacion.js
++++ b/voice-app/lib/confirmacion.js
+@@ -30,6 +30,13 @@
+  * repetir pasa de «Perdone, señor, no le he oído bien. ¿Lo hago? Diga sí o no.» a
+  * «Perdone, señor, ¿sí o no?».
+  *
++ * Parche 50 (2026-11-18): que sea listo. Mikel: «que no solo le valga un sí, sino también un
++ * sí hazlo, un sí dale…». La misma lógica que `_respuesta_si_no` del backend y
++ * `respuestaHablada` del dashboard (las tres a la vez si se cambia): frases hechas («por
++ * supuesto», «ni de coña»), imperativos con pronombre («llámala», «bórralas», «mándaselo»),
++ * y las palabras de la propia pregunta como relleno: a «¿Llamo a Saioa?», «sí, llama a
++ * Saioa» es un sí. Lo que matiza («pero», «mejor», «espera») sigue yendo a Claude.
++ *
+  * Variables: LECTURA_URL (el backend, como la lectura), CONFIRMAR_TOKEN y
+  * CONFIRMAR_ESPERA_MS.
+  */
+@@ -55,55 +62,96 @@
+ 
+ // Parche 35: palabra a palabra. Las de sí y las de no deciden; el relleno, solo, no dice nada
+ // («perfecto» o «anda» sueltos siguen sin ser un sí), y mezclar sí y no es «no lo sé».
+-const PALABRAS_SI = new Set([
+-  'si', 'sip', 'vale', 'venga', 'va', 'dale', 'adelante', 'claro', 'hazlo', 'confirmo',
+-  'confirmado', 'ok', 'okey', 'oka', 'procede', 'tira', 'mandalo', 'mandaselo', 'envialo',
+-  'enviaselo', 'crealo', 'apuntalo', 'ponlo', 'pidelo', 'reservalo', 'programalo', 'guardalo'
+-]);
+-const PALABRAS_NO = new Set([
+-  'no', 'dejalo', 'cancela', 'cancelalo', 'olvidalo', 'anula', 'anulalo', 'quita', 'para'
+-]);
+-const RELLENO = new Set([
++const PALABRAS_SI = new Set((
++  'si sii sip sisi vale venga va dale adelante claro hazlo confirmo confirmado ok okey oka ' +
++  'okay okis procede tira afirmativo obvio obviamente vamos yes llama borra abre cierra ' +
++  'enciende apaga pon manda envia crea apunta reserva programa guarda pide lanza'
++).split(' '));
++const PALABRAS_NO = new Set((
++  'no nop dejalo deja cancela cancelalo cancelala anula anulalo olvidalo olvidate quita para ' +
++  'negativo'
++).split(' '));
++const RELLENO = new Set((
++  'anda ando tio tia hombre joder hostia ostia cono ya pues eh ah oye mira bueno perfecto que ' +
++  'senor ahora mismo todo toda todos todas eso esto lo la los las le les a al el ella ellas ' +
++  'ellos tambien rapido cuando puedas porfa gracias genial muy bien y e con de'
++).split(' '));
++// El de antes del parche 50, para `pareceSi`: con artículos y preposiciones de relleno,
++// «Sí, a las nueve» parecería un sí mal oído, y es otra cosa.
++const RELLENO_CORTO = new Set([
+   'anda', 'ando', 'tio', 'tia', 'hombre', 'joder', 'hostia', 'ostia', 'cono', 'ya', 'pues',
+   'eh', 'ah', 'oye', 'mira', 'bueno', 'perfecto', 'que', 'senor', 'ahora', 'mismo'
+ ]);
+ // Lo que convierte un sí en otra cosa: esto nunca se vuelve a preguntar, va a Claude.
+-const MATIZA = new Set(['pero', 'mejor', 'espera', 'cambia', 'aunque', 'antes', 'despues', 'nunca', 'nada']);
++const MATIZA = new Set(['pero', 'mejor', 'espera', 'cambia', 'aunque', 'antes', 'despues', 'nunca',
++  'nada', 'luego', 'otro', 'otra']);
++// Parche 50: frases hechas que se reducen a una palabra antes de mirar palabra a palabra.
++const FRASES_HECHAS = [
++  ['por supuesto', 'claro'], ['sin duda', 'claro'], ['claro que si', 'si'], ['como no', 'claro'],
++  ['de acuerdo', 'vale'], ['a tope', 'vale'], ['venga va', 'venga'], ['dale cana', 'dale'],
++  ['adelante con ello', 'adelante'], ['manos a la obra', 'vale'], ['ni de cona', 'no'],
++  ['ni hablar', 'no'], ['para nada', 'no'], ['mejor no', 'no'], ['ahora no', 'no'],
++  ['todavia no', 'no'], ['aun no', 'no'], ['no lo hagas', 'no'], ['no hagas nada', 'no'],
++  ['dejalo estar', 'dejalo'], ['que va', 'no']
++].map(function (par) { return [new RegExp('\\b' + par[0] + '\\b', 'g'), par[1]]; });
++// Un imperativo con su pronombre («llámala», «bórralas», «mándaselo»), de verbos conocidos:
++// «pastilla» o «regalo» acaban igual y no son un sí.
++const PRONOMBRE = '[ae]?(?:me|te|se)?(?:lo|la|los|las|le|les)$';
++const IMPERATIVO_SI = new RegExp('^(?:llam|borr|quit|abr|cierr|enciend|apag|pon|mand|envi|cre|apunt' +
++  '|reserv|program|guard|pid|lanz|met|anad|agreg|compr|descarg|hazl?)' + PRONOMBRE);
++const IMPERATIVO_NO = new RegExp('^(?:cancel|anul|olvid|dej|par|qued)' + PRONOMBRE);
++
++function esSi(p) { return PALABRAS_SI.has(p) || IMPERATIVO_SI.test(p); }
++function esNo(p) { return PALABRAS_NO.has(p) || IMPERATIVO_NO.test(p); }
+ 
+ // Lo que se espera un sí o un no. Los 8 s de seguir hablando en el modo coche se acababan
+ // con la respuesta a medias y se dormía sin oírla (2026-11-05).
+ const ESPERA_RESPUESTA_MS = 20000;
+ 
+ function normalizar(texto) {
+-  return String(texto || '')
++  let t = String(texto || '')
+     .toLowerCase()
+     .normalize('NFD').replace(/\p{Diacritic}/gu, '')
+-    .replace(/[.,;:!?¡¿"«»]/g, ' ')
++    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+     .replace(/\b(por favor|porfa|porfi|gracias|jarvis)\b/g, ' ')
+     .replace(/\s+/g, ' ')
+     .trim();
++  for (const [frase, una] of FRASES_HECHAS) t = t.replace(frase, una);
++  return t;
+ }
+ 
+-/** 'si', 'no' o null. Null es «no lo sé», y entonces no se confirma nada. */
+-function siONo(texto) {
++/**
++ * 'si', 'no' o null. Null es «no lo sé», y entonces no se confirma nada. `contexto` es lo
++ * que se preguntó (parche 50): sus palabras cuentan como relleno.
++ */
++function siONo(texto, contexto) {
+   const t = normalizar(texto);
+   if (NO.has(t)) return 'no';
+   if (SI.has(t)) return 'si';
+   const palabras = t ? t.split(' ') : [];
+-  const conocida = function (p) { return PALABRAS_SI.has(p) || PALABRAS_NO.has(p) || RELLENO.has(p); };
+-  if (!palabras.every(conocida)) return null;
+-  const si = palabras.some(function (p) { return PALABRAS_SI.has(p); });
+-  const no = palabras.some(function (p) { return PALABRAS_NO.has(p); });
++  if (!palabras.length || palabras.length > 12) return null;
++  const dePregunta = new Set(normalizar(contexto).split(' ').filter(Boolean));
++  let si = false;
++  let no = false;
++  for (const p of palabras) {
++    if (MATIZA.has(p)) return null;
++    if (esNo(p)) no = true;
++    else if (esSi(p)) si = true;
++    else if (!RELLENO.has(p) && !dePregunta.has(p)) return null;
++  }
+   if (si === no) return null;
+   return si ? 'si' : 'no';
+ }
+ 
+ /** Casi todo es un sí y nada lo matiza: una palabra mal oída, no otra idea. */
+-function pareceSi(texto) {
++function pareceSi(texto, contexto) {
+   const palabras = normalizar(texto).split(' ').filter(Boolean);
+-  if (!palabras.some(function (p) { return PALABRAS_SI.has(p); })) return false;
+-  if (palabras.some(function (p) { return PALABRAS_NO.has(p) || MATIZA.has(p); })) return false;
+-  const buenas = palabras.filter(function (p) { return PALABRAS_SI.has(p) || RELLENO.has(p); }).length;
++  const dePregunta = new Set(normalizar(contexto).split(' ').filter(Boolean));
++  if (!palabras.some(esSi)) return false;
++  if (palabras.some(function (p) { return esNo(p) || MATIZA.has(p); })) return false;
++  const buenas = palabras.filter(function (p) {
++    return esSi(p) || RELLENO_CORTO.has(p) || dePregunta.has(p);
++  }).length;
+   return buenas / palabras.length >= 0.6;
+ }
+ 
+@@ -170,7 +218,8 @@
+   // vez de la frase del botón entera más «¿Lo hago? Di sí o no.». Con un backend anterior,
+   // que no manda `pregunta`, la frase de siempre sin la coletilla.
+   const interrumpio = await decir(c, datos.pregunta || (datos.frase + ' ¿Lo hago?'));
+-  return { pendiente: { id: id, frase: datos.frase }, interrumpio: interrumpio };
++  return { pendiente: { id: id, frase: datos.frase, pregunta: datos.pregunta || '' },
++           interrumpio: interrumpio };
+ }
+ 
+ /**
+@@ -180,12 +229,14 @@
+  */
+ async function resolverConfirmacion(pendiente, transcript, c) {
+   const log = c.log || function () {};
+-  const respuesta = siONo(transcript);
+-  if (!respuesta && !pendiente.repetida && pareceSi(transcript)) {
++  const contexto = (pendiente.pregunta || '') + ' ' + (pendiente.frase || '');
++  const respuesta = siONo(transcript, contexto);
++  if (!respuesta && !pendiente.repetida && pareceSi(transcript, contexto)) {
+     log('CONFIRMAR: ' + pendiente.id + ' suena a sí pero no está claro, lo pregunto otra vez');
+     const cortada = await decir(c, 'Perdone, señor, ¿sí o no?');
+     return { resuelta: true, interrumpio: cortada, aviso: '',
+-             pendiente: { id: pendiente.id, frase: pendiente.frase, repetida: true } };
++             pendiente: { id: pendiente.id, frase: pendiente.frase, pregunta: pendiente.pregunta,
++                          repetida: true } };
+   }
+   if (!respuesta) {
+     log('CONFIRMAR: ' + pendiente.id + ' sin un sí o un no claro, sigue pendiente');
+--- a/voice-app/lib/conversation-loop.js
++++ b/voice-app/lib/conversation-loop.js
+@@ -21,6 +21,8 @@
+ const { preguntarSiLoPide, resolverConfirmacion, siONo, turnoDeRespuesta } = require('./confirmacion');
+ // Parche 22: la escucha pasiva («modo coche»): callado hasta que oye «Jarvis».
+ const { EscuchaPasiva, FRASES: FRASES_PASIVA, AVISO_PASIVA } = require('./escucha-pasiva');
++// Parche 50: la música de Spotify debajo de la llamada mientras Jarvis duerme.
++const { MusicaPasiva } = require('./musica');
+ // Parche 26: se transcribe durante el silencio que cierra la frase.
+ const { armarAnticipo, transcribirFrase } = require('./anticipo');
+ // Parche 38: el cronómetro de cada turno (de que dejas de hablar a oír a Jarvis).
+@@ -279,6 +281,7 @@
+     const pasiva = new EscuchaPasiva({
+       log: (m) => logger.info(m, { callUuid }), activa: escuchaPasiva
+     });
++    const musica = new MusicaPasiva(endpoint, (m) => logger.info(m, { callUuid }));
+     armarAnticipo(session, whisperClient, { activo: (pausa) => pasiva.anticipar(pausa, whisperClient) });
+ 
+     while (turnCount < maxTurns && callActive) {
+@@ -298,6 +301,8 @@
+       const crono = cronometro.turno(callUuid, 'saliente');
+       const logCrono = (m) => logger.info(m, { callUuid });
+       if (pasiva.dormida()) {
++        // Parche 50: la música suena mientras duerme, y se corta en cuanto le nombran.
++        if (callActive) await musica.sonar();
+         const oido = await pasiva.esperarPalabra({
+           session, whisperClient, sigueActiva: () => callActive,
+           // Parche 46: el tono de «le he oído», mientras aún habla.
+@@ -305,6 +310,7 @@
+             if (callActive && process.env.ESCUCHA_PASIVA_TONO !== '0') endpoint.play(GOTIT_BEEP_URL).catch(() => {});
+           }
+         });
++        await musica.callar();
+         if (!oido) break;
+         if (oido.tope) {
+           if (callActive) await endpoint.play(await ttsService.generateSpeech(FRASES_PASIVA.tope, voiceId));
+@@ -428,7 +434,7 @@
+ 
+       // Parche 22: «modo coche», «modo normal», «gracias» (dormido otra vez)…
+       // Parche 35: contestando a «¿lo hago?», «vale» es un sí, no «vuelve a dormirte».
+-      const ordenPasiva = (pendienteConfirmar && siONo(transcript)) ? null : pasiva.orden(transcript);
++      const ordenPasiva = (pendienteConfirmar && siONo(transcript, pendienteConfirmar.pregunta)) ? null : pasiva.orden(transcript);
+       if (ordenPasiva) {
+         if (callActive) await endpoint.play(await ttsService.generateSpeech(ordenPasiva.frase, voiceId));
+         continue;
+--- a/voice-app/lib/sip-handler.js
++++ b/voice-app/lib/sip-handler.js
+@@ -12,6 +12,8 @@
+ const { preguntarSiLoPide, resolverConfirmacion, siONo, turnoDeRespuesta } = require('./confirmacion');
+ // Parche 22: la escucha pasiva («modo coche»): callado hasta que oye «Jarvis».
+ const { EscuchaPasiva, FRASES: FRASES_PASIVA, AVISO_PASIVA } = require('./escucha-pasiva');
++// Parche 50: la música de Spotify debajo de la llamada mientras Jarvis duerme.
++const { MusicaPasiva } = require('./musica');
+ // Parche 26: se transcribe durante el silencio que cierra la frase.
+ const { armarAnticipo, transcribirFrase } = require('./anticipo');
+ // Parche 38: el cronómetro de cada turno (de que dejas de hablar a oír a Jarvis).
+@@ -170,6 +172,7 @@
+     const logTurno = function (m) { console.log('[' + new Date().toISOString() + '] ' + m); };
+     // Parche 22: la escucha pasiva, y si sigue la llamada (para no escuchar a nadie tras colgar).
+     const pasiva = new EscuchaPasiva({ log: logTurno });
++    const musica = new MusicaPasiva(endpoint, logTurno);
+     armarAnticipo(session, whisperClient, { activo: function (pausa) { return pasiva.anticipar(pausa, whisperClient); } });
+     let viva = true;
+     dialog.on('destroy', function () { viva = false; });
+@@ -184,6 +187,8 @@
+       let fueInterrupcion = false;
+       const crono = cronometro.turno(callUuid, 'entrante');
+       if (pasiva.dormida()) {
++        // Parche 50: la música suena mientras duerme, y se corta en cuanto le nombran.
++        if (viva) await musica.sonar();
+         const oido = await pasiva.esperarPalabra({
+           session: session, whisperClient: whisperClient, sigueActiva: function () { return viva; },
+           // Parche 46: el tono de «le he oído», mientras aún habla.
+@@ -191,6 +196,7 @@
+             if (viva && process.env.ESCUCHA_PASIVA_TONO !== '0') endpoint.play(GOTIT_BEEP_URL).catch(function () {});
+           }
+         });
++        await musica.callar();
+         if (!oido) break;
+         if (oido.tope) {
+           await endpoint.play(await ttsService.generateSpeech(FRASES_PASIVA.tope, voiceId));
+@@ -281,7 +287,7 @@
+ 
+       // Parche 22: «modo coche», «modo normal», «gracias» (dormido otra vez)…
+       // Parche 35: contestando a «¿lo hago?», «vale» es un sí, no «vuelve a dormirte».
+-      const ordenPasiva = (pendienteConfirmar && siONo(transcript)) ? null : pasiva.orden(transcript);
++      const ordenPasiva = (pendienteConfirmar && siONo(transcript, pendienteConfirmar.pregunta)) ? null : pasiva.orden(transcript);
+       if (ordenPasiva) {
+         await endpoint.play(await ttsService.generateSpeech(ordenPasiva.frase, voiceId));
+         continue;
+--- a/voice-app/lib/musica.js
++++ b/voice-app/lib/musica.js
+@@ -0,0 +1,74 @@
++/**
++ * Parche 50: música en la escucha pasiva. Ver telefono/PARCHES.md y telefono/musica/ en
++ * Life Assistant.
++ *
++ * Mikel, el 2026-11-18: «quiero tener a Jarvis en modo de escucha pasiva mientras escucho
++ * música, música que yo puedo controlar desde el móvil o el coche, y que en cualquier
++ * momento diga "Jarvis…" y me conteste». Con la llamada abierta iOS para la música del
++ * iPhone, así que la música suena DENTRO de la llamada: el servicio `musica` de caja es un
++ * altavoz de Spotify («Jarvis») y sirve lo que suena en MP3; FreeSWITCH lo mezcla en lo que
++ * oye el que llama (`uuid_displace … mux`, hacia él: el oído no lo recibe, va por el otro
++ * sentido).
++ *
++ * - Suena SOLO mientras Jarvis duerme. Al oír su nombre se corta (deja de pedirla, y el
++ *   servicio, sin nadie escuchando, deja la canción parada donde iba); al dormirse otra vez
++ *   vuelve por el mismo sitio. Lo que se dice con Jarvis despierto no tiene música debajo.
++ * - Qué suena, pasar, pausar y el volumen: en la app de Spotify, eligiendo «Jarvis» como
++ *   altavoz. Si no hay nada puesto, el servicio manda silencio y no se nota nada.
++ * - Sin MUSICA_URL, nada de esto existe y la llamada es la de siempre.
++ */
++'use strict';
++
++function ruta() {
++  const base = String(process.env.MUSICA_URL || '').trim();
++  if (!base) return null;
++  return 'shout://' + base.replace(/^[a-z]+:\/\//i, '').replace(/\/+$/, '') + '/musica.mp3';
++}
++
++function fallo(respuesta) {
++  const texto = typeof respuesta === 'string' ? respuesta
++    : (respuesta && (respuesta.body || respuesta.msg)) || '';
++  return /^-ERR/.test(String(texto).trim()) ? String(texto).trim() : '';
++}
++
++class MusicaPasiva {
++  constructor(endpoint, log) {
++    this.endpoint = endpoint;
++    this.log = log || function () {};
++    this.sonando = false;
++  }
++
++  /** Empieza a sonar debajo de la llamada, si hay servicio. Nunca lanza. */
++  async sonar() {
++    const r = ruta();
++    if (!r) return false;
++    if (this.sonando) return true;
++    try {
++      const res = await this.endpoint.api('uuid_displace', this.endpoint.uuid + ' start ' + r + ' 0 mux');
++      const error = fallo(res);
++      if (error) {
++        this.log('MUSICA: no suena (' + error + ')');
++        return false;
++      }
++      this.sonando = true;
++      this.log('MUSICA: suena');
++    } catch (e) {
++      this.log('MUSICA: no suena (' + e.message + ')');
++    }
++    return this.sonando;
++  }
++
++  /** Deja de sonar: al despertar, al colgar o al pasar a modo normal. Nunca lanza. */
++  async callar() {
++    if (!this.sonando) return;
++    this.sonando = false;
++    try {
++      await this.endpoint.api('uuid_displace', this.endpoint.uuid + ' stop ' + ruta());
++      this.log('MUSICA: callada');
++    } catch (e) {
++      // La llamada ya se ha ido, y la música con ella.
++    }
++  }
++}
++
++module.exports = { MusicaPasiva, ruta };
+--- a/voice-app/test/parche20.test.js
++++ b/voice-app/test/parche20.test.js
+@@ -163,7 +163,7 @@
+   const r = await preguntarSiLoPide('🗣️ VOICE_RESPONSE: Te lo leo.\n✅ CONFIRMAR: ' + ID, {
+     endpoint: ep, session: sesionFalsa([], []), ttsService: ttsFalso(), voiceId: 'v',
+     fetchImpl: backendFalso(pedidos) });
+-  assert.deepStrictEqual(r.pendiente, { id: ID, frase: FRASE });
++  assert.deepStrictEqual(r.pendiente, { id: ID, frase: FRASE, pregunta: '' });
+   assert.deepStrictEqual(interrumpibles(ep), ['play tts:' + FRASE + ' ¿Lo hago?']);
+   assert.strictEqual(pedidos[0].auth, 'Bearer confirmar');
+ }));
+@@ -174,7 +174,7 @@
+     endpoint: ep, session: sesionFalsa([], []), ttsService: ttsFalso(), voiceId: 'v',
+     fetchImpl: backendFalso([], { ver: { ok: true, frase: FRASE, pregunta: '¿Abro la puerta del garaje?' } }) });
+   // La frase entera se guarda: es la que se le cuenta a Claude en el turno siguiente.
+-  assert.deepStrictEqual(r.pendiente, { id: ID, frase: FRASE });
++  assert.deepStrictEqual(r.pendiente, { id: ID, frase: FRASE, pregunta: '¿Abro la puerta del garaje?' });
+   assert.deepStrictEqual(interrumpibles(ep), ['play tts:¿Abro la puerta del garaje?']);
+ }));
+ 
+--- a/voice-app/test/parche50.test.js
++++ b/voice-app/test/parche50.test.js
+@@ -0,0 +1,164 @@
++/**
++ * Parche 50: el sí listo y la música en la escucha pasiva. Ver telefono/PARCHES.md en Life
++ * Assistant. Sin red: el backend y el servicio de la música son dobles.
++ */
++'use strict';
++
++const test = require('node:test');
++const assert = require('node:assert');
++for (const nivel of ['log', 'warn', 'error']) console[nivel] = function () {};
++
++const { siONo, pareceSi, resolverConfirmacion } = require('../lib/confirmacion');
++
++const PREGUNTA = '¿Llamo a Saioa?';
++
++test('el sí listo: «sí, hazlo», «sí, dale» y los imperativos con pronombre', function () {
++  for (const dicho of ['sí', 'Sí, hazlo', 'sí, dale', 'Dale caña', 'Por supuesto', 'claro que sí',
++    'sí, sí, adelante', 'perfecto, hazlo', 'Llámala', 'sí, bórralas', 'quítalas todas',
++    'mándaselo', 'Hazlo ya, por favor', 'Sí señor', 'venga, va', 'sí, ponlo']) {
++    assert.strictEqual(siONo(dicho, PREGUNTA), 'si', dicho);
++  }
++});
++
++test('el no también: «ni de coña», «cancélalo», «ahora no»', function () {
++  for (const dicho of ['no', 'No, déjalo', 'mejor no', 'ni de coña', 'cancélalo', 'olvídalo',
++    'no lo hagas', 'ahora no', 'que va']) {
++    assert.strictEqual(siONo(dicho, PREGUNTA), 'no', dicho);
++  }
++});
++
++test('lo que matiza, opina o dice otra cosa no decide nada', function () {
++  for (const dicho of ['sí, pero a las once', 'espera', 'perfecto', 'eso es', 'correcto',
++    'la pastilla', 'el regalo', 'sí no', 'llama a Erik mejor', '¿qué hora es?', '']) {
++    assert.strictEqual(siONo(dicho, PREGUNTA), null, dicho);
++  }
++});
++
++test('las palabras de la pregunta valen de relleno, las de otra no', function () {
++  assert.strictEqual(siONo('sí, llama a Saioa', '¿Llamo a Saioa?'), 'si');
++  assert.strictEqual(siONo('sí, llama a Saioa', '¿Llamo a Erik?'), null);
++  assert.strictEqual(pareceSi('sí, llama a Saioa ahora audio', '¿Llamo a Saioa?'), true);
++});
++
++test('resolverConfirmacion usa la pregunta guardada', async function () {
++  const dichas = [];
++  const enviados = [];
++  process.env.CONFIRMAR_TOKEN = 'conf';
++  const c = {
++    voiceId: 'v', endpoint: { play: async function () {}, api: async function () {} },
++    session: { on: function () {}, removeListener: function () {} },
++    ttsService: { generateSpeech: async function (t) { dichas.push(t); return 'http://x/a.wav'; } },
++    fetchImpl: async function (url, opciones) {
++      enviados.push(JSON.parse(opciones.body));
++      return { ok: true, json: async function () { return { ok: true, frase: 'Hecho. Llamando a Saioa.' }; } };
++    }
++  };
++  const r = await resolverConfirmacion({ id: 'x', frase: 'Llamar a Saioa: «…».', pregunta: PREGUNTA },
++    'sí, llama a Saioa', c);
++  assert.strictEqual(r.resuelta, true);
++  assert.deepStrictEqual(enviados, [{ respuesta: 'si' }]);
++  assert.deepStrictEqual(dichas, ['Hecho. Llamando a Saioa.']);
++});
++
++// ── La música debajo de la escucha pasiva ────────────────────────────────────
++const Module = require('node:module');
++const { EventEmitter } = require('node:events');
++const requireDeVerdad = Module.prototype.require;
++Module.prototype.require = function (id) {
++  if (id === 'ws') return { Server: function () {} };
++  return requireDeVerdad.apply(this, arguments);
++};
++const { MusicaPasiva, ruta } = require('../lib/musica');
++const { runConversationLoop } = require('../lib/conversation-loop');
++
++function endpointConApi(respuesta) {
++  const ep = new EventEmitter();
++  ep.uuid = 'ep-1';
++  ep.hecho = [];
++  ep.play = async function (url) { ep.hecho.push('play ' + url); };
++  ep.api = async function (cmd, args) { ep.hecho.push('api ' + cmd + ' ' + (args || '')); return respuesta; };
++  ep.forkAudioStart = async function () {};
++  ep.forkAudioStop = async function () {};
++  ep.destroy = async function () {};
++  return ep;
++}
++
++function conMusica(url, fn) {
++  return async function () {
++    const antes = process.env.MUSICA_URL;
++    if (url == null) delete process.env.MUSICA_URL; else process.env.MUSICA_URL = url;
++    try { await fn(); } finally {
++      if (antes == null) delete process.env.MUSICA_URL; else process.env.MUSICA_URL = antes;
++    }
++  };
++}
++
++test('50: la ruta de la música, de MUSICA_URL', conMusica('http://127.0.0.1:8095/', function () {
++  assert.strictEqual(ruta(), 'shout://127.0.0.1:8095/musica.mp3');
++}));
++
++test('50: sin MUSICA_URL no se toca FreeSWITCH', conMusica(null, async function () {
++  const ep = endpointConApi('+OK');
++  const m = new MusicaPasiva(ep);
++  assert.strictEqual(await m.sonar(), false);
++  await m.callar();
++  assert.deepStrictEqual(ep.hecho, []);
++}));
++
++test('50: suena mezclada hacia quien llama, y se calla una vez', conMusica('127.0.0.1:8095', async function () {
++  const ep = endpointConApi('+OK Success');
++  const m = new MusicaPasiva(ep);
++  assert.strictEqual(await m.sonar(), true);
++  assert.strictEqual(await m.sonar(), true);
++  await m.callar();
++  await m.callar();
++  assert.deepStrictEqual(ep.hecho, [
++    'api uuid_displace ep-1 start shout://127.0.0.1:8095/musica.mp3 0 mux',
++    'api uuid_displace ep-1 stop shout://127.0.0.1:8095/musica.mp3'
++  ]);
++}));
++
++test('50: si FreeSWITCH dice -ERR, no cuenta como sonando', conMusica('127.0.0.1:8095', async function () {
++  const ep = endpointConApi('-ERR Cannot open file');
++  const m = new MusicaPasiva(ep);
++  assert.strictEqual(await m.sonar(), false);
++  await m.callar();
++  assert.strictEqual(ep.hecho.length, 1);
++}));
++
++test('50, saliente: la música suena dormido y se corta al oír «Jarvis»', conMusica('127.0.0.1:8095', async function () {
++  const ep = endpointConApi('+OK');
++  const tts = { generateSpeech: async function (t) { return 'tts:' + t; } };
++  const momentos = [];
++  const frases = ['charla con música', 'Jarvis, ¿qué tiempo hace?', null, 'Jarvis, cuelga'];
++  let i = 0;
++  const sesion = new EventEmitter();
++  sesion.setCaptureEnabled = function () {};
++  sesion.forceFinalize = function () {};
++  sesion.armarBargeIn = function () {};
++  sesion.waitForUtterance = async function () {
++    // Lo que sonaba cuando se le escuchaba: lo último que se hizo con la música.
++    const ultima = ep.hecho.filter(function (h) { return h.indexOf('uuid_displace') >= 0; }).pop() || '';
++    momentos.push(ultima.indexOf(' start ') >= 0 ? 'con música' : 'sin música');
++    if (i >= frases.length) throw new Error('AudioForkSession closed for call x');
++    const f = frases[i++];
++    if (f == null) throw new Error('Timed out waiting for utterance');
++    return { audio: Buffer.from(f), reason: 'end_silence' };
++  };
++  const whisper = { transcribe: async function (a) { return a.toString(); } };
++  const claude = { query: async function () { return '🗣️ VOICE_RESPONSE: Doce grados, señor.'; },
++                   endSession: async function () {} };
++  const r = await runConversationLoop(ep, new EventEmitter(), 'c-musica', {
++    ttsService: tts, whisperClient: whisper, claudeBridge: claude, wsPort: 3001,
++    audioForkServer: { expectSession: async function () { return sesion; },
++                       cancelExpectation: function () {}, emit: function () {} },
++    skipGreeting: true, escuchaPasiva: true
++  });
++  assert.strictEqual(r.endReason, 'goodbye');
++  // Dormido (las dos primeras y la última), con música; despierto («qué tiempo hace» y
++  // los 8 s de seguir hablando), sin ella.
++  assert.deepStrictEqual(momentos.slice(0, 3), ['con música', 'con música', 'sin música']);
++  const usos = ep.hecho.filter(function (h) { return h.indexOf('uuid_displace') >= 0; });
++  assert.ok(usos.length >= 4, usos.join('\n'));
++  assert.ok(usos[usos.length - 1].indexOf(' stop ') >= 0, 'al colgar, callada');
++}));

@@ -60,7 +60,7 @@ Dos herramientas de Jarvis, que solo existen con `TERCEROS_LLAMADAS=1`:
 
 | Herramienta | Qué hace | ¿Se confirma? |
 |---|---|---|
-| `llamar_a_alguien` | Llama a uno de tus contactos y vuelve enseguida: la llamada sigue en segundo plano | **No**: lo que se pidió es que sea autónomo |
+| `llamar_a_alguien` | Llama a uno de tus contactos y vuelve enseguida: la llamada sigue en segundo plano | **Sí, con una pregunta corta** desde el 2026-11-18: «¿Llamo a Erik?» (`_describir_llamada`, `_pregunta_hablada`). Por teléfono vale el sí hablado; el mensaje entero solo va escrito en el botón. Antes de preguntar ya comprueba la línea y el contacto. Los recados no preguntan cada intento por aquí: tienen su propia pregunta (`docs/RECADOS.md`) |
 | `llamadas_a_otros` | Las últimas llamadas: a quién, cómo acabó y qué contestaron | No: solo lee |
 
 ## Las reglas

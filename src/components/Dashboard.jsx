@@ -4242,8 +4242,10 @@ export default function Dashboard() {
     // una llamada. Solo entra lo inequívoco (ver `esConfirmacionHablada`); un «sí, pero
     // cambia el título» sigue su camino normal hasta el modelo.
     if (pendienteRef.current) {
-      if (esConfirmacionHablada(dicho)) { pararEscucha(); cicloRef.current.confirmar?.(); return; }
-      if (esNegacionHablada(dicho))     { pararEscucha(); cicloRef.current.descartar?.(); return; }
+      // Las palabras de lo propuesto valen de relleno: «sí, llama a Saioa» a «¿Llamo a Saioa?».
+      const propuesta = JSON.stringify(pendienteRef.current.argumentos || {});
+      if (esConfirmacionHablada(dicho, propuesta)) { pararEscucha(); cicloRef.current.confirmar?.(); return; }
+      if (esNegacionHablada(dicho, propuesta))     { pararEscucha(); cicloRef.current.descartar?.(); return; }
     }
     pararEscucha();
     cicloRef.current.turno?.(dicho);

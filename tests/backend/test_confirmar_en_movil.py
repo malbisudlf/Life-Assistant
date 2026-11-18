@@ -141,10 +141,40 @@ class TestLoQueSeAmplio:
 
     def test_borrar_una_nota_lleva_su_texto(self, mock_requests):
         mock_requests.add("GET", "rest/v1/ideas", FakeResponse([{
-            "key": "Regalo", "full_text": "Comprar el libro de cocina para el cumpleaños"}]))
+            "id": PID, "key": "Regalo",
+            "full_text": "Comprar el libro de cocina para el cumpleaños"}]))
         d = main._describir_accion("borrar_idea", {"idea_id": PID})
-        assert d["texto"] == ("Borrar para siempre la nota «Regalo»: "
-                              "Comprar el libro de cocina para el cumpleaños.")
+        assert d["texto"] == "Borrar «Regalo»: Comprar el libro de cocina para el cumpleaños."
+        # Hablado, solo el título (2026-11-18: «no tanta confirmación»).
+        assert main._pregunta_hablada("borrar_idea", d["texto"]) == "¿Borro «Regalo»?"
+
+    def test_borrar_varias_notas_con_una_pregunta(self, mock_requests):
+        otra, tercera = "1b6f7a52-2f5c-4b7e-9a51-6c2d1e0f9a11", "2b6f7a52-2f5c-4b7e-9a51-6c2d1e0f9a11"
+        mock_requests.add("GET", "rest/v1/ideas", FakeResponse([
+            {"id": tercera, "key": "Regalo", "full_text": "…"},
+            {"id": PID, "key": "Pádel", "full_text": "…"},
+            {"id": otra, "key": "Viaje", "full_text": "…"}]))
+        d = main._describir_accion("borrar_idea", {"idea_ids": [PID, otra, tercera, PID]})
+        assert d["texto"] == "Borrar «Pádel», «Viaje» y «Regalo»."
+        assert main._pregunta_hablada("borrar_idea", d["texto"]) == "¿Borro «Pádel», «Viaje» y «Regalo»?"
+        # Una sola consulta a Supabase para todas.
+        assert len(mock_requests.called("GET", "rest/v1/ideas")) == 1
+
+    def test_borrar_varias_si_falta_una_no_se_propone(self, mock_requests):
+        otra = "1b6f7a52-2f5c-4b7e-9a51-6c2d1e0f9a11"
+        mock_requests.add("GET", "rest/v1/ideas", FakeResponse([{"id": PID, "key": "Pádel"}]))
+        assert "error" in main._describir_accion("borrar_idea", {"idea_ids": [PID, otra]})
+
+    def test_borrar_varias_las_borra_todas(self, mock_requests):
+        otra = "1b6f7a52-2f5c-4b7e-9a51-6c2d1e0f9a11"
+        mock_requests.add("DELETE", "rest/v1/ideas", FakeResponse([]))
+        r = main._j_borrar_idea(idea_ids=[PID, otra])
+        assert r == {"ok": True, "borradas": [PID, otra]}
+        assert len(mock_requests.called("DELETE", "rest/v1/ideas")) == 2
+        assert main._lo_hecho("borrar_idea", {"idea_ids": [PID, otra]}, r) == "2 notas borradas."
+        # Lo que se guarda para el botón son los ids tal cual, como texto.
+        assert main._args_de("borrar_idea", {"idea_ids": [PID, otra], "x": 1}) == {
+            "idea_ids": [PID, otra]}
 
     def test_borrar_una_nota_que_no_existe(self, mock_requests):
         mock_requests.add("GET", "rest/v1/ideas", FakeResponse([]))

@@ -98,6 +98,23 @@ class TestPoner:
         assert r["ok"] and r["poniendo"] == "a Rosalía"
         assert mock_requests.called("PUT", "/me/player/play")[0][2]["json"] == {"context_uri": "spotify:artist:r"}
 
+    def test_por_telefono_va_al_altavoz_de_la_llamada(self, spotify, mock_requests):
+        """Parche 50: con la llamada abierta el iPhone no suena; «Jarvis» suena dentro."""
+        mock_requests.add("GET", "/me/playlists", FakeResponse(MIS_LISTAS))
+        mock_requests.add("GET", "/me/player/devices", FakeResponse({"devices": [
+            {"id": "pc-1", "name": "PC", "type": "Computer", "is_active": True},
+            {"id": "lib-1", "name": "Jarvis", "type": "Speaker", "is_active": False}]}))
+        mock_requests.add("PUT", "/me/player/play", FakeResponse({}, 204))
+        marca = main._boca_actual.set("telefono")
+        try:
+            assert main._j_musica_poner("lofi")["dispositivo"] == "Jarvis"
+            # Si pide otro sitio, manda él.
+            assert main._j_musica_poner("lofi", dispositivo="pc")["dispositivo"] == "PC"
+        finally:
+            main._boca_actual.reset(marca)
+        # Fuera del teléfono, el de siempre (el activo).
+        assert main._j_musica_poner("lofi")["dispositivo"] == "PC"
+
     def test_una_cancion_va_como_uris(self, spotify, mock_requests):
         mock_requests.add("GET", "/search", FakeResponse({
             "tracks": {"items": [{"name": "Thriller", "uri": "spotify:track:t"}]}}))

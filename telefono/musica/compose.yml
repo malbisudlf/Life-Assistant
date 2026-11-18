@@ -1,0 +1,33 @@
+# La música de la escucha pasiva (parche 50), en caja. Se copia a mano a ~/musica/ y se
+# levanta con `docker compose up -d` (la imagen viene hecha de jacobo, ver el Dockerfile).
+#
+# Red del anfitrión por dos cosas: FreeSWITCH (también en la red del anfitrión) la pide en
+# 127.0.0.1, y el altavoz «Jarvis» se anuncia por mDNS en casa para el primer emparejado.
+# Después, con las credenciales en ~/musica/datos, aparece en Spotify desde cualquier red.
+services:
+  musica:
+    image: musica:local
+    container_name: musica
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      MUSICA_ESCUCHA: 127.0.0.1
+      MUSICA_PUERTO: "8095"
+      MUSICA_NOMBRE: Jarvis
+      MUSICA_GANANCIA: "70"
+    volumes:
+      - ${HOME}/musica/datos:/datos
+    read_only: true
+    tmpfs:
+      - /tmp
+    cpus: 1
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8095/estado', timeout=5)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"

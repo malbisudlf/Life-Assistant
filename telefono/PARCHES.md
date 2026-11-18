@@ -2179,6 +2179,62 @@ como tal.
 («connected to freeswitch at 127.0.0.1»). Vuelta atrás: `docker-compose.yml.bak-20261115-antes-cierre`
 (sin ninguno de los dos) y `…-antes-esl` (solo drachtio) en `~/.claude-phone/`.
 
+## El parche 50: música en la escucha pasiva, y el sí listo
+
+Del 2026-11-18, `telefono/parche-50.diff` (voice-app) más un servicio nuevo,
+`telefono/musica/`. **Escrito y probado en una copia (`/tmp/p50` en caja, 246 de 246); SIN
+APLICAR**: ni la voice-app, ni el servicio, ni la imagen están en producción.
+
+**La música.** Mikel: «quiero tener a Jarvis en escucha pasiva mientras escucho música, que
+puedo controlar desde el móvil o el coche, y que en cualquier momento diga "Jarvis…" y me
+conteste». Con la llamada abierta, iOS para la música del iPhone (por eso existía el
+`?escucha=normal` del 2026-10-24). Así que la música va **dentro** de la llamada:
+
+```
+Spotify (móvil / CarPlay) ─Connect─▶ librespot «Jarvis» (contenedor `musica`, caja)
+   ─PCM─▶ servidor.py ─MP3 en 127.0.0.1:8095/musica.mp3─▶ FreeSWITCH (uuid_displace … mux)
+```
+
+- «Jarvis» es **un altavoz más de Spotify**: se elige en la lista de dispositivos y se pasa,
+  pausa y sube desde la app de siempre (o «Jarvis, pon mi lista de…»: por teléfono,
+  `musica_poner` sin dispositivo va a ese altavoz, `SPOTIFY_ALTAVOZ_LLAMADA`).
+- **Suena solo mientras Jarvis duerme** (`lib/musica.js`, `MusicaPasiva`, en los dos bucles):
+  `musica.sonar()` antes de `esperarPalabra` y `musica.callar()` en cuanto vuelve. Lo que se
+  habla con él despierto no tiene música debajo.
+- **La canción se para donde iba** sin tocar la API de Spotify: sin nadie escuchando,
+  `servidor.py` deja de leer a librespot, que se queda esperando con la tubería llena. Al
+  dormirse Jarvis, FreeSWITCH vuelve a pedirla y sigue por el mismo sitio (lo que tuviera
+  en su búfer mod_shout, unos segundos, se pierde).
+- **Silencio de relleno** a 20 ms el trozo entre canciones o en pausa: un MP3 que se corta,
+  FreeSWITCH lo da por acabado.
+- `mux` y hacia quien llama: el oído (`forkAudioStart`, `mixType: 'mono'`) solo recibe su
+  voz, no la música. Lo que sí llega es el eco acústico del altavoz del coche, que cancela el
+  propio iPhone (o el manos libres): **sin probar con música alta**.
+- **Suena a teléfono.** La llamada va en PCMU (8 kHz), y por Bluetooth en banda estrecha. Es
+  la radio de una centralita, no un equipo de música; para escuchar bien, `?escucha=normal`.
+
+**El sí listo.** «Que no solo le valga un sí, sino también un sí hazlo, un sí dale…»:
+`siONo(texto, contexto)` entiende frases hechas («por supuesto», «ni de coña»), imperativos
+con pronombre («llámala», «bórralas») y las palabras de la propia pregunta como relleno («sí,
+llama a Saioa» a «¿Llamo a Saioa?»). `pareceSi` sigue con el relleno corto de antes: con
+artículos, «Sí, a las nueve» parecería un sí mal oído. La pregunta del backend viaja ahora en
+`pendiente.pregunta`. Copias en el backend y el dashboard: «El sí listo» en `docs/JARVIS.md`.
+
+**Aplicarlo** (cuando Mikel diga):
+1. La imagen, en **jacobo** (compilar librespot es pesado): copiar `telefono/musica/`,
+   `docker build -t musica:local .` y `docker save musica:local | ssh caja docker load`.
+2. En caja: `mkdir -p ~/musica/datos`, copiar `compose.yml` a `~/musica/` y
+   `docker compose up -d`. `curl -s 127.0.0.1:8095/estado` da `"librespot": "vivo"`.
+3. **El primer emparejado, en casa**: con el iPhone en la Wi-Fi de casa, Spotify → altavoces
+   → «Jarvis». Con eso librespot guarda las credenciales en `~/musica/datos` y desde entonces
+   aparece también fuera de casa. Hace falta Premium (ya lo pide `musica_control`).
+4. La voice-app: imagen `antes-p50`, aplicar el diff, `MUSICA_URL=127.0.0.1:8095` en
+   `~/.claude-phone/.env`, reconstruir; luego `exportar.sh` y commitear la foto.
+5. Backend: desplegar (trae `SPOTIFY_ALTAVOZ_LLAMADA`, «Jarvis» por defecto) y copiar el
+   RUNBOOK a `~/telefono-jarvis/CLAUDE.md`.
+
+Sin `MUSICA_URL` la voice-app es la de siempre: el parche se puede aplicar antes que el servicio.
+
 ## Lo que además NO está en el repositorio original
 
 - **El servicio de systemd** `claude-phone-api` (`/etc/systemd/system/`), que levanta el

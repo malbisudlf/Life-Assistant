@@ -50,8 +50,9 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   | Se confirma | Por qué |
   |---|---|
   | `whatsapp_enviar`, `whatsapp_programar` | le llega a otra persona |
+  | `llamar_a_alguien` (desde el 2026-11-18, «¿Llamo a Erik?») | habla con otra persona en su nombre |
   | `editar_evento`, `borrar_evento` **solo si es una reunión suya con invitados** (`_evento_con_gente`) | les llega el cambio o la cancelación |
-  | `borrar_idea`, `pelis_borrar` | no hay papelera |
+  | `borrar_idea` (varias de una vez con una sola pregunta, desde el 2026-11-18), `pelis_borrar` | no hay papelera |
   | `cobrar_entrenamiento` | dinero; deshacerlo es ir a Supabase a mano |
   | `garaje`; en `casa_ordenar`, alarma, cerraduras, puertas, persianas y la privacidad o grabación de las cámaras (`_casa_pide_confirmar`) | abrir la casa |
   | `desplegar`, `arreglar_revision`, `encargar_proyecto`, `encargar_a_una_sesion`, `responder_a_la_sesion`, `encargar_al_pc` | lanzan código o tocan producción |
@@ -1371,6 +1372,12 @@ cuatro herramientas sobre la API de Spotify (sección `# ── Spotify` de `bac
   `_AVISO_WEB`, como Jellyfin. Por eso `musica_que_suena` y `musica_mis_listas` entran en
   el teléfono como de lectura, y poner y controlar como acciones (reversibles).
 
+- **Por teléfono va al altavoz de la llamada** (2026-11-18, parche 50): con la llamada
+  abierta iOS para la música del iPhone, así que `musica_poner` sin dispositivo, si la pide
+  el teléfono, elige el altavoz `SPOTIFY_ALTAVOZ_LLAMADA` («Jarvis», el librespot de
+  `telefono/musica/`), que suena dentro de la llamada mientras está en escucha pasiva. Si no
+  está, el de siempre. Ver «El parche 50» en `telefono/PARCHES.md`.
+
 **Montarlo** (lo hace Mikel, una vez): crear una app en developer.spotify.com con la
 redirect URI `https://<backend>/auth/spotify/callback` (la misma que da `BACKEND_URL`, o
 `SPOTIFY_REDIRECT_URI` si se pone), poner `SPOTIFY_CLIENT_ID` y `SPOTIFY_CLIENT_SECRET` en
@@ -1715,11 +1722,34 @@ un modelo** no se rompe, porque aquí no lo oye un modelo:
 - **Qué cuenta como sí** lo decide la voice-app, no el modelo (`siONo`, parche 35): la frase
   entera hecha de palabras de sí y de relleno («Sí, créalo, anda, venga»). «Sí, pero a las
   once» va a Claude, que no confirma: solo puede hacer que la llamada lo pregunte otra vez.
+- **El sí listo** (2026-11-18, parche 50; Mikel: «que no solo le valga un sí, sino también
+  un sí hazlo, un sí dale…»): frases hechas («por supuesto», «claro que sí», «ni de coña»),
+  imperativos con su pronombre de verbos conocidos («llámala», «bórralas», «mándaselo»; los
+  que deshacen, «cancélalo», «déjalo», son un no) y **las palabras de la propia pregunta
+  como relleno**: a «¿Llamo a Saioa?», «sí, llama a Saioa» es un sí entero; a «¿Llamo a
+  Erik?», no. Las opiniones siguen sin confirmar («perfecto», «correcto», «eso es»), y lo que
+  matiza («pero», «mejor», «espera», «cambia») va al modelo. **Tres copias, que se cambian
+  juntas**: `siONo` (voice-app, `lib/confirmacion.js`), `respuestaHablada` (dashboard,
+  `src/lib/helpers.js`) y `_respuesta_si_no` (backend, para Telegram).
+- **En Telegram también** (2026-11-18): con una propuesta viva, escribir o decir en una nota
+  «sí, dale» es pulsar su botón (`_telegram_si_escrito`): la última, solo si no ha caducado,
+  y se le quitan los botones. Lo que no está claro sigue al modelo.
 - Lo que **no** protege: la sesión del teléfono tiene shell en `caja` y ya puede leer
   `backend.env` entero. El token aparte separa el camino normal; contra una sesión que se
   saltara el RUNBOOK no protege nada que no estuviera ya expuesto. La separación de verdad
   sería un Jarvis sin terminal para lo cotidiano (propuesta 4 del análisis del 2026-10-15),
   que no está hecha.
+
+## Lo que ya pasó del calendario: `agenda_pasada` (2026-11-18)
+
+`agenda` mira de hoy en adelante, y «¿qué hice el martes?» o «¿cuándo fui al dentista por
+última vez?» no tenían respuesta. `agenda_pasada(desde, hasta, buscar)` lee Outlook y el
+calendario de clases hacia atrás (`_eventos_entre` y `_clases_entre`, lo mismo que
+`/calendar/events` con otro rango). Sin fechas, la última semana; buscando, los últimos 180
+días y lo más reciente primero. Un año como mucho (`AGENDA_PASADA_DIAS_MAX`) y 40 eventos en
+la respuesta, con el total; de más de un mes sigue hasta `CALENDARIO_PAGINAS_MAX` páginas de
+Graph. Lo de hoy que aún no ha pasado no sale. Es de solo lectura: está en el teléfono y
+tras leer algo ajeno, con el mismo aviso de títulos sospechosos que `agenda`.
 
 ## Lo que ya está mirado al descolgar: `_contexto_de_voz`
 

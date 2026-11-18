@@ -2569,34 +2569,74 @@ export function esFinDeLlamada(texto) {
   return /^(adios|chao|chau|cuelga|corta( la llamada)?|hasta luego|hasta ahora|nos vemos)( |$)/.test(t);
 }
 
-/** Lo dicho, normalizado para compararlo con una lista cerrada: sin tildes, sin signos,
- *  en minúsculas y sin cortesías al final ("sí, por favor" y "sí" son lo mismo). */
-function respuestaNormalizada(texto) {
-  return String(texto || "")
+// ── El sí que se entiende ──────────────────────────────────────────────────────
+// Mikel, el 2026-11-18: «que no solo le valga un sí, sino también un sí hazlo, un sí
+// dale…». La misma lógica que `_respuesta_si_no` del backend y `siONo` de la voice-app
+// (lib/confirmacion.js): si cambia una, cambian las tres.
+//   - Frases hechas que se reducen a una palabra («por supuesto», «ni de coña»), y luego
+//     palabra a palabra: las de sí y las de no deciden, el relleno solo no dice nada, y
+//     mezclar sí y no es «no lo sé».
+//   - Un imperativo con su pronombre es un sí («llámala», «bórralas», «mándaselo»), menos
+//     los que deshacen («cancélalo», «déjalo»). De verbos conocidos: «pastilla» acaba igual.
+//   - Las palabras de la propia propuesta (`contexto`) también son relleno: a «¿Llamo a
+//     Saioa?», «sí, llama a Saioa» es un sí entero.
+//   - Lo que matiza («pero», «mejor», «espera», «cambia») nunca es un sí: va al modelo.
+//   - Las opiniones no son órdenes: «perfecto», «correcto», «exacto» o «eso es» se dicen al
+//     oír una propuesta sin haber decidido nada, y solos no confirman.
+const SN_FRASES = [
+  ["por supuesto", "claro"], ["sin duda", "claro"], ["claro que si", "si"], ["como no", "claro"],
+  ["de acuerdo", "vale"], ["a tope", "vale"], ["venga va", "venga"], ["dale cana", "dale"],
+  ["adelante con ello", "adelante"], ["manos a la obra", "vale"], ["ni de cona", "no"],
+  ["ni hablar", "no"], ["para nada", "no"], ["mejor no", "no"], ["ahora no", "no"],
+  ["todavia no", "no"], ["aun no", "no"], ["no lo hagas", "no"], ["no hagas nada", "no"],
+  ["dejalo estar", "dejalo"], ["que va", "no"],
+];
+const SN_SI = new Set(`si sii sip sisi vale venga va dale adelante claro hazlo confirmo
+  confirmado ok okey oka okay okis procede tira afirmativo obvio obviamente vamos yes llama
+  borra abre cierra enciende apaga pon manda envia crea apunta reserva programa guarda pide
+  lanza`.split(/\s+/));
+const SN_NO = new Set(`no nop dejalo deja cancela cancelalo cancelala anula anulalo olvidalo
+  olvidate quita para negativo nunca`.split(/\s+/));
+const SN_RELLENO = new Set(`anda ando tio tia hombre joder hostia ostia cono ya pues eh ah oye
+  mira bueno perfecto que senor ahora mismo todo toda todos todas eso esto lo la los las le
+  les a al el ella ellas ellos tambien rapido cuando puedas porfa gracias genial muy bien y e
+  con de`.split(/\s+/));
+const SN_MATIZA = new Set("pero mejor espera cambia aunque antes despues luego nada otro otra".split(" "));
+const SN_PRONOMBRE = "[ae]?(?:me|te|se)?(?:lo|la|los|las|le|les)$";
+const SN_IMPERATIVO_SI = new RegExp("^(?:llam|borr|quit|abr|cierr|enciend|apag|pon|mand|envi|cre|apunt"
+  + "|reserv|program|guard|pid|lanz|met|anad|agreg|compr|descarg|hazl?)" + SN_PRONOMBRE);
+const SN_IMPERATIVO_NO = new RegExp("^(?:cancel|anul|olvid|dej|par|qued)" + SN_PRONOMBRE);
+
+function snNormalizar(texto) {
+  let t = String(texto || "")
     .toLowerCase()
     .normalize("NFD").replace(/\p{Diacritic}/gu, "")
-    .replace(/[.,;!?¡¿]/g, " ")
-    .replace(/\b(por favor|porfa|porfi|gracias|jarvis)\b/g, " ")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\b(por favor|porfa|porfi|jarvis)\b/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+  for (const [frase, una] of SN_FRASES) t = t.replace(new RegExp(`\\b${frase}\\b`, "g"), una);
+  return t;
 }
 
-// Órdenes, no opiniones. "perfecto", "correcto" o "eso es" se quedan FUERA a propósito:
-// son cosas que se dicen al oír una propuesta sin haber decidido nada todavía, y lo que
-// hay al otro lado ejecuta acciones de verdad. Ante la duda, que conteste el modelo.
-const CONFIRMACIONES = new Set([
-  "si", "si si", "si claro", "si vale", "si adelante", "si hazlo", "si dale",
-  "vale", "venga", "venga va", "va", "dale", "adelante", "hazlo", "hazlo ya",
-  "confirmo", "confirmado", "ok", "okey", "oka", "de acuerdo", "procede", "tira",
-]);
+/** "si", "no" o null (no está claro, o dice otra cosa). `contexto`: el texto de lo que se
+ *  propuso, cuyas palabras cuentan como relleno. */
+export function respuestaHablada(texto, contexto = "") {
+  const palabras = snNormalizar(texto).split(" ").filter(Boolean);
+  if (!palabras.length || palabras.length > 12) return null;
+  const dePropuesta = new Set(snNormalizar(contexto).split(" ").filter(Boolean));
+  let si = false, no = false;
+  for (const p of palabras) {
+    if (SN_MATIZA.has(p)) return null;
+    if (SN_NO.has(p) || SN_IMPERATIVO_NO.test(p)) no = true;
+    else if (SN_SI.has(p) || SN_IMPERATIVO_SI.test(p)) si = true;
+    else if (!SN_RELLENO.has(p) && !dePropuesta.has(p)) return null;
+  }
+  if (si === no) return null;
+  return si ? "si" : "no";
+}
 
-const NEGACIONES = new Set([
-  "no", "no no", "no gracias", "dejalo", "dejalo estar", "deja", "cancela",
-  "cancelalo", "olvidalo", "mejor no", "no lo hagas", "no hagas nada", "para",
-  "quita", "anula",
-]);
-
-/** Si lo dicho es un «sí» a secas: el equivalente hablado de pulsar «Confirmar».
+/** Si lo dicho es un «sí»: el equivalente hablado de pulsar «Confirmar».
  *
  *  Existe porque por teléfono NO HAY BOTÓN. Hasta que esto se escribió, una acción
  *  propuesta en el modo llamada solo se podía ejecutar tocando la pantalla: decías «sí»,
@@ -2604,25 +2644,24 @@ const NEGACIONES = new Set([
  *  confirmar— volvía a proponer lo mismo. Un bucle en el que la conversación se quedaba
  *  atascada y cada vuelta costaba dinero.
  *
- *  La lista es CERRADA y se compara con la frase entera, no por palabras sueltas. Eso
- *  hace que «sí, pero cambia el título» no confirme nada: no está en la lista, así que va
- *  al modelo como cualquier otra frase — que es exactamente lo que hay que hacer con un
- *  sí que trae condiciones. Aquí solo pasa lo inequívoco.
+ *  «Sí, pero cambia el título» no confirma nada: lleva un matiz, así que va al modelo como
+ *  cualquier otra frase — que es exactamente lo que hay que hacer con un sí que trae
+ *  condiciones. Aquí solo pasa lo inequívoco (`respuestaHablada`).
  *
  *  Y la garantía de fondo no se toca: quien decide sigue siendo una persona. Lo que se
  *  reconoce aquí es su decisión dicha en voz alta, y acaba en el MISMO endpoint que el
  *  botón (`/jarvis/ejecutar`). El modelo no puede autoconfirmarse por este camino. */
-export function esConfirmacionHablada(texto) {
-  return CONFIRMACIONES.has(respuestaNormalizada(texto));
+export function esConfirmacionHablada(texto, contexto = "") {
+  return respuestaHablada(texto, contexto) === "si";
 }
 
-/** Lo contrario: un «no» a secas descarta la acción propuesta.
+/** Lo contrario: un «no» descarta la acción propuesta.
  *
  *  Sin esto, decir «no, déjalo» mandaba el turno al modelo con la acción todavía
  *  pendiente, y volvía a ofrecerla. Descartar es tan necesario como aceptar para que la
  *  conversación pueda seguir a otra cosa. */
-export function esNegacionHablada(texto) {
-  return NEGACIONES.has(respuestaNormalizada(texto));
+export function esNegacionHablada(texto, contexto = "") {
+  return respuestaHablada(texto, contexto) === "no";
 }
 
 // ── Finanzas (cartera de Indexa Capital) ─────────────────────────

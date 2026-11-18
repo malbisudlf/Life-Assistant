@@ -114,12 +114,56 @@ class TestConfiguracion:
         monkeypatch.setattr(main, "TELEFONO_TERCEROS_TOKEN", "")
         assert _llamar()["ok"] is False
 
-    def test_llamar_es_autonomo(self):
-        assert main._JARVIS_HERRAMIENTAS["llamar_a_alguien"]["confirmar"] is False
+    def test_llamar_se_confirma(self):
+        # 2026-11-18: «que pida confirmación para hacer una llamada… ¿Llamo a X?».
+        assert main._JARVIS_HERRAMIENTAS["llamar_a_alguien"]["confirmar"] is True
+        assert "llamar_a_alguien" in main.PREGUNTAS_HABLADAS
 
     def test_en_el_telefono(self):
-        assert "llamar_a_alguien" in main._MCP_SERVIDOR_ACCIONES
+        assert "llamar_a_alguien" in main._MCP_SERVIDOR_CONFIRMA_EN_MOVIL
+        assert "llamar_a_alguien" not in main._MCP_SERVIDOR_ACCIONES
         assert "llamadas_a_otros" in main._MCP_SERVIDOR_SOLO_LECTURA
+
+
+class TestConfirmarLlamada:
+    ARGS = {"nombre": "Erik", "mensaje": "Me pide que te pregunte si comes hoy con él.",
+            "objetivo": "saber si come con Mikel hoy y a qué hora"}
+
+    def test_la_pregunta_es_solo_a_quien(self, terceros):
+        d = main._describir_accion("llamar_a_alguien", self.ARGS)
+        assert d["texto"] == "Llamar a Erik Uni: «Me pide que te pregunte si comes hoy con él.»."
+        assert main._pregunta_hablada("llamar_a_alguien", d["texto"]) == "¿Llamo a Erik Uni?"
+        # Proponerla no llama a nadie.
+        assert not terceros.called("POST", "/api/outbound-call")
+
+    def test_a_quien_no_esta_no_se_le_pregunta(self, terceros):
+        # Lo dice antes de preguntar, no después del sí.
+        assert "error" in main._describir_accion("llamar_a_alguien", {**self.ARGS, "nombre": "Pepito"})
+
+    def test_apagadas_no_se_proponen(self, terceros, monkeypatch):
+        monkeypatch.setattr(main, "TERCEROS_LLAMADAS", False)
+        assert "error" in main._describir_accion("llamar_a_alguien", self.ARGS)
+
+    def test_el_si_por_telefono_llama_y_devuelve_la_llamada(self, terceros, monkeypatch):
+        vistas = []
+        monkeypatch.setattr(main, "_responder_pregunta", lambda pid, n: vistas.append(
+            (main._boca_actual.get(), main._j_llamar_a_alguien(**self.ARGS))) or {
+            "hecho": True, "resultado": vistas[-1][1]})
+        monkeypatch.setattr(main, "_leer_pregunta", lambda pid: {
+            "texto": "Llamar a Erik Uni: «…».", "respuesta": None,
+            "creado": main.datetime.now(main.timezone.utc).isoformat(),
+            "accion": {"herramienta": "llamar_a_alguien", "argumentos": self.ARGS}})
+        monkeypatch.setattr(main, "_retirar_del_movil", lambda pid: None)
+        monkeypatch.setattr(main, "TELEFONO_CONFIRMAR_TOKEN", "conf")
+        from fastapi.testclient import TestClient
+        r = TestClient(main.app).post("/telefono/confirmar/0b6f7a52-2f5c-4b7e-9a51-6c2d1e0f9a11",
+                                      json={"respuesta": "si"},
+                                      headers={"Authorization": "Bearer conf"})
+        assert r.json()["frase"] == "Hecho. Llamando a Erik Uni."
+        boca, resultado = vistas[0]
+        assert boca == "telefono" and resultado["ok"] is True
+        mision = next(iter(main._terceros.values()))
+        assert mision["devolver"] is True
 
 
 class TestLlamar:
