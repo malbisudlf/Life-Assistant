@@ -151,3 +151,128 @@ def test_es_de_solo_lectura_y_va_por_telefono():
     assert "camaras_detecciones" in main._MCP_SERVIDOR_SOLO_LECTURA
     assert "camaras_detecciones" in main._TRAS_AJENO_SE_PUEDE
     assert main._JARVIS_HERRAMIENTAS["camaras_detecciones"]["confirmar"] is False
+
+
+# ── «Cuando veas X en la cámara Y, haz Z» ───────────────────────────────────
+
+@pytest.fixture
+def cuando(frigate, monkeypatch):
+    monkeypatch.setattr(main, "_frigate_reglas_cache", {"hasta": 0.0, "reglas": []})
+    monkeypatch.setattr(main, "_frigate_reglas_disparo", {})
+    monkeypatch.setattr(main, "_frigate_reglas_vistos", {})
+    monkeypatch.setattr(main, "_FRIGATE_ARRANQUE", 0.0)
+    apuntados, entregados, ordenes, llamadas = [], [], [], []
+    monkeypatch.setattr(main, "_apuntar_aviso",
+                        lambda regla, texto, **k: apuntados.append((regla, texto, k)) or True)
+    monkeypatch.setattr(main, "_entregar_aviso_ya", lambda rid: entregados.append(rid) or "movil")
+    monkeypatch.setattr(main, "_j_casa_ordenar",
+                        lambda s, e, d=None: ordenes.append((s, e)) or {"ok": True})
+    monkeypatch.setattr(main, "_llamar", lambda texto, **k: llamadas.append(texto) or True)
+    monkeypatch.setattr(main, "_telefono_configurado", lambda: True)
+    frigate.add("GET", "reglas_usuario?select=clave", FakeResponse([]))
+    frigate.apuntados, frigate.entregados = apuntados, entregados
+    frigate.ordenes, frigate.llamadas = ordenes, llamadas
+    return frigate
+
+
+def _regla(**p):
+    base = {"camara": "garaje", "etiquetas": ["car"], "hacer": "avisar", "texto": "",
+            "servicio": "", "entidad": "", "veces": "una", "desde": 0,
+            "hasta": time.time() + 3600}
+    return {"clave": "camara_garaje_car_avisar", "parametros": {**base, **p}}
+
+
+def test_crear_guarda_en_reglas_usuario(cuando):
+    cuando.routes = [x for x in cuando.routes if x[1] != "/api/stats"]
+    cuando.add("GET", "/api/stats", FakeResponse({"cameras": {"garaje": {"camera_fps": 5}}}))
+    r = main._j_camaras_cuando("garaje", "un coche", "casa", servicio="light.turn_on",
+                               entidad="light.entrada")
+    assert r["ok"] is True and r["camara"] == "garaje" and r["busco"] == ["car"]
+    fila = cuando.called("POST", "reglas_usuario")[0][2]["json"]
+    assert fila["plantilla"] == "camara" and fila["activa"] is True
+    assert fila["parametros"]["entidad"] == "light.entrada"
+    assert "light.turn_on a light.entrada" in r["frase"]
+
+
+def test_lo_delicado_de_la_casa_no_se_deja_preparado(cuando):
+    for servicio, entidad in (("script.turn_on", "script.abrir_puerta_garaje"),
+                              ("cover.open_cover", "cover.garaje"),
+                              ("alarm_control_panel.alarm_disarm", "alarm_control_panel.casa")):
+        r = main._j_camaras_cuando("jardin", "alguien", "casa", servicio=servicio, entidad=entidad)
+        assert r["ok"] is False, servicio
+    assert not cuando.called("POST", "reglas_usuario")
+
+
+def test_sin_que_o_con_camara_desconocida(cuando):
+    assert "Qué tiene que ver" in main._j_camaras_cuando("jardin", "algo raro")["motivo"]
+    assert "Qué cámara" in main._j_camaras_cuando("trastero", "alguien")["motivo"]
+
+
+def test_dispara_una_vez_y_se_apaga(cuando):
+    cuando.add("GET", "/api/events", FakeResponse([_ev("c1", camara="garaje", etiqueta="car")]))
+    assert main._frigate_reglas_pasada([_regla(texto="Ha llegado")]) == 1
+    regla, texto, k = cuando.apuntados[0]
+    assert regla == "tuya:camara_garaje_car_avisar" and "Coche en garaje" in texto
+    assert "Ha llegado" in texto and cuando.entregados == [k["id"]]
+    apagado = cuando.called("PATCH", "reglas_usuario?clave=eq.camara_garaje_car_avisar")
+    assert apagado and apagado[0][2]["json"] == {"activa": False}
+
+
+def test_lo_de_antes_de_crearla_no_dispara(cuando):
+    cuando.add("GET", "/api/events", FakeResponse([_ev("c1", camara="garaje", etiqueta="car",
+                                                       hace=120)]))
+    assert main._frigate_reglas_pasada([_regla(desde=time.time() - 60)]) == 0
+
+
+def test_otra_camara_u_otra_cosa_no_dispara(cuando):
+    cuando.add("GET", "/api/events", FakeResponse([
+        _ev("p1", camara="garaje", etiqueta="person"), _ev("c1", camara="jardin", etiqueta="car")]))
+    assert main._frigate_reglas_pasada([_regla()]) == 0
+
+
+def test_confianza_baja_espera_a_la_siguiente_pasada(cuando):
+    respuestas = iter([FakeResponse([_ev("c1", camara="garaje", etiqueta="car", puntos=0.5)]),
+                       FakeResponse([_ev("c1", camara="garaje", etiqueta="car", puntos=0.8)])])
+    cuando.add("GET", "/api/events", lambda url, **k: next(respuestas))
+    assert main._frigate_reglas_pasada([_regla()]) == 0
+    assert main._frigate_reglas_pasada([_regla()]) == 1
+
+
+def test_casa_manda_la_orden_y_lo_cuenta(cuando):
+    cuando.add("GET", "/api/events", FakeResponse([_ev("c1", camara="garaje", etiqueta="car")]))
+    regla = _regla(hacer="casa", servicio="light.turn_on", entidad="light.entrada", veces="siempre")
+    assert main._frigate_reglas_pasada([regla]) == 1
+    assert cuando.ordenes == [("light.turn_on", "light.entrada")]
+    assert "he mandado light.turn_on a light.entrada" in cuando.apuntados[0][1]
+    assert not cuando.called("PATCH", "reglas_usuario")      # «siempre» no se apaga
+
+
+def test_siempre_respeta_la_pausa(cuando):
+    cuando.add("GET", "/api/events", FakeResponse([
+        _ev("c1", camara="garaje", etiqueta="car", hace=60),
+        _ev("c2", camara="garaje", etiqueta="car", hace=20)]))
+    assert main._frigate_reglas_pasada([_regla(veces="siempre")]) == 1
+
+
+def test_llamar_y_si_no_suena_avisa(cuando, monkeypatch):
+    cuando.add("GET", "/api/events", FakeResponse([_ev("c1", camara="garaje", etiqueta="car")]))
+    monkeypatch.setattr(main, "_llamar", lambda texto, **k: False)
+    assert main._frigate_reglas_pasada([_regla(hacer="llamar")]) == 1
+    assert "No he podido llamarle" in cuando.apuntados[0][1]
+
+
+def test_caducada_se_apaga_sin_mirar_frigate(cuando):
+    assert main._frigate_reglas_pasada([_regla(hasta=time.time() - 10)]) == 0
+    assert cuando.called("PATCH", "reglas_usuario") and not cuando.called("GET", "/api/events")
+
+
+def test_si_lo_pide_el_vale_tras_lo_ajeno():
+    assert main._AJENO_SI_LO_PIDES["camaras_cuando"].search(
+        "cuando veas un coche entrar en el garaje enciende la luz")
+    assert "camaras_cuando" in main._MCP_SERVIDOR_ACCIONES
+
+
+def test_hasta_la_luz_del_garaje_se_confirma():
+    # «garaje» en el nombre basta para confirmarse (`_CASA_NOMBRE_DELICADO`): no se deja preparado.
+    assert main._frigate_casa_rechazo("light.turn_on", "light.garaje")
+    assert main._frigate_casa_rechazo("light.turn_on", "light.entrada") == ""

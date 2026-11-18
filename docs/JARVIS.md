@@ -1958,7 +1958,9 @@ a su API.
   `_TRAS_AJENO_SE_PUEDE` y en lo de solo lectura del teléfono.
 - **«La puerta» no es una cámara**: si pide una que no existe, mira todas y lo dice en
   `nota`, en vez de contestar «no tengo esa cámara».
-- **Los avisos nacen apagados**: solo las cámaras de `FRIGATE_AVISOS` y lo de
+- **Los avisos solos: escritos y apagados, y así se quedan.** Mikel, el mismo día: «no pongas
+  los avisos; solo quiero que funcione cuando se lo pida» (eso es `camaras_cuando`, abajo).
+  Lo que sigue describe el vigía por si un día se encienden: solo las cámaras de `FRIGATE_AVISOS` y lo de
   `FRIGATE_AVISOS_QUE` (persona y coche), con confianza ≥ `FRIGATE_AVISO_PUNTOS` (0,72) y
   `FRIGATE_AVISO_PAUSA_MIN` (10) entre dos avisos de lo mismo en la misma cámara. **Por
   defecto solo con él fuera de casa** (`presencia_vigente`): con él dentro, quien cruza el
@@ -1966,6 +1968,31 @@ a su API.
   (`FRIGATE_AVISOS_SIEMPRE=1` lo cambia). Van por `_apuntar_aviso` con la regla `camaras`
   (se silencia como cualquier otra) y la huella del evento, urgentes, y salen al momento
   con `_entregar_aviso_ya` salvo en clase, donde esperan como todo.
+- **`camaras_cuando`: «cuando veas un coche entrar en el garaje, haz…»**. Una orden suya que
+  espera a que Frigate vea algo. El modelo rellena campos cerrados (cámara, qué, `hacer`,
+  `veces`, `horas`), como en las reglas que él aprueba; la condición y lo que se hace los
+  comprueba el backend:
+  - `hacer`: **avisar** (aviso suyo, `tuya:<clave>`: no gasta presupuesto ni espera al final
+    de la clase, porque lo ha pedido él), **llamar** (`_llamar`, que respeta el sueño; si no
+    suena, aviso) o **casa**: una orden de HA **de las que Jarvis ya hace sin botón**.
+    Lo que se confirma (`_casa_pide_confirmar`: alarma, garaje, cerraduras, persianas, y
+    todo lo que lleve «garaje» o «puerta» en el nombre, la luz del garaje incluida) se
+    rechaza al crearla, y se vuelve a mirar al disparar: cuando salte no habrá nadie
+    delante para decir que sí.
+  - Se guarda en `reglas_usuario` con la plantilla `camara`: sobrevive a un despliegue, sale
+    en `mis_reglas` y se quita con `quitar_regla`. **No está en `_PLANTILLAS_REGLA`**: el
+    tick de 5 minutos la salta y `proponer_regla` no puede crearla sin estas pruebas. Cuenta
+    para `REGLAS_USUARIO_MAX`.
+  - La mira el mismo vigía, cada minuto (`_frigate_reglas_pasada`), con las reglas en una
+    caché de 2 minutos que se vacía al crear o quitar una. Una vez por defecto (se apaga al
+    dispararse); con `siempre`, `FRIGATE_AVISO_PAUSA_MIN` entre disparos. Caduca a las
+    `horas` (24; máximo 30 días). Hace falta `FRIGATE_AVISO_PUNTOS`; un evento que aún no
+    llega no se da por visto, porque su confianza sube mientras dura.
+  - **«Entrar» no se distingue de «salir»**: es un coche NUEVO en la imagen. Uno aparcado no
+    dispara (Frigate no abre un evento por algo quieto), y lo de antes de crearla o de
+    arrancar el backend, tampoco.
+  - Sin confirmar, como la orden directa de la casa. Tras leer texto ajeno solo vale si el
+    mensaje del señor lo pide (`_AJENO_SI_LO_PIDES`: «cuando veas…», «si pasa…»).
 - **Las cámaras** (2026-11-18): el jardín (Tapo C320WS) y el garaje (Tapo C410) llegan por
   el HLS que ya sirve Home Assistant (`ha_hls.py` le pide la URL por websocket con su
   token, porque su RTSP pide la cuenta de la cámara y la C410 ni lo tiene); la C200 del

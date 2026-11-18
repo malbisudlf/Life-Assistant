@@ -20424,6 +20424,8 @@ def _j_quitar_regla(nombre: str) -> dict:
     except Exception as e:
         logger.error("Reglas: no se pudo quitar '%s' (%s)", clave, e)
         return {"ok": False, "motivo": "No se pudo quitar"}
+    # Si era de cámara, que el vigía de Frigate no la siga usando de su caché.
+    _frigate_reglas_cache["hasta"] = 0.0
     return {"ok": True, "clave": clave}
 
 
@@ -33677,10 +33679,246 @@ def _frigate_vig_pasada() -> int:
     return avisados
 
 
+# ── «Cuando veas X en la cámara Y, haz Z» (2026-11-18) ───────────────────────
+# Mikel, sobre los avisos de arriba: «no pongas los avisos; solo quiero que funcione cuando
+# se lo pida a Jarvis (cuando veas un coche entrar en el garaje, haz X)». Es una orden suya
+# que espera a que Frigate vea algo. Como en las reglas que él aprueba, **el modelo rellena
+# campos, no escribe la regla**: la condición (cámara + qué) y lo que se hace son listas
+# cerradas, comprobadas aquí.
+#
+#  - **Qué se puede hacer** (`_FRIGATE_HACER`): avisarle (un aviso suyo, `tuya:`, que no
+#    gasta presupuesto ni espera al final de la clase), llamarle (`_llamar`, que respeta el
+#    sueño; si no suena, aviso) y una orden a la casa **de las que Jarvis ya hace sin botón**.
+#    Lo que en la casa se confirma (alarma, garaje, cerraduras, cámaras…) se rechaza al
+#    crearla: cuando salte no habrá nadie delante a quien preguntar.
+#  - **Se guarda en `reglas_usuario`** (plantilla `camara`): sobrevive a un despliegue, sale
+#    en `mis_reglas` y se quita con `quitar_regla`. No está en `_PLANTILLAS_REGLA`, así que
+#    el tick de 5 minutos la salta y `proponer_regla` no puede crearla sin estas pruebas.
+#  - **Una vez por defecto**: al dispararse se apaga. Con `siempre`, entre dos disparos
+#    pasan `FRIGATE_AVISO_PAUSA_MIN`. Caduca a las `horas` (24 por defecto, máx. 30 días).
+#  - «Entrar» no se distingue de «salir»: es un coche NUEVO en la imagen. Uno aparcado no
+#    dispara, porque Frigate no abre un evento por algo que está quieto. Lo de antes de
+#    crearla, o de antes de arrancar el backend, tampoco.
+PLANTILLA_CAMARA         = "camara"
+FRIGATE_CUANDO_MAX_HORAS = 24 * 30
+_FRIGATE_HACER           = ("avisar", "llamar", "casa")
+_FRIGATE_ARRANQUE        = time.time()
+_frigate_reglas_cache: dict = {"hasta": 0.0, "reglas": []}
+_frigate_reglas_disparo: dict = {}   # clave → epoch del último disparo
+_frigate_reglas_vistos: dict = {}    # (clave, id de evento) → cuándo se vio
+
+
+def _frigate_casa_rechazo(servicio: str, entidad: str) -> str:
+    """Por qué esta orden no puede quedar esperando a una cámara, o "" si puede."""
+    servicio, entidad = str(servicio or "").strip().lower(), str(entidad or "").strip().lower()
+    if not (_CASA_SERVICIO_RE.match(servicio) and _CASA_ENTIDAD_RE.match(entidad)):
+        return "Para la casa necesito el servicio y la entidad, tipo 'light.turn_on' y 'light.garaje'."
+    dominio = servicio.split(".")[0]
+    if dominio not in _CASA_DOMINIOS or servicio.split(".")[1].startswith("reload"):
+        return f"No puedo dejar preparado un servicio de '{dominio}'."
+    if dominio == "homeassistant" and servicio.split(".")[1] not in _CASA_HOMEASSISTANT:
+        return "De 'homeassistant' solo turn_on, turn_off y toggle."
+    if _CASA_PRIVADO.search(entidad):
+        return "Eso es de otra persona de la casa."
+    if _casa_pide_confirmar({"servicio": servicio, "entidad": entidad}):
+        return ("Eso se confirma siempre (alarma, garaje, cerraduras, cámaras…), y cuando la "
+                "cámara lo vea no habrá nadie delante para decir que sí. Puedo avisarle o "
+                "llamarle en su lugar.")
+    return ""
+
+
+def _frigate_reglas_activas(fresco: bool = False) -> list:
+    """Las reglas de cámara encendidas, con dos minutos de caché: el vigía mira cada minuto."""
+    if not fresco and time.time() < _frigate_reglas_cache["hasta"]:
+        return _frigate_reglas_cache["reglas"]
+    try:
+        r = http.get(f"{REGLAS_USUARIO_URL}?activa=is.true&plantilla=eq.{PLANTILLA_CAMARA}"
+                     f"&select=clave,parametros&limit={REGLAS_USUARIO_MAX}",
+                     headers=supabase_headers())
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+        reglas = [x for x in (r.json() or []) if isinstance(x.get("parametros"), dict)]
+    except Exception as e:   # noqa: BLE001 — sin leerlas se sigue con las de antes
+        logger.warning("Frigate: no se pudieron leer las reglas de cámara (%s)", type(e).__name__)
+        return _frigate_reglas_cache["reglas"]
+    _frigate_reglas_cache.update(hasta=time.time() + 120, reglas=reglas)
+    return reglas
+
+
+def _frigate_regla_apagar(clave: str) -> None:
+    try:
+        http.patch(f"{REGLAS_USUARIO_URL}?clave=eq.{quote(clave, safe='')}",
+                   headers={**supabase_headers(), "Prefer": "return=minimal"},
+                   json={"activa": False})
+    except Exception as e:   # noqa: BLE001
+        logger.warning("Frigate: no se pudo apagar la regla '%s' (%s)", clave, type(e).__name__)
+    _frigate_reglas_cache["hasta"] = 0.0
+
+
+def _j_camaras_cuando(camara: str, que: str, hacer: str = "avisar", texto: str = "",
+                      servicio: str = "", entidad: str = "", veces: str = "una",
+                      horas: float = 24) -> dict:
+    if not _frigate_configurado():
+        return {"ok": False, "motivo": "No tengo Frigate conectado (faltan FRIGATE_*)."}
+    try:
+        camaras = _frigate_camaras()
+    except Exception:   # noqa: BLE001
+        return {"ok": False, "motivo": "Frigate, en jacobo, no contesta ahora mismo."}
+    pedida = _sin_acentos(str(camara or "")).strip().lower()
+    elegida = next((c for c in camaras if pedida and (pedida in c or c in pedida)), "")
+    if not elegida:
+        return {"ok": False, "motivo": f"¿Qué cámara? Tengo: {', '.join(camaras)}."}
+    etiquetas = _frigate_etiquetas(que)
+    if not etiquetas:
+        return {"ok": False, "motivo": "¿Qué tiene que ver? Sé de personas, coches, motos, "
+                                       "bicis, perros, gatos y pájaros."}
+    hacer = str(hacer or "avisar").strip().lower()
+    if hacer not in _FRIGATE_HACER:
+        return {"ok": False, "motivo": f"Puedo {', '.join(_FRIGATE_HACER)}; no '{hacer}'."}
+    servicio, entidad = str(servicio or "").strip().lower(), str(entidad or "").strip().lower()
+    if hacer == "casa":
+        rechazo = _frigate_casa_rechazo(servicio, entidad)
+        if rechazo:
+            return {"ok": False, "motivo": rechazo}
+    else:
+        servicio = entidad = ""
+    if hacer == "llamar" and not _telefono_configurado():
+        return {"ok": False, "motivo": "No tengo el teléfono configurado; puedo avisarle al móvil."}
+    try:
+        horas = min(max(float(horas), 0.25), FRIGATE_CUANDO_MAX_HORAS)
+    except (TypeError, ValueError):
+        horas = 24
+    veces = "siempre" if str(veces or "").strip().lower() == "siempre" else "una"
+    texto = " ".join(str(texto or "").split())[:150]
+    clave = _clave_recuerdo(f"camara {elegida} {etiquetas[0]} {hacer}")[:40]
+    try:
+        r = http.get(f"{REGLAS_USUARIO_URL}?select=clave", headers=supabase_headers())
+        existentes = {f.get("clave") for f in (r.json() if r.status_code < 300 else [])}
+    except Exception:   # noqa: BLE001
+        existentes = set()
+    if len(existentes) >= REGLAS_USUARIO_MAX and clave not in existentes:
+        return {"ok": False, "motivo": f"Ya tiene {len(existentes)} reglas (el máximo)."}
+    ahora_ts = time.time()
+    parametros = {"camara": elegida, "etiquetas": etiquetas, "hacer": hacer, "texto": texto,
+                  "servicio": servicio, "entidad": entidad, "veces": veces,
+                  "desde": int(ahora_ts), "hasta": int(ahora_ts + horas * 3600)}
+    try:
+        r = http.post(f"{REGLAS_USUARIO_URL}?on_conflict=clave",
+                      headers={**supabase_headers(),
+                               "Prefer": "return=minimal,resolution=merge-duplicates"},
+                      json={"clave": clave, "plantilla": PLANTILLA_CAMARA,
+                            "parametros": parametros, "activa": True})
+        if r.status_code >= 300:
+            raise RuntimeError(f"Supabase devolvió {r.status_code}")
+    except Exception as e:   # noqa: BLE001
+        logger.error("Frigate: no se pudo guardar la regla '%s' (%s)", clave, e)
+        return {"ok": False, "motivo": "No se pudo guardar la regla."}
+    _frigate_reglas_cache["hasta"] = 0.0
+    _frigate_reglas_disparo.pop(clave, None)
+    fin = datetime.fromtimestamp(parametros["hasta"], LOCAL_TZ)
+    que_es = " o ".join(_FRIGATE_QUE[e] for e in etiquetas)
+    accion = {"avisar": "le aviso al móvil", "llamar": "le llamo",
+              "casa": f"mando {servicio} a {entidad}"}[hacer]
+    logger.info("Frigate: regla '%s' (%s en %s → %s)", clave, ",".join(etiquetas), elegida, hacer)
+    return {"ok": True, "clave": clave, "camara": elegida, "busco": etiquetas, "hacer": hacer,
+            "veces": veces, "hasta": _frigate_hora(parametros["hasta"], _ahora_local()),
+            "frase": f"Hecho. Cuando la cámara de {elegida} vea {que_es}, {accion}"
+                     + (" (solo la primera vez)" if veces == "una" else "")
+                     + f". Hasta {fin.strftime('%d/%m a las %H:%M')}."}
+
+
+def _frigate_avisar_tuyo(clave: str, texto: str, eid: str) -> None:
+    """El aviso de una regla suya: `tuya:` no gasta presupuesto ni espera a nada."""
+    pid = str(uuid.uuid4())
+    if _apuntar_aviso(f"{REGLA_TUYA_PREFIJO}{clave}", texto, prioridad=PRIO_URGENTE, id=pid,
+                      huella=f"frigate:{clave}:{eid}"[:120]):
+        _entregar_aviso_ya(pid)
+
+
+def _frigate_hacer(clave: str, p: dict, ev: dict, eid: str) -> None:
+    quien = f"{ev['que'].capitalize()} en {ev['camara']} a las {ev['hora']}"
+    extra = f" {p.get('texto')}" if p.get("texto") else ""
+    if p.get("hacer") == "casa":
+        servicio, entidad = str(p.get("servicio") or ""), str(p.get("entidad") or "")
+        # Se vuelve a mirar al disparar: la lista de lo delicado puede haber crecido.
+        rechazo = _frigate_casa_rechazo(servicio, entidad)
+        r = {"ok": False, "motivo": rechazo} if rechazo else _j_casa_ordenar(servicio, entidad)
+        hecho = (f"he mandado {servicio} a {entidad}." if r.get("ok")
+                 else f"no he podido mandar {servicio} a {entidad} ({str(r.get('motivo') or 'falló')[:80]}).")
+        _frigate_avisar_tuyo(clave, f"📹 {quien}: {hecho}{extra}", eid)
+    elif p.get("hacer") == "llamar":
+        if not _llamar(f"Señor, {quien}.{extra}", rid=""):
+            _frigate_avisar_tuyo(clave, f"📹 {quien}.{extra} (No he podido llamarle.)", eid)
+    else:
+        _frigate_avisar_tuyo(clave, f"📹 {quien}.{extra}", eid)
+
+
+def _frigate_reglas_pasada(reglas: list) -> int:
+    """Mira los eventos nuevos contra las reglas de cámara. Devuelve cuántas se dispararon."""
+    ahora_ts, ahora = time.time(), _ahora_local()
+    vivas = []
+    for regla in reglas:
+        p, clave = regla.get("parametros") or {}, str(regla.get("clave") or "")
+        if not clave or not _FRIGATE_CAMARA_RE.match(str(p.get("camara") or "")):
+            continue
+        if float(p.get("hasta") or 0) < ahora_ts:
+            _frigate_regla_apagar(clave)
+            continue
+        vivas.append((clave, p))
+    if not vivas:
+        return 0
+    camaras = sorted({p["camara"] for _, p in vivas})
+    etiquetas = sorted({e for _, p in vivas for e in (p.get("etiquetas") or []) if e in _FRIGATE_QUE})
+    if not etiquetas:
+        return 0
+    crudos = _frigate_get("/api/events", {
+        "cameras": ",".join(camaras), "labels": ",".join(etiquetas),
+        "after": int(ahora_ts - 300), "limit": 50, "include_thumbnails": 0}) or []
+    for k, visto in list(_frigate_reglas_vistos.items()):
+        if visto < ahora_ts - 3600:
+            _frigate_reglas_vistos.pop(k, None)
+    eventos = sorted((e for e in crudos if isinstance(e, dict) and e.get("id")
+                      and not e.get("false_positive")),
+                     key=lambda x: float(x.get("start_time") or 0))
+    disparadas = 0
+    for clave, p in vivas:
+        desde = max(float(p.get("desde") or 0), _FRIGATE_ARRANQUE)
+        for e in eventos:
+            eid = str(e["id"])[:64]
+            if (e.get("camera") != p["camara"] or e.get("label") not in (p.get("etiquetas") or [])
+                    or float(e.get("start_time") or 0) < desde
+                    or (clave, eid) in _frigate_reglas_vistos):
+                continue
+            # Un evento empieza flojo y su confianza sube mientras dura: si aún no llega,
+            # no se da por visto, y la pasada siguiente lo vuelve a mirar.
+            if float((e.get("data") or {}).get("top_score") or e.get("top_score") or 0) \
+                    < FRIGATE_AVISO_PUNTOS:
+                continue
+            _frigate_reglas_vistos[(clave, eid)] = ahora_ts
+            if ahora_ts - _frigate_reglas_disparo.get(clave, 0) < FRIGATE_AVISO_PAUSA_MIN * 60:
+                continue
+            _frigate_reglas_disparo[clave] = ahora_ts
+            logger.info("Frigate: se dispara la regla '%s' (%s en %s)", clave,
+                        e.get("label"), p["camara"])
+            try:
+                _frigate_hacer(clave, p, _frigate_evento(e, ahora), eid)
+            except Exception as x:   # noqa: BLE001 — una regla rota no se lleva a las demás
+                logger.warning("Frigate: la regla '%s' falló al actuar (%s)", clave, type(x).__name__)
+            disparadas += 1
+            if p.get("veces") != "siempre":
+                _frigate_regla_apagar(clave)
+                break
+    return disparadas
+
+
 def _frigate_vig_hilo() -> None:
     global _frigate_vig_corriendo
     try:
-        _frigate_vig_pasada()
+        reglas = _frigate_reglas_activas()
+        if reglas:
+            _frigate_reglas_pasada(reglas)
+        if _frigate_vig_camaras():
+            _frigate_vig_pasada()
     except Exception as e:   # noqa: BLE001 — el vigía no puede tumbar nada
         logger.warning("Frigate: el vigía no pudo mirar (%s)", type(e).__name__)
     finally:
@@ -33689,9 +33927,11 @@ def _frigate_vig_hilo() -> None:
 
 
 def _frigate_vig_lanzar() -> None:
-    """Del tick de las alarmas, en su hilo, como la vigilancia de WhatsApp."""
+    """Del tick de las alarmas, en su hilo, como la vigilancia de WhatsApp. Lo que hay que
+    mirar (reglas de cámara, avisos) se decide dentro del hilo: leer las reglas es una
+    consulta a Supabase, y el tick de las alarmas no puede esperarla."""
     global _frigate_vig_corriendo, _frigate_vig_ultima
-    if not _frigate_configurado() or not _frigate_vig_camaras():
+    if not _frigate_configurado():
         return
     with _frigate_vig_lock:
         if _frigate_vig_corriendo or time.time() - _frigate_vig_ultima < FRIGATE_VIG_CADA_SEG:
@@ -37916,6 +38156,32 @@ _JARVIS_HERRAMIENTAS = {
                         "horas": {"type": "number", "description": "Cuántas horas atrás. Por defecto, 24 (máximo, una semana)."}},
         "requiere_frigate": True,
     },
+    "camaras_cuando": {
+        # Ver «Cuando veas X en la cámara Y, haz Z»: la orden es suya y lo que se hace, de una
+        # lista cerrada; lo delicado de la casa se rechaza al crearla.
+        "confirmar":   False,
+        "fn":          _j_camaras_cuando,
+        "descripcion": "Deja preparada una orden suya para cuando una cámara de casa (Frigate) vea "
+                       "algo: «cuando veas un coche entrar en el garaje, enciende la luz», «si "
+                       "pasa alguien por el jardín, llámame». Qué hacer: 'avisar' (al móvil, con "
+                       "`texto`), 'llamar' o 'casa' (una orden de Home Assistant de las que haces "
+                       "sin botón, con `servicio` y `entidad` exactos de casa_dispositivos; la "
+                       "alarma, el garaje o las cerraduras NO, y si lo pide, ofrécele avisar). "
+                       "Por defecto una sola vez y durante 24 h. Se ve en mis_reglas y se quita "
+                       "con quitar_regla.",
+        "parametros":  {"camara": {"type": "string", "description": "«garaje», «jardín», «salón»."},
+                        "que": {"type": "string", "description": "«un coche», «alguien», «un perro»…"},
+                        "hacer": {"type": "string", "enum": list(_FRIGATE_HACER),
+                                  "description": "avisar (por defecto), llamar o casa."},
+                        "texto": {"type": "string", "description": "Lo que quiere que le diga, corto."},
+                        "servicio": {"type": "string", "description": "Solo con hacer=casa, p. ej. 'light.turn_on'."},
+                        "entidad": {"type": "string", "description": "Solo con hacer=casa, p. ej. 'light.garaje'."},
+                        "veces": {"type": "string", "enum": ["una", "siempre"],
+                                  "description": "una (por defecto: se apaga al dispararse) o siempre."},
+                        "horas": {"type": "number", "description": "Cuánto dura. Por defecto 24; máximo 720."}},
+        "obligatorios": ["camara", "que"],
+        "requiere_frigate": True,
+    },
 
     # ── Recordatorios ────────────────────────────────────────────────────────
     "recordarme": {
@@ -38444,6 +38710,8 @@ _AJENO_SI_LO_PIDES = {
     "jellyfin_reproducir":    re.compile(r"\b(pon|ponme|ponla|ponlo|reproduce|echa|echame)\b"),
     "camaras_vigilar":        re.compile(r"\b(vigila|vigilame|vigilala|vigilalo|vigilar|"
                                          r"avisame si)\b"),
+    "camaras_cuando":         re.compile(r"\b(cuando|si) (veas|ves|vea|aparezca|entre|llegue|"
+                                         r"pase|detectes|detecte)\b"),
 }
 assert (_HERRAMIENTAS_AJENAS | _TRAS_AJENO_SE_PUEDE | _AJENO_NI_CON_BOTON | set(_AJENO_SI_LO_PIDES)) \
     <= set(_JARVIS_HERRAMIENTAS), "Una lista de lo ajeno apunta a una herramienta que no existe."
@@ -38779,6 +39047,9 @@ _MCP_SERVIDOR_ACCIONES = {
     "whatsapp_cancelar_programado",
     # 2026-11-08: vigilar una cámara de fuera un rato. Solo avisa al móvil.
     "camaras_vigilar",
+    # 2026-11-18: «cuando veas un coche en el garaje, haz…». Lo que hace es de una lista
+    # cerrada, y lo de la casa que se confirma no se puede dejar preparado.
+    "camaras_cuando",
 }
 # Las que se confirman, que por teléfono no tienen botón delante: se mandan al móvil con
 # uno (`_proponer_en_movil`, «Lo que se confirma en el móvil») y no se hacen hasta que lo
@@ -40791,6 +41062,7 @@ _JARVIS_RELLENOS = {
     "camaras_mirar":      "Miro las cámaras.",
     "camaras_vigilar":    "Me pongo a vigilar.",
     "camaras_detecciones": "Miro lo que han visto las cámaras.",
+    "camaras_cuando":     "Lo dejo preparado.",
     "crear_evento":       "Lo apunto.",
     "crear_tarea":        "Lo apunto.",
 }

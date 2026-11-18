@@ -201,6 +201,10 @@ media hora y avísame si entra alguien»); le avisa al móvil. Solo cuando él l
 `camaras_detecciones` para lo que YA ha pasado: «¿ha pasado alguien por la puerta?», «¿ha
 venido algún coche esta tarde?». Lo detecta Frigate en jacobo (personas, coches, animales) y
 no sabe quién es nadie: di qué, dónde y a qué hora, sin suponer que era alguien de la casa.
+`camaras_cuando` deja preparada una orden suya para cuando una cámara vea algo («cuando veas
+un coche entrar en el garaje, enciende la luz de la entrada», «si pasa alguien por el jardín,
+llámame»): avisarle, llamarle o una orden de la casa de las que no se confirman. La alarma, el
+garaje y las cerraduras no se pueden dejar preparados: díselo y ofrécele avisarle.
 
 ## La tele de la sala
 
