@@ -48,6 +48,42 @@ el turno queda atado. **Por teléfono todavía no**: allí WhatsApp lo lee la ll
 voice-app). Embeddings en jacobo para buscar por sentido y no por palabra: cuando haga falta,
 no antes.
 
+## Lo pendiente: compromisos sacados de 30 días de chats (2026-11-19)
+
+«¿Qué tengo pendiente?» → «Hace una semana, con Aimar, se comprometió a llevar a Ane a la
+estación». Mikel lo pidió así: no que Jarvis lea los WhatsApp, sino que los **analice en masa**
+y saque lo que tiene pendiente. **Apagado por defecto** (`WHATSAPP_PENDIENTES`).
+
+- **La pasada** (`_wa_pend_pasada`, del tick de las alarmas en su hilo): la primera vez, los 30
+  días que guarda el puente, chat a chat (40 preguntas por vuelta; si no cabe, sigue a los pocos
+  minutos por donde iba). Después, cada `WA_PEND_CADA_MIN` (60), solo lo nuevo de cada chat, con
+  diez mensajes de antes para entenderlo. Preguntar con lo apuntado viejo lanza otra si la
+  última tiene más de 15 minutos.
+- **Tres tipos**: `compromiso` (Mikel dijo que lo haría: la línea tiene que ser suya),
+  `peticion` (se lo pidieron y no consta hecho ni un no) y `le_deben` (otro quedó en hacerlo por
+  él). Las dos últimas, de una línea de otro. El modelo cierra lo apuntado cuando los mensajes
+  nuevos lo dan por hecho o anulado, y él lo tacha con `whatsapp_pendiente_hecho`.
+- **Caduca**: un abierto sin plazo, a las tres semanas de decirse; con plazo, a la semana de
+  pasar. Lo cerrado se olvida a los 30 días, como los mensajes.
+- **Qué lee y qué no**: chats individuales de tu agenda; de los grupos, solo los ±12 mensajes
+  alrededor de lo que escribes tú o de donde te etiquetan (un grupo donde no has dicho nada no
+  sale a ningún modelo). Líneas MIKEL/OTRO sin nombres de perfil, numeradas para que el modelo
+  diga de dónde saca cada cosa, y lo que le habla a Jarvis se quita antes.
+- **Lo que vuelve se comprueba**: la línea existe y es de quien toca; el «qué» se recorta a 16
+  palabras, pierde comillas y dos puntos, y se tira si parece una orden (`_parece_orden`). La
+  frase la escribe el backend con el nombre seguro del chat.
+- **Dónde vive**: en un fichero de caja, `WA_PEND_FICHERO` (`/datos-wa/pendientes.json`, el
+  volumen `~/stack/whatsapp-pendientes` del backend). Nunca en Supabase: la regla 1 sigue. Sin
+  el volumen funciona en memoria, y cada despliegue lo vuelve a analizar todo.
+- **Es texto ajeno**: `whatsapp_pendientes` está en `_HERRAMIENTAS_AJENAS`. **Por teléfono**,
+  `📖 LEER: whatsapp` lee primero «Lo que tiene pendiente» y luego lo que espera respuesta: lo
+  oye el altavoz, y Claude solo ve el título.
+
+**El ensayo** (2026-11-19, con sus chats reales y el modelo de Jarvis): 78 preguntas en 78 s,
+nueve apuntados y seis abiertos, todos reconocibles; la mayoría salieron de grupos. Cuesta
+céntimos la primera pasada y casi nada las siguientes.
+**Lo que no se sabe**: cuántos se le escapan. Medirlo exige leer los 30 días a mano.
+
 ## Los programados
 
 «Mañana a las 9 dile a Aimar que no llego», «el viernes a las 00:00 felicita a Ane».
