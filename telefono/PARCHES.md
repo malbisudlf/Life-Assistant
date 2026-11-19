@@ -2272,6 +2272,32 @@ artículos, «Sí, a las nueve» parecería un sí mal oído. La pregunta del ba
 
 Sin `MUSICA_URL` la voice-app es la de siempre: el parche se puede aplicar antes que el servicio.
 
+## El parche 51: el pitido medio segundo antes (small primero, turbo detrás)
+
+Del 2026-11-19, solo `lib/anticipo.js` (y sus tests: `parche51.test.js`; el 26 y el 38 fijan
+`ANTICIPO_PRIMERO=0` para seguir contando lo suyo). **Aplicado en caja ese día** (vuelta atrás:
+imagen `claude-phone-voice-app:antes-p51` y los `*.bak-20261119-antes-p51`; o
+`ANTICIPO_PRIMERO=0` en `~/.claude-phone/.env` y `up -d voice-app`). Foto exportada y coincidente.
+
+**El síntoma**, apuntado por Mikel: entre acabar de hablar y el pitido, 1,5-2 s de silencio.
+**La causa**: el cierre rápido del parche 34 (700 ms si la frase parece acabada) no saltaba
+nunca. Desde el 38 lo decidía turbo, y turbo tarda ~1,15 s: a los 300 + 1.150 ms la frase ya se
+había cerrado por los 1.200 de siempre. El cronómetro lo decía en cada línea —59 turnos seguidos
+con «cierre 1,2», ninguno con «Cierre rápido» en el registro—, y nadie lo leyó así.
+
+Medido en jacobo el 2026-11-19 (frases de Piper de 2-2,6 s): small solo, 0,42 s; turbo solo,
+1,15 s; los dos a la vez, small 0,70 y turbo 1,35. **En fila**: small decide a los ~0,72 s de
+silencio si la frase está acabada, la frase se cierra y suena el pitido; turbo arranca al
+contestar small y da el texto ~0,3 s más tarde que antes. El pitido llega ~0,5 s antes, y el
+total apenas cambia (lo domina Claude, 1-11 s). De paso, si vuelves a hablar antes de que small
+conteste, turbo ni se lanza: menos pasadas de GPU en las pausas a media frase.
+
+- Si small falla, turbo arranca igual; si no contesta en `ANTICIPO_ESPERA_SMALL_MS` (700),
+  también. Con el oído caído no hay small (OpenAI no lo tiene): solo turbo, como el 38.
+- `ANTICIPO_RAPIDO=1` sigue siendo los dos a la vez; `ANTICIPO_PRIMERO=0`, solo turbo.
+- **Sin probar en una llamada real.** Lo que hay que mirar: «Cierre rápido a los … ms» en el
+  registro de la voice-app y «cierre 0,7» en las líneas `[TURNO]`.
+
 ## Avería del 2026-11-18: FreeSWITCH sin perfil SIP, y nadie se enteró
 
 De las 15:19 a las 16:13 (hora de Madrid) **todas las llamadas fallaron con 503**, las de Mikel

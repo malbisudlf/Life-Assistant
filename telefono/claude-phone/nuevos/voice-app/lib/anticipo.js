@@ -26,12 +26,50 @@
  * - No con la escucha pasiva dormida (`activo`): con la radio del coche las pausas no
  *   paran, y cada una sería una pasada más de la GPU de jacobo para nada. Parche 46:
  *   salvo que ya le hayan nombrado o lo dicho sea corto (`activo` recibe la pausa).
+ * - Parche 51 (2026-11-19): `small` PRIMERO y turbo detrás. Desde el 38 el cierre rápido
+ *   no saltaba nunca: lo decidía turbo, que tarda ~1,15 s, y a los 300 + 1.150 ms la
+ *   frase ya se había cerrado por los 1.200 de siempre. 59 turnos seguidos con «cierre
+ *   1,2» en el cronómetro, y el pitido llegaba a 1,5-2 s de dejar de hablar. Medido en
+ *   jacobo ese día: small solo, 0,42 s; los dos a la vez, small 0,70 y turbo 1,35 (se
+ *   reparten la GPU). En fila, small dice a los ~0,72 s de silencio si la frase está
+ *   acabada —el pitido suena medio segundo antes— y turbo transcribe después, sin
+ *   pelearse con nadie. A cambio el texto llega ~0,3 s más tarde que antes. Si vuelves
+ *   a hablar antes de que conteste small, turbo ni se lanza: una pasada menos de GPU.
+ *   Si small no contesta en ESPERA_SMALL_MS, turbo arranca igual. ANTICIPO_PRIMERO=0
+ *   vuelve a lo del 38 (solo turbo); ANTICIPO_RAPIDO=1, a los dos a la vez.
  */
 
 const OPCIONES = { format: 'pcm', sampleRate: 16000, language: 'es' };
 
 function rapidoActivo() {
   return process.env.ANTICIPO_RAPIDO === '1';
+}
+
+function primeroActivo() {
+  return process.env.ANTICIPO_PRIMERO !== '0' && !rapidoActivo();
+}
+
+// Lo que se espera a small antes de lanzar turbo de todos modos. Con jacobo bien, small
+// tarda 0,42 s; más de esto es que está atascado, y turbo no puede esperarle.
+function esperaSmallMs() {
+  const n = parseInt(process.env.ANTICIPO_ESPERA_SMALL_MS || '700', 10);
+  return n > 0 ? n : 700;
+}
+
+/**
+ * Parche 51: si esta pausa sigue siendo la del detector. Deja de serlo si has vuelto a
+ * hablar o si la frase ya se cerró sin ella (por los 1.200 ms enteros); entonces su
+ * turbo no lo va a usar nadie.
+ */
+function pausaVigente(session, pausa) {
+  return pausa.completa === true || session._pausa === pausa;
+}
+
+function conTope(promesa, ms) {
+  let reloj;
+  const tope = new Promise(function (resolve) { reloj = setTimeout(function () { resolve(null); }, ms); });
+  return Promise.race([promesa.catch(function () { return null; }), tope])
+    .then(function (x) { clearTimeout(reloj); return x; });
 }
 
 /**
@@ -50,12 +88,23 @@ function armarAnticipo(session, whisperClient, p) {
   const alPausar = function (pausa) {
     if (!activo(pausa)) return;
     pausa.desde = Date.now();
-    pausa.transcripcion = whisperClient.transcribe(pausa.audio, OPCIONES);
-    // Que una pausa tirada que falla no acabe en un unhandledRejection.
-    pausa.transcripcion.catch(function () {});
     const decidir = function (texto) {
       if (pareceCompleta(texto) && typeof session.cerrarPausa === 'function') session.cerrarPausa(pausa);
     };
+    if (primeroActivo() && whisperClient.oidoDisponible()) {
+      // Parche 51: small decide el cierre; turbo, detrás, da el texto.
+      const small = whisperClient.transcribe(pausa.audio, Object.assign({ soloOido: true, rapido: true }, OPCIONES));
+      small.then(decidir, function () {});
+      pausa.transcripcion = conTope(small, esperaSmallMs()).then(function () {
+        if (!pausaVigente(session, pausa)) throw new Error('pausa sin vigencia');
+        return whisperClient.transcribe(pausa.audio, OPCIONES);
+      });
+      pausa.transcripcion.catch(function () {});
+      return;
+    }
+    pausa.transcripcion = whisperClient.transcribe(pausa.audio, OPCIONES);
+    // Que una pausa tirada que falla no acabe en un unhandledRejection.
+    pausa.transcripcion.catch(function () {});
     pausa.transcripcion.then(decidir, function () {});
     if (rapidoActivo() && whisperClient.oidoDisponible()) {
       whisperClient.transcribe(pausa.audio, Object.assign({ soloOido: true, rapido: true }, OPCIONES))
@@ -98,4 +147,4 @@ function pareceCompleta(texto) {
   return sin.length > 0 && !A_MEDIAS.test(sin);
 }
 
-module.exports = { armarAnticipo, transcribirFrase, pareceCompleta, rapidoActivo, OPCIONES };
+module.exports = { armarAnticipo, transcribirFrase, pareceCompleta, rapidoActivo, primeroActivo, OPCIONES };

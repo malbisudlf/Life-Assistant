@@ -20,6 +20,9 @@ Module.prototype.require = function (id) {
   return requireDeVerdad.apply(this, arguments);
 };
 for (const nivel of ['log', 'warn', 'error']) console[nivel] = function () {};
+// Estos tests cuentan el anticipo de los parches 26, 34 y 38 (solo turbo). El 51 (small
+// primero, turbo detrás) va por defecto y tiene los suyos en parche51.test.js.
+process.env.ANTICIPO_PRIMERO = '0';
 
 const { AudioForkSession } = require('../lib/audio-fork');
 const { armarAnticipo, transcribirFrase } = require('../lib/anticipo');

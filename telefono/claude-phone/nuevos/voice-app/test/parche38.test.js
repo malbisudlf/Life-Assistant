@@ -123,6 +123,8 @@ test('p38: el detector dice cuándo dejaste de hablar (ahora menos el silencio q
 test('p38: al pausar ya no se pide small a la vez que turbo (salvo ANTICIPO_RAPIDO=1)', async () => {
   const { armarAnticipo } = require('../lib/anticipo');
   const EventEmitter = require('events');
+  // Con ANTICIPO_PRIMERO=0: lo del 38. Lo que va por defecto desde el 51, en parche51.test.js.
+  process.env.ANTICIPO_PRIMERO = '0';
   for (const [valor, esperados] of [[undefined, ['final']], ['1', ['final', 'rapido']]]) {
     if (valor === undefined) delete process.env.ANTICIPO_RAPIDO; else process.env.ANTICIPO_RAPIDO = valor;
     const pedidos = [];
@@ -138,4 +140,5 @@ test('p38: al pausar ya no se pide small a la vez que turbo (salvo ANTICIPO_RAPI
     assert.deepStrictEqual(pedidos, esperados);
   }
   delete process.env.ANTICIPO_RAPIDO;
+  delete process.env.ANTICIPO_PRIMERO;
 });
