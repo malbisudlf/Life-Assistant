@@ -22,6 +22,11 @@ ESTRUCTURA = [
         {"id": "cuarto_iker", "nombre": "Cuarto Iker", "e": [["light.iker", "", "Luz Iker"]]}]},
     {"id": "planta_0", "nombre": "Planta 0", "areas": [
         {"id": "garaje", "nombre": "Garaje", "e": [["binary_sensor.puerta_garaje", "garage_door", "Puerta"]]}]},
+    {"id": "planta_1", "nombre": "Planta 1", "areas": [
+        {"id": "jardin", "nombre": "Jardín", "e": [
+            ["switch.jardin_derecha", "", "Jardin Derecha"], ["switch.jardin_derecha_led", "", "LED"],
+            ["light.camara_jardin_floodlight_timed", "", "camara jardin Floodlight (Timed)"]]},
+        {"id": "atico", "nombre": "Ático", "e": [["light.a1_luz_de_la_carcasa", "", "A1 Luz de la carcasa"]]}]},
 ]
 ESTADOS = {"light.flexo": "on", "light.techo_mikel": "off", "sensor.temp_mikel": "21.43",
            "binary_sensor.mov_mikel": "on", "light.iker": "on", "binary_sensor.puerta_garaje": "on"}
@@ -33,6 +38,7 @@ def casa(monkeypatch, mock_requests):
     monkeypatch.setattr(main, "HA_TOKEN", "ha-token")
     monkeypatch.setattr(main, "_ha_directo", lambda: True)
     monkeypatch.setattr(main, "CASA_HOLO_OTROS", ["iker", "ane"])
+    monkeypatch.setattr(main, "CASA_HOLO_LUCES", {"switch.jardin_derecha"})
     monkeypatch.setattr(main, "_casa_holo_cache", {"ts": 0.0, "pisos": None})
     monkeypatch.setattr(main, "_ha_estados_vivos", lambda: (ESTADOS, 1763700000.0))
     monkeypatch.setattr(main, "_hud_paneles", [])
@@ -43,8 +49,8 @@ def casa(monkeypatch, mock_requests):
 class TestLaMaqueta:
     def test_plantas_en_orden_y_lo_que_pasa_en_cada_habitacion(self, casa):
         r = main._casa_holograma()
-        assert r["ok"] is True and [p["nivel"] for p in r["pisos"]] == [0, 2]
-        mikel = next(a for a in r["pisos"][1]["areas"] if a["id"] == "cuarto_mikel")
+        assert r["ok"] is True and [p["nivel"] for p in r["pisos"]] == [0, 1, 2]
+        mikel = next(a for a in r["pisos"][2]["areas"] if a["id"] == "cuarto_mikel")
         assert mikel["luces_on"] == 1 and len(mikel["luces"]) == 2
         assert mikel["temp"] == 21.4 and mikel["presencia"] is True
         garaje = r["pisos"][0]["areas"][0]
@@ -52,7 +58,7 @@ class TestLaMaqueta:
 
     def test_lo_de_los_demas_es_privado_y_sin_datos(self, casa):
         r = main._casa_holograma()
-        iker = next(a for a in r["pisos"][1]["areas"] if a["id"] == "cuarto_iker")
+        iker = next(a for a in r["pisos"][2]["areas"] if a["id"] == "cuarto_iker")
         assert iker == {"id": "cuarto_iker", "nombre": "Cuarto Iker", "privado": True}
 
     def test_lo_privado_de_siempre_no_entra(self, casa):
@@ -70,6 +76,25 @@ class TestLaMaqueta:
     def test_la_plantilla_usa_las_plantas_y_areas_de_ha(self):
         for trozo in ("floors()", "floor_areas(f)", "area_entities(a)", "tojson"):
             assert trozo in main._CASA_HOLO_PLANTILLA
+
+
+class TestQueEsUnaLuz:
+    def test_ni_el_foco_de_la_camara_ni_la_impresora_y_si_el_enchufe_elegido(self, casa):
+        r = main._casa_holograma()
+        jardin, atico = r["pisos"][1]["areas"]
+        assert [l["id"] for l in jardin["luces"]] == ["switch.jardin_derecha"]
+        assert atico["luces"] == []
+
+    def test_un_enchufe_cualquiera_no_es_una_luz(self):
+        assert not main._casa_holo_es_luz("switch.lavadora_energia", "Lavadora")
+        assert main._casa_holo_es_luz("light.salon", "Lámpara del salón")
+        assert not main._casa_holo_es_luz("light.chuangmi_indicator_light", "Indicator light")
+
+    def test_el_enchufe_se_toca_con_su_dominio(self, casa, client, auth_headers, monkeypatch):
+        pedidas = []
+        monkeypatch.setattr(main, "_j_casa_ordenar", lambda s, e, d=None: pedidas.append((s, e)) or {"ok": True})
+        client.post("/casa/holograma/luces", headers=auth_headers, json={"area": "jardin", "encender": False})
+        assert pedidas == [("switch.turn_off", "switch.jardin_derecha")]
 
 
 class TestTocar:

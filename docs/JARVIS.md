@@ -1407,8 +1407,13 @@ backend en la sección «La casa en holograma».
 - **En la casa vive más gente**: las habitaciones de los demás (`CASA_HOLO_OTROS`,
   `CASA_HOLO_PRIVADAS`) salen como un volumen «privado» sin un dato ni un mando, y el
   backend rechaza tocarlas (403). Lo de `_CASA_PRIVADO` no entra nunca.
+- **Qué es una luz**: no todo `light.*` (el foco de una cámara, un indicador, la luz de la
+  carcasa de la impresora se quitan solos, `_CASA_HOLO_NO_LUZ`, y `CASA_HOLO_NO_LUCES` por
+  id) y no solo `light.*`: los enchufes que alumbran (las del jardín son dos Tapo) se dicen
+  en `CASA_HOLO_LUCES`. En esta casa, el 2026-11-20, apenas hay luces inteligentes: la
+  cocina y el salón no tienen ninguna.
 - **Tocar va por `_j_casa_ordenar`** (`POST /casa/holograma/luces`), con su catálogo, su
-  lista blanca y su registro, y solo `light.*`. Lo que se ve cambia en el acto y se vuelve a
+  lista blanca y su registro, cada luz con el servicio de su dominio. Lo que se ve cambia en el acto y se vuelve a
   preguntar a la casa al segundo.
 - Es CSS 3D (perspectiva y `preserve-3d`), sin motor gráfico ni dependencia nueva.
 

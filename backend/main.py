@@ -36835,12 +36835,22 @@ def _investigar_lanzar() -> None:
 #     las que nombran a alguien de `CASA_HOLO_OTROS` y las de `CASA_HOLO_PRIVADAS`. Y lo
 #     que case con `_CASA_PRIVADO` (móviles, ubicaciones…) no entra nunca.
 #   - **Tocar es lo mismo que pedirlo**: va por `_j_casa_ordenar`, con su catálogo, su lista
-#     blanca y su registro. Solo luces (`light.*`): un interruptor de pared, nada delicado.
+#     blanca y su registro. Solo luces: un interruptor de pared, nada delicado.
+#   - **Qué es una luz** (2026-11-20, mirado en la casa): no todo `light.*` lo es —el foco de
+#     una cámara, el LED de su indicador, la luz de la carcasa de la impresora— y algunas
+#     luces de verdad son enchufes (`switch.*`, las del jardín). Las primeras las quita
+#     `_CASA_HOLO_NO_LUZ` (y `CASA_HOLO_NO_LUCES`, por id); los enchufes que alumbran se
+#     dicen uno a uno en `CASA_HOLO_LUCES`: de un enchufe no se puede deducir qué tiene.
 #   - La estructura (qué hay en cada habitación) se pregunta a HA cada CASA_HOLO_CACHE_S con
 #     una plantilla; los estados, en cada lectura, de la misma caché que el resto de la casa.
 CASA_HOLO_CACHE_S  = 600
 CASA_HOLO_OTROS    = [n.strip().lower() for n in os.getenv("CASA_HOLO_OTROS", "").split(",") if n.strip()]
 CASA_HOLO_PRIVADAS = {n.strip().lower() for n in os.getenv("CASA_HOLO_PRIVADAS", "").split(",") if n.strip()}
+CASA_HOLO_LUCES    = {n.strip().lower() for n in os.getenv("CASA_HOLO_LUCES", "").split(",")
+                      if re.fullmatch(r"switch\.[a-z0-9_]{1,64}", n.strip().lower())}
+CASA_HOLO_NO_LUCES = {n.strip().lower() for n in os.getenv("CASA_HOLO_NO_LUCES", "").split(",") if n.strip()}
+_CASA_HOLO_NO_LUZ  = re.compile(r"floodlight|indicator|indicador|carcasa|chassis|impresora|printer|"
+                                r"camara|camera|status_led|led_de_estado", re.I)
 _CASA_HOLO_PRESENCIA = {"motion", "occupancy", "presence"}
 _CASA_HOLO_ABERTURA  = {"door", "window", "opening", "garage_door"}
 _casa_holo_cache: dict = {"ts": 0.0, "pisos": None}
@@ -36852,7 +36862,7 @@ _CASA_HOLO_PLANTILLA = (
     "{%- for f in floors() -%}{%- set na = namespace(areas=[]) -%}"
     "{%- for a in floor_areas(f) -%}{%- set ne = namespace(e=[]) -%}"
     "{%- for x in area_entities(a) -%}"
-    "{%- if x is match('(light|sensor|binary_sensor|camera|media_player|climate)[.]') -%}"
+    "{%- if x is match('(light|switch|sensor|binary_sensor|camera|media_player|climate)[.]') -%}"
     "{%- set ne.e = ne.e + [[x, state_attr(x, 'device_class') or '', state_attr(x, 'friendly_name') or x]] -%}"
     "{%- endif -%}{%- endfor -%}"
     "{%- set na.areas = na.areas + [{'id': a, 'nombre': area_name(a), 'e': ne.e}] -%}"
@@ -36867,6 +36877,16 @@ def _casa_holo_privada(area_id: str, nombre: str) -> bool:
     texto = _sin_tildes(f"{area_id} {nombre}").lower()
     return any(re.search(rf"(^|[^a-z]){re.escape(_sin_tildes(n).lower())}([^a-z]|$)", texto)
                for n in CASA_HOLO_OTROS)
+
+
+def _casa_holo_es_luz(eid: str, nombre: str) -> bool:
+    """¿Alumbra? Un `light.*` que no sea de un aparato (foco de cámara, indicador, impresora),
+    o un enchufe de los de `CASA_HOLO_LUCES`."""
+    if eid in CASA_HOLO_NO_LUCES:
+        return False
+    if eid.startswith("switch."):
+        return eid in CASA_HOLO_LUCES
+    return eid.startswith("light.") and not _CASA_HOLO_NO_LUZ.search(f"{eid} {nombre}")
 
 
 def _casa_holo_plano() -> dict:
@@ -36952,7 +36972,7 @@ def _casa_holograma() -> dict:
                     continue
                 est = estados.get(eid, "")
                 dominio = eid.split(".")[0]
-                if dominio == "light":
+                if _casa_holo_es_luz(eid, fnombre):
                     luces.append({"id": eid, "nombre": str(fnombre)[:40], "on": est == "on"})
                 elif dominio == "sensor" and clase == "temperature" and temp is None:
                     temp = _casa_holo_num(est)
@@ -36997,10 +37017,11 @@ def casa_holograma_luces(body: CasaLucesIn,
         raise HTTPException(status_code=404, detail="Esa habitación no está en la maqueta")
     if area.get("privado"):
         raise HTTPException(status_code=403, detail="Esa habitación no es suya")
-    servicio = "light.turn_on" if body.encender else "light.turn_off"
+    accion = "turn_on" if body.encender else "turn_off"
     hechas, fallos = 0, []
     for luz in area.get("luces") or []:
-        r = _j_casa_ordenar(servicio, luz["id"])
+        # El servicio del dominio de cada una: una luz es `light.*` o un enchufe `switch.*`.
+        r = _j_casa_ordenar(f"{luz['id'].split('.')[0]}.{accion}", luz["id"])
         if r.get("ok"):
             hechas += 1
         else:
