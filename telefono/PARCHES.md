@@ -2298,6 +2298,32 @@ conteste, turbo ni se lanza: menos pasadas de GPU en las pausas a media frase.
 - **Sin probar en una llamada real.** Lo que hay que mirar: «Cierre rápido a los … ms» en el
   registro de la voice-app y «cierre 0,7» en las líneas `[TURNO]`.
 
+## El parche 52: la grabación de las llamadas a otros
+
+**Escrito el 2026-11-20, SIN aplicar.** Mikel pidió a Jarvis que preguntara a un amigo dónde
+estaba y le llegó «en el mine»: el oído (con el modelo pequeño, por rapidez) entendió mal y no
+había forma de saber qué dijo. Ahora cada llamada a un tercero se graba.
+
+- `voice-app/lib/grabacion.js` (nuevo): `uuid_record` de FreeSWITCH en **estéreo**
+  (`RECORD_STEREO`: izquierda el otro, derecha Jarvis) en `/grabaciones/<tercero>.wav`;
+  `GET /api/grabaciones` y `GET /api/grabacion/:id` con la llave de los terceros; borra las
+  de más de `GRABACIONES_DIAS` (30). `GRABAR=0` lo apaga. El id va dentro de una orden de
+  FreeSWITCH: solo pasa un UUID.
+- `conversacion-tercero.js`: empieza a grabar sin esperar (no retrasa el «¿Sí?» ni la
+  presentación) y para al final. Si grabar falla, la llamada sigue.
+- `index.js`: monta las dos rutas. Compose: `~/telefono-grabaciones` en FreeSWITCH (escribe,
+  como root) y en la voice-app (sirve y limpia), en la misma ruta `/grabaciones`.
+- Tests: `test/parche52.test.js` (8) y `parche32.test.js` ajustado (la grabación también
+  habla con FreeSWITCH; lo que no puede haber es un `uuid_break`). En la copia `/tmp/p52`
+  de caja: los mismos 18 fallos que la voice-app viva, que ya estaban (entorno), y ninguno
+  nuevo.
+- Del lado del backend, `llamada_grabacion` (ver `docs/LLAMADAS_TERCEROS.md`).
+
+Aplicarlo (con su visto bueno): `mkdir ~/telefono-grabaciones`; imagen `antes-p52`; aplicar
+`telefono/parche-52.diff` en `~/.claude-phone-cli` (la parte del compose, en
+`~/.claude-phone/docker-compose.yml`); `docker compose up -d --build voice-app freeswitch`
+**sin llamadas en curso**; comprobar que se registra en el 3CX; `exportar.sh` de la foto.
+
 ## Avería del 2026-11-18: FreeSWITCH sin perfil SIP, y nadie se enteró
 
 De las 15:19 a las 16:13 (hora de Madrid) **todas las llamadas fallaron con 503**, las de Mikel

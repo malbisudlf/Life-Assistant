@@ -472,6 +472,9 @@ class TestJarvisDespachador:
         monkeypatch.setattr(main, "FRIGATE_CLAVE", "clave")
         # Y los recados, que nacen apagados y van encima de las llamadas a otros.
         monkeypatch.setattr(main, "RECADOS", True)
+        # Y el buscador de la vida, sin el índice de jacobo.
+        monkeypatch.setattr(main, "VIDA_URL", "http://jacobo.test:8773")
+        monkeypatch.setattr(main, "VIDA_TOKEN", "x" * 32)
         esquema = main._jarvis_esquema()
         nombres = {h["function"]["name"] for h in esquema}
         # Todas menos las internas, que solo ejecuta un botón y no se anuncian a ningún modelo.

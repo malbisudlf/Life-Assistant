@@ -103,3 +103,23 @@ Cinco casos nuevos en el grupo `jellyfin` de `evals/casos.json`, y el runner enc
 Jellyfin con valores de mentira para que se anuncien. El fallo previsto es confundir «la
 tele» con la casa (`casa_ordenar`), y pedir un capítulo con `jellyfin_novedades` en vez de
 `jellyfin_seguir`.
+
+## La noche de cine (2026-11-20)
+
+«Jarvis, pon algo para ver» → `cine_proponer` y `cine_empezar`, en la sección «La noche de
+cine» de `backend/main.py` (tests en `tests/backend/test_cine.py`).
+
+- **`cine_proponer`** elige tres películas **sin ver** de la biblioteca: puntúa la afinidad
+  con los géneros de lo que ha visto (hasta 150 películas vistas), la nota, si acaba de
+  entrar (21 días) y castiga una larga que acabaría pasada la una. `genero` («una de miedo»)
+  y `max_min` filtran. Dice a qué hora acabaría cada una, y aparte lo que tiene a medias. Es
+  aritmética, sin modelo. Si no hay nada, apunta a `pelis_buscar` y `pelis_pedir`.
+- **`cine_empezar`** es el modo cine: si no hay ningún Jellyfin abierto y la tele se maneja
+  desde aquí, la enciende con Jellyfin (`tele abrir jellyfin`) y espera a que aparezca
+  (`CINE_ESPERA_CLIENTE_S`); baja las luces de `CINE_LUCES` (o pone `CINE_ESCENA`) por
+  `_j_casa_ordenar`, con su catálogo y sus frenos; y pone la película. Una luz que falla no
+  deja sin película: se dice cuál. Un título que no casa con el id no toca nada.
+- **Sin confirmación**: lo pide él («pon…», que es lo que `_AJENO_SI_LO_PIDES` mira también
+  aquí), y la memoria «menos permisos» manda. `cine_proponer` entra en el teléfono (títulos,
+  géneros y notas); `cine_empezar` no, como `jellyfin_reproducir`.
+- Sin `CINE_LUCES` ni `CINE_ESCENA` funciona igual, sin tocar luces, y lo dice.

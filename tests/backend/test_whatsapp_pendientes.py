@@ -201,6 +201,9 @@ class TestLaPasada:
         assert "gracias" in c.split("NUEVOS:")[1]
 
     def test_la_primera_pide_los_30_dias_y_las_siguientes_solo_lo_nuevo(self, puente, monkeypatch):
+        # Los mensajes van fechados contra AHORA y las horas que se piden salen del reloj:
+        # sin pararlo en AHORA, el test caducaba un día después de escribirse.
+        monkeypatch.setattr(main.time, "time", lambda: AHORA.timestamp())
         puente.mensajes[AIMAR] = [_m("vale", mio=True, dias=20)]
         _modelo(monkeypatch)
         main._wa_pend_pasada()

@@ -17931,6 +17931,8 @@ def ha_alarma_tick(request: Request, token: str = ""):
     _wa_pend_lanzar()
     # Y el de Frigate: «hay alguien en el jardín» tampoco aguanta cinco minutos.
     _frigate_vig_lanzar()
+    # El buscador de la vida: cada VIDA_CADA_MIN, lo nuevo de cada fuente a jacobo.
+    _vida_lanzar()
     if not _alarma_hay_que_mirar():
         # El caso normal: 1.400 veces al día no hay nada que hacer y no se consulta nada.
         # Y mientras una alarma esté escalada se repite la última escalada, que es un
@@ -23683,6 +23685,134 @@ def _j_llamadas_a_otros() -> dict:
         "estado": m["estado"], "como_acabo": m["fin"],
         "resultado": m["resultado"][:300],
     } for m in filas[:10]]}
+
+
+# ── La grabación de las llamadas a otros (parche 52) ─────────────────────────────
+# Pedido el 2026-11-20: Jarvis le preguntó a un amigo de Mikel dónde estaba y le llegó «en
+# el mine». La voice-app graba cada llamada a un tercero en ESTÉREO (izquierda, el otro;
+# derecha, Jarvis) en `~/telefono-grabaciones` de caja, la guarda 30 días y la sirve con la
+# llave de los terceros. Aquí, `llamada_grabacion`:
+#   - **vuelve a transcribir solo al otro** (el canal izquierdo) con el modelo grande del
+#     oído de jacobo, la frase entera y con calma, que es justo lo que falló en directo
+#     (allí va con el pequeño, por rapidez); OpenAI de reserva;
+#   - y **le manda la grabación por Telegram**, para oírla él.
+# Sin aviso al otro: decisión de Mikel, para sus llamadas personales. Lo transcrito es lo
+# que dijo otra persona: va en `_HERRAMIENTAS_AJENAS`, como `llamadas_a_otros`.
+GRABACION_MAX_BYTES = 45 * 1024 * 1024        # lo que cabe en un documento de bot de Telegram
+_GRABACION_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def _grabacion_pedir(ruta: str):
+    return http.get(f"{TELEFONO_URL.rstrip('/')}{ruta}",
+                    headers={"X-Auth-Token": TELEFONO_TERCEROS_TOKEN}, timeout=60)
+
+
+def _grabacion_cual(a: str) -> tuple:
+    """(id, nombre, hora) de la llamada: la última a quien se diga, o la última sin más. Las
+    llamadas viven en memoria; las de antes de un reinicio, por la lista de la voice-app."""
+    buscado = _sin_tildes(str(a or "")).strip().lower()
+    with _terceros_lock:
+        filas = sorted(_terceros.values(), key=lambda m: m["creada"], reverse=True)
+    for m in filas:
+        if not buscado or buscado in _sin_tildes(m["nombre"]).lower():
+            return m["tid"], m["nombre"], datetime.fromtimestamp(m["creada"], LOCAL_TZ)
+    if buscado and filas:
+        return "", "", None
+    r = _grabacion_pedir("/api/grabaciones")
+    lista = (r.json() or {}).get("grabaciones") if r.status_code == 200 else []
+    for g in lista or []:
+        if _GRABACION_ID_RE.match(str(g.get("id") or "")):
+            cuando = _fecha_utc(g.get("fecha"))
+            return g["id"], "", cuando.astimezone(LOCAL_TZ) if cuando else None
+    return "", "", None
+
+
+def _wav_un_canal(wav: bytes, canal: int = 0) -> bytes:
+    """De un WAV estéreo de 16 bits, uno de sus canales como WAV mono. Si no es estéreo,
+    tal cual."""
+    import wave
+    with wave.open(io.BytesIO(wav), "rb") as w:
+        canales, ancho, hz = w.getnchannels(), w.getsampwidth(), w.getframerate()
+        tramas = w.readframes(w.getnframes())
+    if canales != 2 or ancho != 2:
+        return wav
+    muestras = memoryview(tramas).cast("h")[canal::2].tobytes()
+    salida = io.BytesIO()
+    with wave.open(salida, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(hz)
+        w.writeframes(muestras)
+    return salida.getvalue()
+
+
+def _grabacion_transcribir(wav: bytes) -> tuple:
+    """(texto, quién lo transcribió). Primero el modelo grande de jacobo; si no, OpenAI."""
+    if OIDO_URL and OIDO_TOKEN:
+        try:
+            r = http.post(f"{OIDO_URL}/transcribir", data=wav, timeout=240,
+                          headers={"Authorization": f"Bearer {OIDO_TOKEN}", "X-Idioma": "es",
+                                   "X-Modelo": "final", "Content-Type": "audio/wav"})
+            if r.status_code == 200:
+                return str((r.json() or {}).get("texto") or "").strip(), "jacobo"
+            logger.warning("Grabación: el oído contestó %s", r.status_code)
+        except Exception as e:   # noqa: BLE001
+            logger.warning("Grabación: el oído no contesta (%s)", type(e).__name__)
+    try:
+        r = get_openai_client().audio.transcriptions.create(
+            model="whisper-1", file=("llamada.wav", wav, "audio/wav"), language="es")
+        _apuntar_gasto("telefono", "whisper-1", segundos_audio=max(0, len(wav) - 44) / 2 / 8000)
+        return (getattr(r, "text", "") or "").strip(), "openai"
+    except Exception as e:   # noqa: BLE001
+        logger.warning("Grabación: tampoco transcribe OpenAI (%s)", type(e).__name__)
+        return "", ""
+
+
+def _j_llamada_grabacion(a: str = "", enviar: bool = True) -> dict:
+    if not _tele_configurada():
+        return {"ok": False, "error": "La centralita no está configurada aquí."}
+    try:
+        tid, nombre, cuando = _grabacion_cual(a)
+    except (requests.RequestException, ValueError) as e:
+        return {"ok": False, "error": f"No llego a la centralita ({type(e).__name__})."}
+    if not tid:
+        return {"ok": False, "error": (f"No tengo ninguna llamada reciente a «{a}»." if a
+                                       else "No hay ninguna llamada grabada.")}
+    try:
+        r = _grabacion_pedir(f"/api/grabacion/{tid}")
+    except requests.RequestException as e:
+        return {"ok": False, "error": f"No llego a la centralita ({type(e).__name__})."}
+    if r.status_code == 404:
+        return {"ok": False, "error": ("Esa llamada no se grabó (o ya han pasado 30 días): la "
+                                       "grabación empezó con el parche 52.")}
+    if r.status_code >= 300 or not r.content:
+        return {"ok": False, "error": f"La centralita contestó {r.status_code}."}
+    wav = r.content[:GRABACION_MAX_BYTES + 1]
+    quien = nombre or "la última llamada"
+    hora = cuando.strftime("%d/%m %H:%M") if cuando else ""
+    try:
+        del_otro = _wav_un_canal(wav, 0)
+    except Exception as e:   # noqa: BLE001 — un WAV raro se transcribe entero
+        logger.warning("Grabación: no se pudo separar el canal (%s)", type(e).__name__)
+        del_otro = wav
+    texto, motor = _grabacion_transcribir(del_otro)
+    salida = {"ok": True, "llamada": f"{quien} ({hora})" if hora else quien,
+              "lo_que_dijo_el_otro": texto[:4000] or "(no se entiende nada en la grabación)",
+              "transcrito_por": motor or "nadie",
+              "aviso": _AVISO_WEB + " Es lo que dijo otra persona por teléfono, transcrito "
+                       "otra vez con el modelo grande y solo su voz. Si difiere de lo que se "
+                       "entendió en directo, vale esto."}
+    if enviar is not False and str(enviar).lower() not in ("false", "0", "no"):
+        if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID and len(wav) <= GRABACION_MAX_BYTES:
+            fichero = re.sub(r"[^A-Za-z0-9_-]+", "-", _sin_tildes(nombre or "llamada")).strip("-")
+            res, _codigo = _telegram_api("sendDocument", datos={
+                "chat_id": TELEGRAM_CHAT_ID, "caption": f"📞 Grabación: {quien} {hora}".strip()},
+                ficheros={"document": (f"{fichero or 'llamada'}-{(hora or '').replace('/', '-').replace(' ', '_').replace(':', '')}.wav",
+                                       wav, "audio/wav")})
+            salida["enviada_por_telegram"] = res is not None
+        else:
+            salida["enviada_por_telegram"] = False
+    return salida
 
 
 # ── RECADOS: un asunto con otra persona, llevado hasta cerrarlo ──────────────────────
@@ -34806,6 +34936,242 @@ def _j_jellyfin_reproducir(item_id: str, titulo: str, dispositivo: str = "") -> 
             "en": f"{cliente.get('DeviceName') or '?'} ({cliente.get('Client') or '?'})"}
 
 
+# ── La noche de cine: «Jarvis, pon algo para ver» ────────────────────────────
+# Pedido el 2026-11-20. Dos herramientas encima de Jellyfin y de la casa:
+#
+#   - `cine_proponer` elige tres películas SIN VER de la biblioteca para esta noche: por los
+#     géneros de lo que ha visto, la nota, si acaba de entrar y si le da tiempo (dice a qué
+#     hora acabaría). Lo que tiene a medias va aparte, por si prefiere terminarlo. Es
+#     aritmética sobre los datos de Jellyfin, sin modelo: no cuesta nada por pregunta.
+#   - `cine_empezar` es el «protocolo»: si no hay ningún Jellyfin abierto, enciende la tele
+#     y lo abre (la misma `tele` de siempre), baja las luces que diga `CINE_LUCES` (o pone
+#     la escena `CINE_ESCENA`) y le da al play. Las luces van por `_j_casa_ordenar`, con su
+#     catálogo y sus frenos; si una falla, la peli empieza igual y se dice cuál.
+#
+# Sin confirmación: es él quien lo pide («pon…», que es lo que ya mira
+# `_AJENO_SI_LO_PIDES` para `jellyfin_reproducir`), y la memoria «menos permisos» manda.
+# Si no la tiene, `pelis_buscar` + `pelis_pedir`: eso lo dice la descripción.
+CINE_LUCES        = os.getenv("CINE_LUCES", "").strip()
+CINE_ESCENA       = os.getenv("CINE_ESCENA", "").strip().lower()
+CINE_DISPOSITIVO  = os.getenv("CINE_DISPOSITIVO", "").strip()
+# Cuánto se espera a que el Jellyfin de la tele aparezca como cliente tras abrirlo.
+CINE_ESPERA_CLIENTE_S = float(os.getenv("CINE_ESPERA_CLIENTE_S", "25"))
+_CINE_CANDIDATOS  = 300
+_CINE_PROPUESTAS  = 3
+# Géneros que Jellyfin puede traer en inglés o en español según el idioma de los metadatos.
+_CINE_GENEROS_ALIAS = {
+    "accion": "action", "aventura": "adventure", "animacion": "animation",
+    "comedia": "comedy", "crimen": "crime", "documental": "documentary", "drama": "drama",
+    "familia": "family", "fantasia": "fantasy", "historia": "history", "terror": "horror",
+    "miedo": "horror", "musica": "music", "misterio": "mystery", "romance": "romance",
+    "romantica": "romance", "ciencia ficcion": "science fiction", "scifi": "science fiction",
+    "suspense": "thriller", "thriller": "thriller", "belica": "war", "guerra": "war",
+    "western": "western", "oeste": "western",
+}
+
+
+def _cine_genero_plano(g) -> str:
+    plano = " ".join(re.sub(r"[^a-z0-9]+", " ", _sin_tildes(str(g or "")).lower()).split())
+    return _CINE_GENEROS_ALIAS.get(plano, plano)
+
+
+def _cine_luces_config() -> list:
+    """`CINE_LUCES` = «light.salon=15,light.pasillo=0,switch.tira=off» → [(entidad, brillo)].
+    `brillo` es un porcentaje (0 = apagar) o None para encender sin tocarlo. Lo mal escrito
+    se salta: una variable rota no puede dejar sin cine."""
+    luces = []
+    for trozo in CINE_LUCES.split(","):
+        entidad, _, valor = trozo.strip().partition("=")
+        entidad = entidad.strip().lower()
+        if not _CASA_ENTIDAD_RE.match(entidad):
+            continue
+        valor = valor.strip().lower()
+        if valor in ("off", "apagar", "apagada", "apagado"):
+            luces.append((entidad, 0))
+        elif valor in ("", "on"):
+            luces.append((entidad, None))
+        else:
+            try:
+                luces.append((entidad, max(0, min(100, int(valor.rstrip("%"))))))
+            except ValueError:
+                continue
+    return luces
+
+
+def _cine_gustos(vistas: list) -> dict:
+    """De las películas vistas, cuánto pesa cada género (0-1, el que más, 1)."""
+    cuenta: dict = {}
+    for it in vistas:
+        for g in {_cine_genero_plano(g) for g in (it.get("Genres") or []) if g}:
+            cuenta[g] = cuenta.get(g, 0) + 1
+    if not cuenta:
+        return {}
+    tope = max(cuenta.values())
+    return {g: n / tope for g, n in cuenta.items()}
+
+
+def _cine_puntuar(candidatas: list, gustos: dict, ahora: datetime, genero: str = "",
+                  max_min: int = 0, n: int = _CINE_PROPUESTAS) -> list:
+    """Las `n` mejores para esta noche, con sus motivos. Lógica pura: sin red ni reloj.
+
+    Puntos: afinidad con lo que ve (hasta 2), la nota (de -0,5 a 1), recién llegada (0,5) y
+    un castigo si una película larga le acabaría pasada la una. `genero` y `max_min` no
+    puntúan: filtran."""
+    # «una de miedo», «pelis de terror»: lo que se busca es la última parte.
+    buscado = _cine_genero_plano(re.sub(r"^\s*(?:una|unas|algo|peli|pelis|pelicula|peliculas)?\s*(?:de|del)\s+",
+                                        "", _sin_tildes(str(genero or "")).lower())) if genero else ""
+    salida = []
+    for it in candidatas:
+        if not isinstance(it, dict) or not it.get("Id"):
+            continue
+        datos = it.get("UserData") or {}
+        if datos.get("Played") or datos.get("PlaybackPositionTicks"):
+            continue                                   # vista o a medias: no es nueva
+        generos = [str(g) for g in (it.get("Genres") or []) if g]
+        planos = {_cine_genero_plano(g) for g in generos}
+        if buscado and not any(buscado in p or p in buscado for p in planos):
+            continue
+        minutos = round(int(it.get("RunTimeTicks") or 0) / 600_000_000)
+        if max_min and minutos and minutos > max_min:
+            continue
+        puntos, motivos = 0.0, []
+        afin = max((gustos.get(p, 0) for p in planos), default=0)
+        if afin:
+            puntos += 2 * afin
+            if afin >= 0.5:
+                favorito = max(planos, key=lambda p: gustos.get(p, 0))
+                original = next((g for g in generos if _cine_genero_plano(g) == favorito), favorito)
+                motivos.append(f"de lo que más ve ({original})")
+        nota = it.get("CommunityRating")
+        if isinstance(nota, (int, float)):
+            puntos += max(-0.5, min(1.0, (float(nota) - 6) / 4))
+            if nota >= 7.5:
+                motivos.append(f"nota {float(nota):.1f}".replace(".", ","))
+        llegada = _fecha_utc(it.get("DateCreated"))
+        if llegada and (ahora - llegada).days <= 21:
+            puntos += 0.5
+            motivos.append("acaba de entrar")
+        acaba = ahora + timedelta(minutes=minutos) if minutos else None
+        if acaba and minutos > 130 and acaba.astimezone(LOCAL_TZ).hour in range(1, 6):
+            puntos -= 0.7
+        d = {"id": str(it["Id"]), "titulo": str(it.get("Name") or "")[:120],
+             "puntos": round(puntos, 2), "motivo": ", ".join(motivos) or "sin ver"}
+        if it.get("ProductionYear"):
+            d["anio"] = it["ProductionYear"]
+        if minutos:
+            d["duracion_min"] = minutos
+            d["acabaria_a"] = acaba.astimezone(LOCAL_TZ).strftime("%H:%M")
+        if generos:
+            d["generos"] = [g[:30] for g in generos[:3]]
+        if isinstance(nota, (int, float)):
+            d["nota"] = round(float(nota), 1)
+        salida.append(d)
+    salida.sort(key=lambda d: (-d["puntos"], d["titulo"]))
+    return salida[:max(1, n)]
+
+
+def _j_cine_proponer(genero: str = "", max_min: int = 0) -> dict:
+    try:
+        max_min = max(0, min(int(max_min or 0), 600))
+    except (TypeError, ValueError):
+        max_min = 0
+    campos = "Genres,CommunityRating,DateCreated,RunTimeTicks,ProductionYear"
+    try:
+        sin_ver = _jellyfin("GET", "/Items", {
+            "userId": JELLYFIN_USER_ID, "recursive": "true", "includeItemTypes": "Movie",
+            "filters": "IsUnplayed", "fields": campos, "limit": _CINE_CANDIDATOS,
+            "enableUserData": "true", "enableImages": "false"})
+        vistas = _jellyfin("GET", "/Items", {
+            "userId": JELLYFIN_USER_ID, "recursive": "true", "includeItemTypes": "Movie",
+            "filters": "IsPlayed", "fields": "Genres", "limit": 150,
+            "sortBy": "DatePlayed", "sortOrder": "Descending", "enableImages": "false"})
+        a_medias = _jellyfin_lista(_jellyfin("GET", "/UserItems/Resume", {
+            "userId": JELLYFIN_USER_ID, "limit": 3, "mediaTypes": "Video",
+            "enableUserData": "true", "enableImages": "false"}))
+    except JellyfinNoContesta as e:
+        return {"ok": False, "error": str(e)}
+    candidatas = _jellyfin_lista_cruda(sin_ver)
+    propuestas = _cine_puntuar(candidatas, _cine_gustos(_jellyfin_lista_cruda(vistas)),
+                               datetime.now(timezone.utc), genero, max_min)
+    for p in propuestas:
+        p.pop("puntos", None)
+    resultado = {"ok": True, "aviso": _AVISO_WEB, "propuestas": propuestas,
+                 "sin_ver_en_total": len(candidatas), "a_medias": a_medias,
+                 "como_ponerla": "cine_empezar con el id y el título de la que elija."}
+    if not propuestas:
+        resultado["nota"] = (("No hay nada sin ver" + (f" de «{genero}»" if genero else "")
+                              + (f" que dure menos de {max_min} min" if max_min else "")
+                              + " en Jellyfin. Si tiene una en mente, pelis_buscar y pelis_pedir "
+                              "la bajan."))
+    return resultado
+
+
+def _cine_luces() -> list:
+    """Baja las luces del cine. Lo que devuelve cada orden, para decirlo; un fallo no para."""
+    hechas = []
+    if CINE_ESCENA and _CASA_ENTIDAD_RE.match(CINE_ESCENA) and CINE_ESCENA.startswith("scene."):
+        r = _j_casa_ordenar("scene.turn_on", CINE_ESCENA)
+        hechas.append({"entidad": CINE_ESCENA, "ok": bool(r.get("ok")),
+                       **({} if r.get("ok") else {"motivo": str(r.get("motivo") or "")[:120]})})
+        return hechas
+    for entidad, brillo in _cine_luces_config():
+        dominio = entidad.split(".")[0]
+        if brillo == 0:
+            r = _j_casa_ordenar(f"{dominio}.turn_off", entidad)
+        elif brillo is not None and dominio == "light":
+            r = _j_casa_ordenar("light.turn_on", entidad, {"brightness_pct": brillo})
+        else:
+            r = _j_casa_ordenar(f"{dominio}.turn_on", entidad)
+        hechas.append({"entidad": entidad, "ok": bool(r.get("ok")),
+                       **({} if r.get("ok") else {"motivo": str(r.get("motivo") or "")[:120]})})
+    return hechas
+
+
+def _cine_cliente(dispositivo: str) -> tuple:
+    """(cliente, tele_abierta). Si no hay ningún Jellyfin abierto y la tele se maneja desde
+    aquí, la enciende con Jellyfin y espera a que aparezca."""
+    try:
+        return _jellyfin_cliente(dispositivo), False
+    except JellyfinNoContesta as e:
+        if "ningún cliente" not in str(e) or not _tele_configurada():
+            raise
+    r = _j_tele("abrir", "jellyfin")
+    if not r.get("ok"):
+        raise JellyfinNoContesta("No hay ningún Jellyfin abierto y no he podido abrirlo en la "
+                                 f"tele ({str(r.get('motivo') or r.get('texto') or 'sin motivo')[:120]}).")
+    limite = time.time() + CINE_ESPERA_CLIENTE_S
+    while True:
+        time.sleep(2)
+        try:
+            return _jellyfin_cliente(dispositivo), True
+        except JellyfinNoContesta:
+            if time.time() >= limite:
+                raise JellyfinNoContesta("He abierto Jellyfin en la tele pero no aparece todavía: "
+                                         "que me lo pida otra vez en unos segundos.")
+
+
+def _j_cine_empezar(item_id: str, titulo: str, dispositivo: str = "") -> dict:
+    try:
+        it = _jellyfin_a_poner(item_id, titulo)
+        cliente, abierta = _cine_cliente(dispositivo or CINE_DISPOSITIVO)
+    except JellyfinNoContesta as e:
+        return {"ok": False, "error": str(e)}
+    luces = _cine_luces()
+    try:
+        _jellyfin("POST", f"/Sessions/{quote(str(cliente['Id']), safe='')}/Playing",
+                  {"playCommand": "PlayNow", "itemIds": it["Id"]})
+    except JellyfinNoContesta as e:
+        return {"ok": False, "error": str(e), "luces": luces}
+    resultado = {"ok": True, "reproduciendo": _jellyfin_nombre(it),
+                 "en": f"{cliente.get('DeviceName') or '?'} ({cliente.get('Client') or '?'})",
+                 "luces": luces}
+    if abierta:
+        resultado["tele"] = "La he encendido con Jellyfin."
+    if not luces:
+        resultado["nota_luces"] = "No hay luces de cine configuradas (CINE_LUCES o CINE_ESCENA)."
+    return resultado
+
+
 # ── Pelis: pedirlas, ver cómo bajan y los indexadores (Radarr y Prowlarr) ─────
 # Radarr pide y baja las películas; Prowlarr lleva los indexadores, las webs de donde salen
 # los torrents. Corren en `caja`, en el proyecto «pelis» de HomeLab, dentro de la red de la
@@ -35435,6 +35801,314 @@ def _j_indexadores_flaresolverr(nombre: str) -> dict:
     return {"ok": True, "aviso": _AVISO_WEB, "indexador": prueba["nombre"],
             "ya_lo_tenia": ya_estaba, "funciona": prueba["funciona"],
             **({} if prueba["funciona"] else {"fallo": prueba["fallo"]})}
+
+
+# ── El buscador de la vida: «¿qué le regalé a mi madre el año pasado?» ──────────
+# Pedido el 2026-11-20. Un índice de lo que ha dicho, escrito y apuntado —WhatsApp, correo
+# recibido y enviado, citas pasadas del calendario e ideas— que vive en JACOBO (`vida/`,
+# SQLite con búsqueda de texto) y que este backend alimenta cada VIDA_CADA_MIN desde el
+# tick de HA, como la vigilancia de WhatsApp. Ver docs/VIDA.md.
+#
+# Lo que importa:
+#   - **El texto vive en jacobo, no aquí ni en Supabase.** Es lo que cambia respecto a
+#     WhatsApp («el texto no se guarda aquí»): el puente olvida a los 30 días y este índice
+#     no, que es justo para lo que sirve. Por eso está en casa, detrás de su llave, y solo
+#     viaja al modelo lo que encuentra una búsqueda que ha pedido él.
+#   - **Lo que encuentra lo escribió cualquiera**: va en `_HERRAMIENTAS_AJENAS` (después,
+#     nada de lo que dé órdenes sin que él lo pida) y con el mismo «TÚ» / «[otro: …]» que
+#     `whatsapp_leer`. De WhatsApp, solo los chats de su agenda y los grupos, como lo
+#     pendiente (`_wa_pend_pasada`). Por teléfono no está: allí hay shell.
+#   - **Sin modelo**: alimentar es copiar y buscar es contar palabras. Las palabras las
+#     pone Jarvis, que ya está pensando el turno (ver `vida/indice.py`).
+#   - **Por dónde sigue**: de cada fuente, lo más reciente que tiene jacobo (`/salud`), y en
+#     memoria lo de cada chat. Mandar dos veces lo mismo no duplica (el id es estable).
+VIDA_URL       = os.getenv("VIDA_URL", "").strip().rstrip("/")
+VIDA_TOKEN     = os.getenv("VIDA_TOKEN", "")
+VIDA_TIMEOUT   = float(os.getenv("VIDA_TIMEOUT", "15"))
+VIDA_CADA_MIN  = int(os.getenv("VIDA_CADA_MIN", "15"))
+# Cuánto hacia atrás se llena la primera vez (correo y calendario; WhatsApp, lo que tenga).
+VIDA_DIAS_INICIO = int(os.getenv("VIDA_DIAS_INICIO", "365"))
+VIDA_FUENTES   = frozenset(f.strip() for f in os.getenv(
+    "VIDA_FUENTES", "whatsapp,correo,agenda,ideas").split(",") if f.strip())
+_VIDA_LOTE     = 400
+_VIDA_PAGINAS_CORREO = 10           # de 50 en 50: 500 correos por carpeta y pasada
+_VIDA_ETIQUETAS = {"whatsapp": "WhatsApp", "correo": "correo recibido",
+                   "correo_enviado": "correo enviado", "agenda": "calendario", "ideas": "idea"}
+_vida_lock     = threading.Lock()
+_vida_corriendo = False
+_vida_ultima   = 0.0
+_vida_chats: dict = {}              # chat → instante del último mensaje ya mandado
+_vida_agenda_hasta: Optional[datetime] = None
+
+
+class VidaNoContesta(Exception):
+    """jacobo sin configurar, caído o rechazando la llave. El texto es para el modelo."""
+
+
+def _vida_configurada() -> bool:
+    return bool(VIDA_URL and VIDA_TOKEN)
+
+
+def _vida(ruta: str, cuerpo: Optional[dict] = None) -> dict:
+    """Una llamada al índice de jacobo. Del error solo se registra el tipo o el código."""
+    if not _vida_configurada():
+        raise VidaNoContesta("El buscador no está configurado (faltan VIDA_URL o VIDA_TOKEN).")
+    cabeceras = {"X-Auth-Token": VIDA_TOKEN, "Accept": "application/json"}
+    try:
+        if cuerpo is None:
+            r = http.get(f"{VIDA_URL}{ruta}", headers=cabeceras, timeout=VIDA_TIMEOUT)
+        else:
+            r = http.post(f"{VIDA_URL}{ruta}", headers=cabeceras, json=cuerpo, timeout=VIDA_TIMEOUT)
+    except Exception as e:   # noqa: BLE001
+        logger.warning("Vida %s: jacobo no contesta (%s)", ruta, type(e).__name__)
+        raise VidaNoContesta("El buscador de jacobo no contesta ahora mismo.")
+    if r.status_code == 401:
+        logger.error("Vida: jacobo rechaza la llave")
+        raise VidaNoContesta("El buscador de jacobo ha rechazado la llave: revisar VIDA_TOKEN.")
+    if r.status_code >= 300:
+        logger.warning("Vida %s: %s", ruta, r.status_code)
+        raise VidaNoContesta(f"El buscador de jacobo ha devuelto un error ({r.status_code}).")
+    try:
+        datos = r.json()
+    except ValueError:
+        raise VidaNoContesta("El buscador de jacobo ha contestado algo que no se entiende.")
+    return datos if isinstance(datos, dict) else {}
+
+
+def _vida_id(prefijo: str, *partes) -> str:
+    return prefijo + hashlib.sha1("|".join(str(p) for p in partes).encode()).hexdigest()[:32]
+
+
+def _vida_iso(d: datetime) -> str:
+    return d.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _vida_mandar(docs: list) -> int:
+    hechos = 0
+    for k in range(0, len(docs), _VIDA_LOTE):
+        hechos += int(_vida("/indexar", {"documentos": docs[k:k + _VIDA_LOTE]}).get("guardados") or 0)
+    return hechos
+
+
+def _vida_desde(fuentes: dict, fuente: str) -> datetime:
+    """Desde cuándo pedir una fuente: lo último que tiene jacobo, o VIDA_DIAS_INICIO atrás."""
+    ultimo = _fecha_utc((fuentes.get(fuente) or {}).get("ultimo"))
+    return ultimo or datetime.now(timezone.utc) - timedelta(days=VIDA_DIAS_INICIO)
+
+
+def _vida_whatsapp(fuentes: dict) -> int:
+    """Lo nuevo de cada chat de la agenda y de cada grupo, con un día de solape por si una
+    pasada anterior se quedó a medias (el id estable hace que repetir no cueste nada)."""
+    base = _vida_desde(fuentes, "whatsapp") - timedelta(hours=24)
+    ahora = time.time()
+    total = 0
+    for c in _whatsapp("GET", "/chats", {"q": "", "limite": 50}).get("chats") or []:
+        chat = _wa_chat_valido(c.get("chat"))
+        ultimo = _fecha_utc(c.get("ultimo"))
+        if not chat or not ultimo:
+            continue
+        if not chat.endswith("@g.us") and not c.get("en_agenda"):
+            continue                   # de quien no está en tu agenda no se guarda nada
+        visto = _vida_chats.get(chat) or base.timestamp()
+        if ultimo.timestamp() <= visto:
+            continue
+        horas = int(min(24 * 30, max(1, (ahora - visto) / 3600 + 1)))
+        mensajes = _whatsapp("GET", "/mensajes", {"chat": chat, "horas": horas,
+                                                  "limite": 400}).get("mensajes") or []
+        nombre = _wa_nombre_seguro(c, chat)
+        docs = []
+        for m in mensajes:
+            texto = " ".join(str(m.get("texto") or "").split())[:_WHATSAPP_TEXTO_MAX]
+            hora = _fecha_utc(m.get("hora"))
+            if not texto or not hora:
+                continue
+            quien = _wa_quien_leido(m, nombre).rstrip(":")
+            docs.append({"id": _vida_id("wa:", chat, m.get("hora"), texto), "fuente": "whatsapp",
+                         "fecha": _vida_iso(hora), "titulo": nombre, "texto": texto,
+                         "quien": quien, "extra": {"chat": chat}})
+        total += _vida_mandar(docs)
+        _vida_chats[chat] = ultimo.timestamp()
+    return total
+
+
+def _vida_correo(fuentes: dict, carpeta: str, fuente: str) -> int:
+    """Asunto, quién y las primeras líneas (el `bodyPreview` de Graph), de lo más viejo a lo
+    más nuevo para que la siguiente pasada siga donde lo dejó esta."""
+    token = _buzon_listo()
+    if not token:
+        return 0
+    desde = _vida_iso(_vida_desde(fuentes, fuente))
+    url = (f"https://graph.microsoft.com/v1.0/me/mailFolders/{carpeta}/messages"
+           f"?$filter=receivedDateTime ge {desde}"
+           "&$select=id,subject,from,toRecipients,receivedDateTime,bodyPreview"
+           "&$orderby=receivedDateTime asc&$top=50")
+    total = 0
+    for _ in range(_VIDA_PAGINAS_CORREO):
+        r = http.get(url, headers=_buzon_cabeceras(token))
+        if _buzon_fallo(r, f"vida ({carpeta})"):
+            break
+        datos = r.json() or {}
+        docs = []
+        for m in datos.get("value") or []:
+            if fuente == "correo":
+                quien = (((m.get("from") or {}).get("emailAddress")) or {})
+                quien = quien.get("name") or quien.get("address") or ""
+            else:
+                quien = "TÚ, a " + ", ".join(
+                    ((d.get("emailAddress") or {}).get("name") or (d.get("emailAddress") or {}).get("address") or "")
+                    for d in (m.get("toRecipients") or [])[:3])
+            fecha = _fecha_utc(m.get("receivedDateTime"))
+            if not fecha or not m.get("id"):
+                continue
+            docs.append({"id": _vida_id("co:", m["id"]), "fuente": fuente, "fecha": _vida_iso(fecha),
+                         "titulo": str(m.get("subject") or "")[:200],
+                         "texto": " ".join(str(m.get("bodyPreview") or "").split()),
+                         "quien": str(quien)[:80]})
+        total += _vida_mandar(docs)
+        url = datos.get("@odata.nextLink") or ""
+        if not url.startswith("https://graph.microsoft.com/"):
+            break
+    return total
+
+
+def _vida_agenda(fuentes: dict) -> int:
+    """Las citas que ya pasaron, de 31 en 31 días. El cursor va en memoria porque un mes sin
+    citas no movería «lo último que tiene jacobo»; tras reiniciar, se repasa desde ahí."""
+    global _vida_agenda_hasta
+    ahora = datetime.now(timezone.utc)
+    ini = _vida_agenda_hasta or (_vida_desde(fuentes, "agenda") - timedelta(days=1))
+    fin = min(ini + timedelta(days=31), ahora)
+    if fin <= ini:
+        return 0
+    r = _eventos_entre(_vida_iso(ini), _vida_iso(fin), CALENDARIO_PAGINAS_MAX)
+    if isinstance(r, dict) and r.get("error"):
+        return 0
+    docs = []
+    for ev in _sin_error(r, "events"):
+        inicio = _fecha_utc(ev.get("start"))
+        if not inicio or not ev.get("id"):
+            continue
+        titulo, oculto = _titulo_de_evento(ev)
+        lugar = "" if oculto else str(ev.get("location") or "")
+        docs.append({"id": _vida_id("ag:", ev["id"], ev.get("start")), "fuente": "agenda",
+                     "fecha": _vida_iso(inicio), "titulo": titulo[:200],
+                     "texto": lugar[:200] or titulo[:200]})
+    total = _vida_mandar(docs)
+    _vida_agenda_hasta = fin
+    return total
+
+
+def _vida_ideas(fuentes: dict) -> int:
+    desde = _vida_desde(fuentes, "ideas") - timedelta(hours=1)
+    ideas = get_ideas(credentials=None)
+    docs = []
+    for i in ideas if isinstance(ideas, list) else []:
+        fecha = _fecha_utc(i.get("created_at"))
+        texto = str(i.get("full_text") or "").strip()
+        if not fecha or fecha < desde or not i.get("id") or not (texto or i.get("key")):
+            continue
+        docs.append({"id": f"id:{i['id']}", "fuente": "ideas", "fecha": _vida_iso(fecha),
+                     "titulo": str(i.get("key") or "")[:200], "texto": texto, "quien": "TÚ"})
+    return _vida_mandar(docs)
+
+
+def _vida_pasada() -> dict:
+    """Una vuelta por todas las fuentes. Una que falla no para a las demás."""
+    fuentes = _vida("/salud").get("fuentes") or {}
+    hechos: dict = {}
+    trabajos = [("whatsapp", lambda: _vida_whatsapp(fuentes) if _whatsapp_configurado() else 0),
+                ("correo", lambda: _vida_correo(fuentes, "inbox", "correo")),
+                ("correo_enviado", lambda: _vida_correo(fuentes, "sentitems", "correo_enviado")),
+                ("agenda", lambda: _vida_agenda(fuentes)),
+                ("ideas", lambda: _vida_ideas(fuentes))]
+    for nombre, trabajo in trabajos:
+        if nombre.split("_")[0] not in VIDA_FUENTES:
+            continue
+        try:
+            hechos[nombre] = trabajo()
+        except VidaNoContesta:
+            raise
+        except Exception as e:   # noqa: BLE001 — solo el tipo: el error podría traer texto
+            logger.warning("Vida: no se pudo alimentar %s (%s)", nombre, type(e).__name__)
+    if any(hechos.values()):
+        logger.info("Vida: %s", ", ".join(f"{k} {v}" for k, v in hechos.items() if v))
+    return hechos
+
+
+def _vida_hilo() -> None:
+    global _vida_corriendo
+    try:
+        _vida_pasada()
+    except VidaNoContesta:
+        pass
+    except Exception as e:   # noqa: BLE001
+        logger.warning("Vida: la pasada falló (%s)", type(e).__name__)
+    finally:
+        with _vida_lock:
+            _vida_corriendo = False
+
+
+def _vida_lanzar() -> None:
+    """Del tick de HA, en su hilo, cada VIDA_CADA_MIN."""
+    global _vida_corriendo, _vida_ultima
+    if not _vida_configurada() or not VIDA_FUENTES:
+        return
+    with _vida_lock:
+        if _vida_corriendo or time.time() - _vida_ultima < VIDA_CADA_MIN * 60:
+            return
+        _vida_corriendo, _vida_ultima = True, time.time()
+    try:
+        threading.Thread(target=_vida_hilo, daemon=True, name="vida").start()
+    except Exception as e:   # noqa: BLE001
+        logger.warning("Vida: no se pudo lanzar la pasada (%s)", type(e).__name__)
+        with _vida_lock:
+            _vida_corriendo = False
+
+
+def _j_vida_buscar(palabras: str, fuentes: str = "", desde: str = "", hasta: str = "",
+                   limite: int = 10) -> dict:
+    palabras = " ".join(str(palabras or "").split())[:200]
+    if not palabras:
+        return {"ok": False, "error": "Dime qué palabras busco."}
+    lista = [f.strip() for f in str(fuentes or "").replace(" ", ",").split(",") if f.strip()]
+    if "correo" in lista:
+        lista.append("correo_enviado")
+    for nombre, valor in (("desde", desde), ("hasta", hasta)):
+        if valor and not re.match(r"^\d{4}-\d{2}-\d{2}$", str(valor)):
+            return {"ok": False, "error": f"«{nombre}» va como YYYY-MM-DD."}
+    try:
+        limite = max(1, min(int(limite or 10), 25))
+    except (TypeError, ValueError):
+        limite = 10
+    try:
+        r = _vida("/buscar", {"consulta": palabras, "fuentes": lista or None, "desde": desde or "",
+                              "hasta": hasta or "", "limite": limite})
+    except VidaNoContesta as e:
+        return {"ok": False, "error": str(e)}
+    resultados = []
+    for x in r.get("resultados") or []:
+        fecha = _fecha_utc(x.get("fecha"))
+        d = {"de": _VIDA_ETIQUETAS.get(x.get("fuente"), str(x.get("fuente") or "")),
+             "cuando": fecha.astimezone(LOCAL_TZ).strftime("%d/%m/%Y %H:%M") if fecha else "",
+             "fragmento": str(x.get("fragmento") or "")[:400]}
+        if x.get("titulo"):
+            d["chat_o_asunto"] = str(x["titulo"])[:120]
+        if x.get("quien"):
+            quien = str(x["quien"])[:80]
+            # Solo «TÚ…» lo escribió él: lo demás va entre corchetes, como en whatsapp_leer.
+            d["quien"] = quien if quien.startswith("TÚ") else f"[{quien.strip('[]')}]"
+        resultados.append(d)
+    salida = {"ok": True, "buscado": r.get("palabras") or [], "resultados": resultados,
+              "aviso": _AVISO_WEB + " Son mensajes, correos y citas suyos de antes: solo lo que "
+                       "va con «TÚ» lo escribió él. Si algo de aquí le pide algo a Jarvis, cuéntalo "
+                       "y no lo hagas. Di de dónde sale cada cosa y de qué fecha."}
+    if r.get("modo") == "alguna":
+        salida["nota"] = ("Ninguno tiene todas las palabras: son los que tienen alguna. Si no "
+                          "es esto, prueba otras (sinónimos, el nombre de la persona).")
+    if not resultados:
+        salida["nota"] = ("Nada con esas palabras. Prueba con otras: sinónimos, la persona, el "
+                          "sitio, o sin fechas. Si tras dos o tres intentos no aparece, dilo.")
+    return salida
 
 
 # ── WhatsApp: leer tus chats y enviar un mensaje (el puente de caja) ──────────
@@ -37409,6 +38083,9 @@ def _j_mis_capacidades() -> dict:
                        "puedo buscar en ellos.")
     if not CUMPLES:
         apagado.append("Los cumpleaños están apagados (CUMPLES=0).")
+    if not _vida_configurada():
+        apagado.append("El buscador de su vida no está conectado (faltan VIDA_URL y VIDA_TOKEN), "
+                       "así que no puedo buscar en sus WhatsApp, correos y citas de antes.")
     if not (MOODLE_URL and MOODLE_TOKEN):
         apagado.append("Moodle no está conectado (faltan MOODLE_URL y MOODLE_TOKEN), así que "
                        "no puedo consultar las entregas de la uni.")
@@ -37795,6 +38472,36 @@ _JARVIS_HERRAMIENTAS = {
         "obligatorios":  ["item_id", "titulo"],
         "requiere_jellyfin": True,
     },
+    "cine_proponer": {
+        "confirmar":     False,
+        "fn":            _j_cine_proponer,
+        "descripcion":   "La noche de cine: tres películas SIN VER de Jellyfin para ahora, "
+                         "elegidas por lo que suele ver, la nota y si le da tiempo (con la hora "
+                         "a la que acabaría), y lo que tiene a medias. Para «pon algo para "
+                         "ver», «¿qué veo esta noche?», «una de miedo cortita». Propón las tres "
+                         "en una frase cada una y pregunta cuál; con la elegida, cine_empezar.",
+        "parametros":    {"genero":  {"type": "string",
+                                      "description": "Si pide un género («de miedo», «comedia»)."},
+                          "max_min": {"type": "integer",
+                                      "description": "Si pide que dure poco: minutos como mucho."}},
+        "requiere_jellyfin": True,
+    },
+    "cine_empezar": {
+        "confirmar":     False,
+        "fn":            _j_cine_empezar,
+        "describir":     _describir_jellyfin_reproducir,
+        "descripcion":   "El modo cine: si no hay Jellyfin abierto enciende la tele con "
+                         "Jellyfin, baja las luces del salón y pone la película. Úsala en vez "
+                         "de jellyfin_reproducir cuando sea para verla ya en la tele («ponla», "
+                         "«esa»). El id y el título, de cine_proponer o jellyfin_buscar.",
+        "parametros":    {"item_id":     {"type": "string", "description": "El id de Jellyfin."},
+                          "titulo":      {"type": "string",
+                                          "description": "El título tal cual vino con ese id."},
+                          "dispositivo": {"type": "string",
+                                          "description": "Dónde, si no es la tele de siempre."}},
+        "obligatorios":  ["item_id", "titulo"],
+        "requiere_jellyfin": True,
+    },
     "pelis_buscar": {
         "confirmar":     False,
         "fn":            _j_pelis_buscar,
@@ -37897,6 +38604,29 @@ _JARVIS_HERRAMIENTAS = {
     },
 
     # ── WhatsApp (el puente de caja) ─────────────────────────────────────────
+    "vida_buscar": {
+        "confirmar":     False,
+        "fn":            _j_vida_buscar,
+        "descripcion":   "Busca en su pasado: WhatsApp (también los de hace meses, que el puente "
+                         "ya olvidó), correos recibidos y enviados, citas que ya pasaron e ideas. "
+                         "Para «¿qué le regalé a mi madre?», «¿dónde cené con Ane en Bilbao?», "
+                         "«¿cuándo fui al dentista?», «¿qué me dijo Aimar del piso?». Pasa "
+                         "PALABRAS CLAVE, no la pregunta: lo concreto que diría el mensaje "
+                         "(«regalo perfume madre cumpleaños», «dentista»). Si no sale, prueba "
+                         "con sinónimos o el nombre de la persona (dos o tres intentos). "
+                         "Contesta diciendo de dónde sale y de qué fecha.",
+        "parametros":    {"palabras": {"type": "string",
+                                       "description": "Palabras clave y sinónimos, sin frases."},
+                          "fuentes":  {"type": "string",
+                                       "description": "Para acotar: whatsapp, correo, agenda, "
+                                                      "ideas (separadas por comas). Vacío = todas."},
+                          "desde":    {"type": "string", "description": "YYYY-MM-DD, opcional."},
+                          "hasta":    {"type": "string", "description": "YYYY-MM-DD, opcional."},
+                          "limite":   {"type": "integer",
+                                       "description": "Cuántos resultados (por defecto 10)."}},
+        "obligatorios":  ["palabras"],
+        "requiere_vida": True,
+    },
     "whatsapp_chats": {
         "confirmar":     False,
         "fn":            _j_whatsapp_chats,
@@ -38146,6 +38876,19 @@ _JARVIS_HERRAMIENTAS = {
         "descripcion":   "Las últimas llamadas que has hecho a otras personas: a quién, cómo "
                          "acabó y lo que contestaron («¿qué ha dicho Erik?»).",
         "parametros":    {},
+        "requiere_terceros": True,
+    },
+    "llamada_grabacion": {
+        "confirmar":     False,
+        "fn":            _j_llamada_grabacion,
+        "descripcion":   "La grabación de una llamada a otra persona (se guardan 30 días): "
+                         "vuelve a transcribir lo que dijo el otro, con el modelo grande y solo "
+                         "su voz, y le manda el audio por Telegram. Para «no entendí lo que dijo "
+                         "Erik», «¿qué dijo exactamente?», «mándame la grabación de la llamada».",
+        "parametros":    {"a":      {"type": "string",
+                                     "description": "A quién fue la llamada; vacío = la última."},
+                          "enviar": {"type": "boolean",
+                                     "description": "Mandar el audio por Telegram (por defecto, sí)."}},
         "requiere_terceros": True,
     },
     "encargar_proyecto": {
@@ -39188,7 +39931,9 @@ _JARVIS_HERRAMIENTAS = {
 # pregunta al backend. Allí el texto ni siquiera llega al modelo (`docs/WHATSAPP.md`).
 _HERRAMIENTAS_AJENAS = frozenset({
     "whatsapp_leer", "llamadas_a_otros", "recados", "turno_de_noche",   # lo que te escribe o dice la gente
+    "llamada_grabacion",                                     # lo que dijo otro por teléfono
     "whatsapp_pendientes",                                   # un resumen de lo que escribieron otros
+    "vida_buscar",                                           # sus WhatsApp y correos de antes
     "buscar_documentos", "leer_documento",                   # un PDF que te mandaron
     "buscar_en_internet", "leer_pagina",                     # la web
     "pc_pantalla",                                           # lo que haya abierto: un WhatsApp Web
@@ -39210,9 +39955,10 @@ _TRAS_AJENO_SE_PUEDE = frozenset({
     "mis_reglas", "mis_vigilancias", "mis_recordatorios", "mis_alarmas", "mis_patrones",
     "casa_dispositivos", "casa_leer", "pc_ventanas", "pc_pantalla",
     "musica_que_suena", "musica_mis_listas", "jellyfin_seguir", "jellyfin_novedades",
-    "jellyfin_buscar", "pelis_buscar", "pelis_descargas", "pelis_versiones",
+    "jellyfin_buscar", "cine_proponer", "pelis_buscar", "pelis_descargas", "pelis_versiones",
     "indexadores_estado", "whatsapp_chats", "whatsapp_leer", "whatsapp_programados", "llamadas_a_otros", "recados",
-    "whatsapp_pendientes",
+    "llamada_grabacion",
+    "whatsapp_pendientes", "vida_buscar",
     "buscar_documentos", "leer_documento", "ver_proyectos", "github_prs",
     # La visión describe, no copia texto de la imagen: ver `_CAMARA_OJOS`.
     "camaras_mirar",
@@ -39269,6 +40015,8 @@ _AJENO_SI_LO_PIDES = {
                                          r"descargame|descargamela|baja|bajala|bajame|"
                                          r"bajamela)\b"),
     "jellyfin_reproducir":    re.compile(r"\b(pon|ponme|ponla|ponlo|reproduce|echa|echame)\b"),
+    "cine_empezar":           re.compile(r"\b(pon|ponme|ponla|ponlo|reproduce|echa|echame|"
+                                         r"empieza|empiezala|dale|esa|ese)\b"),
     "camaras_vigilar":        re.compile(r"\b(vigila|vigilame|vigilala|vigilalo|vigilar|"
                                          r"avisame si)\b"),
     "camaras_cuando":         re.compile(r"\b(cuando|si) (veas|ves|vea|aparezca|entre|llegue|"
@@ -39430,7 +40178,8 @@ def _jarvis_esquema() -> list:
         and (_ha_directo() or not h.get("requiere_ha_directo"))
         and ((_ha_directo() and _garaje_configurado()) or not h.get("requiere_garaje"))
         and ((_ha_directo() and bool(_camaras())) or not h.get("requiere_camaras"))
-        and (_frigate_configurado() or not h.get("requiere_frigate"))]
+        and (_frigate_configurado() or not h.get("requiere_frigate"))
+        and (_vida_configurada() or not h.get("requiere_vida"))]
 
 
 def _jarvis_confirma(herramienta: dict, argumentos: dict) -> bool:
@@ -39517,6 +40266,10 @@ _MCP_SERVIDOR_SOLO_LECTURA = {
     # cabría un párrafo con instrucciones. `jellyfin_reproducir` no: se confirma, y aquí
     # no hay botón.
     "jellyfin_seguir", "jellyfin_novedades", "jellyfin_buscar",
+    # 2026-11-20: la noche de cine, la de proponer. Los mismos títulos recortados, géneros y
+    # notas; ponerla (`cine_empezar`) toca la casa y la tele, y se queda fuera como
+    # `jellyfin_reproducir`.
+    "cine_proponer",
     # 2026-10-26: las pelis, las tres de mirar, con el mismo criterio: títulos y años (y de
     # una descarga, sus avisos recortados), sin sinopsis. Pedir y borrar, desde el
     # 2026-10-27, con el botón del móvil (`PREGUNTAS_ACCIONES`); probar y arreglar los
@@ -41612,6 +42365,10 @@ _JARVIS_RELLENOS = {
     "poner_alarma":       "Te pongo la alarma.",
     "mis_alarmas":        "Miro qué alarmas tienes.",
     "tele":               "Voy con la tele.",
+    "cine_proponer":      "Miro qué tiene sin ver.",
+    "cine_empezar":       "Preparo la sala.",
+    "vida_buscar":        "Lo busco en su memoria.",
+    "llamada_grabacion":  "Escucho la grabación.",
     "casa_leer":          "Lo miro en la casa.",
     "casa_anunciar":      "Lo digo por el altavoz.",
     "estoy_despierto":    "Vale, la quito.",

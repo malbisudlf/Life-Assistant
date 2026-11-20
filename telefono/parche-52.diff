@@ -1,0 +1,374 @@
+diff --git a/docker-compose.yml b/docker-compose.yml
+index e6cd42f..6f942b2 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -45,6 +45,9 @@ services:
+     # RTP ports 30000-30100 avoid conflict with 3CX SBC (uses 20000-20099)
+     environment:
+       - EXTERNAL_IP=${EXTERNAL_IP}
++    # Parche 52: aquí graba las llamadas a otros (uuid_record); la voice-app las sirve y limpia.
++    volumes:
++      - ${HOME}/telefono-grabaciones:/grabaciones
+ 
+   voice-app:
+     build: ${HOME}/.claude-phone-cli/voice-app
+@@ -56,6 +59,8 @@ services:
+     volumes:
+       - ${HOME}/.claude-phone-cli/voice-app/audio:/app/audio
+       - ${HOME}/.claude-phone-cli/voice-app/config:/app/config
++      # Parche 52: las grabaciones de las llamadas a otros (las escribe FreeSWITCH).
++      - ${HOME}/telefono-grabaciones:/grabaciones
+     depends_on:
+       - drachtio
+       - freeswitch
+diff --git a/voice-app/index.js b/voice-app/index.js
+index c0106fd..0ab50fb 100644
+--- a/voice-app/index.js
++++ b/voice-app/index.js
+@@ -249,6 +249,10 @@ function initializeServers() {
+     res.json({ ok: true, oido: { configurado: !!process.env.OIDO_URL, disponible: whisperClient.oidoDisponible() } });
+   });
+ 
++  // Parche 52: las grabaciones de las llamadas a otros, para el backend (con la misma llave),
++  // y su limpieza a los GRABACIONES_DIAS días.
++  require("./lib/grabacion").montar(httpServer.app);
++
+   // Parche 34: lo que se dice siempre igual, ya sintetizado (en segundo plano).
+   setTimeout(function () {
+     ttsService.prepararFrasesFijas([
+diff --git a/voice-app/lib/conversacion-tercero.js b/voice-app/lib/conversacion-tercero.js
+index 40837d4..482962a 100644
+--- a/voice-app/lib/conversacion-tercero.js
++++ b/voice-app/lib/conversacion-tercero.js
+@@ -28,6 +28,7 @@
+  */
+ 
+ const { armarAnticipo, transcribirFrase } = require('./anticipo');
++const grabacion = require('./grabacion');
+ 
+ // El saludo: tope total, lo que se espera a que empiece a hablar y el silencio que lo da
+ // por dicho (un «¿Sí?» no necesita los 1,5 s de `endSilenceMs`).
+@@ -426,6 +427,11 @@ async function runConversacionTercero(endpoint, dialog, callId, o) {
+     await endpoint.play(url);
+   };
+ 
++  // Parche 52: se graba desde el principio, sin esperar: arrancar la grabación no puede
++  // retrasar ni un milisegundo el «¿Sí?» del otro ni la presentación.
++  const grabar = o.grabacion || grabacion;
++  const grabando = grabar.empezar(endpoint, o.tercero, log);
++
+   try {
+     const esperada = o.audioForkServer.expectSession(callId, { timeoutMs: 10000 });
+     await endpoint.forkAudioStart({
+@@ -576,6 +582,7 @@ async function runConversacionTercero(endpoint, dialog, callId, o) {
+                             new Promise(function (r) { setTimeout(r, CIERRE_MS); })]);
+       } catch (e) { /* ya parado */ }
+     }
++    await grabar.parar(endpoint, await grabando);
+   }
+   return { endReason: fin };
+ }
+diff --git a/voice-app/lib/grabacion.js b/voice-app/lib/grabacion.js
+new file mode 100644
+index 0000000..52e8df3
+--- /dev/null
++++ b/voice-app/lib/grabacion.js
+@@ -0,0 +1,129 @@
++/**
++ * Parche 52: la grabación de las llamadas a otras personas (2026-11-20).
++ * Ver telefono/PARCHES.md y docs/LLAMADAS_TERCEROS.md en Life Assistant.
++ *
++ * Mikel le pidió a Jarvis que le preguntara a un amigo dónde estaba y le llegó «en el
++ * mine»: el oído entendió mal y no había forma de saber qué dijo. Ahora cada llamada a un
++ * tercero se graba, para volver a escucharla o transcribirla con calma.
++ *
++ *   - **La graba FreeSWITCH** (`uuid_record`), en ESTÉREO: a la izquierda lo que dice el
++ *     otro y a la derecha lo que dice Jarvis. Así el backend puede volver a transcribir
++ *     solo al otro, con el modelo grande, sin que la voz de Jarvis estorbe.
++ *   - **En `~/telefono-grabaciones` de caja**, montada en FreeSWITCH (que escribe) y en la
++ *     voice-app (que la sirve y la limpia) en la misma ruta, `/grabaciones`. El nombre es
++ *     el id de la llamada del backend (`tercero`), ya validado como UUID.
++ *   - **Se borran solas a los GRABACIONES_DIAS días** (30): son voces de otros.
++ *   - **Sin aviso**: decisión de Mikel; no son llamadas comerciales.
++ *   - **Grabar nunca tumba la llamada**: si FreeSWITCH no puede, se registra y se sigue.
++ *   - `GRABAR=0` en `~/.claude-phone/.env` lo apaga.
++ */
++'use strict';
++
++const fs = require('fs');
++const path = require('path');
++
++const DIR = process.env.GRABACIONES_DIR || '/grabaciones';
++const DIAS = parseInt(process.env.GRABACIONES_DIAS, 10) || 30;
++const ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
++const ORDEN_MS = 3000;
++
++function activa() {
++  return process.env.GRABAR !== '0';
++}
++
++function ruta(id) {
++  return ID_RE.test(String(id || '')) ? path.join(DIR, id + '.wav') : null;
++}
++
++function conTope(promesa, ms) {
++  return Promise.race([promesa, new Promise(function (_, mal) {
++    setTimeout(function () { mal(new Error('sin respuesta')); }, ms);
++  })]);
++}
++
++/** Empieza a grabar. Devuelve la ruta, o null si no se graba (apagado, id raro o fallo). */
++async function empezar(endpoint, id, log) {
++  const fichero = ruta(id);
++  if (!activa() || !fichero || !endpoint || !endpoint.uuid) return null;
++  try {
++    if (endpoint.set) await conTope(endpoint.set('RECORD_STEREO', 'true'), ORDEN_MS);
++    const r = await conTope(endpoint.api('uuid_record', endpoint.uuid + ' start ' + fichero), ORDEN_MS);
++    const cuerpo = String((r && (r.body || r)) || '');
++    if (/^-ERR/.test(cuerpo)) throw new Error(cuerpo.trim().slice(0, 80));
++    if (log) log('GRABACIÓN: empieza (' + id + ')');
++    return fichero;
++  } catch (e) {
++    if (log) log('GRABACIÓN: no se puede grabar (' + e.message + '); la llamada sigue');
++    return null;
++  }
++}
++
++/** La para. Con la llamada ya colgada FreeSWITCH la cierra solo: un fallo aquí no importa. */
++async function parar(endpoint, fichero) {
++  if (!fichero || !endpoint || !endpoint.uuid) return;
++  try {
++    await conTope(endpoint.api('uuid_record', endpoint.uuid + ' stop ' + fichero), ORDEN_MS);
++  } catch (e) { /* ya parada */ }
++}
++
++/** Borra las de más de DIAS días. Devuelve cuántas. */
++function limpiar(ahora) {
++  const tope = (ahora || Date.now()) - DIAS * 86400000;
++  let borradas = 0;
++  let nombres = [];
++  try { nombres = fs.readdirSync(DIR); } catch (e) { return 0; }
++  for (const n of nombres) {
++    if (!/\.wav$/.test(n)) continue;
++    const f = path.join(DIR, n);
++    try {
++      if (fs.statSync(f).mtimeMs < tope) { fs.unlinkSync(f); borradas++; }
++    } catch (e) { /* otra la borró antes */ }
++  }
++  return borradas;
++}
++
++/** Las que hay, de la más nueva a la más vieja: {id, fecha, bytes}. */
++function listar() {
++  let nombres = [];
++  try { nombres = fs.readdirSync(DIR); } catch (e) { return []; }
++  const salida = [];
++  for (const n of nombres) {
++    const id = n.replace(/\.wav$/, '');
++    if (!ID_RE.test(id) || !/\.wav$/.test(n)) continue;
++    try {
++      const st = fs.statSync(path.join(DIR, n));
++      salida.push({ id: id, fecha: new Date(st.mtimeMs).toISOString(), bytes: st.size });
++    } catch (e) { /* borrada entre medias */ }
++  }
++  return salida.sort(function (a, b) { return a.fecha < b.fecha ? 1 : -1; });
++}
++
++function llaveOk(req) {
++  const llave = process.env.TELEFONO_TERCEROS_TOKEN || '';
++  return !!llave && req.get('X-Auth-Token') === llave;
++}
++
++/** GET /api/grabaciones y GET /api/grabacion/:id, con la llave de los terceros. */
++function montar(app) {
++  app.get('/api/grabaciones', function (req, res) {
++    if (!llaveOk(req)) return res.status(403).json({ ok: false });
++    res.json({ ok: true, grabaciones: listar().slice(0, 50) });
++  });
++  app.get('/api/grabacion/:id', function (req, res) {
++    if (!llaveOk(req)) return res.status(403).json({ ok: false });
++    const fichero = ruta(req.params.id);
++    if (!fichero || !fs.existsSync(fichero)) return res.status(404).json({ ok: false });
++    res.set('Cache-Control', 'no-store');
++    res.type('audio/wav');
++    fs.createReadStream(fichero).pipe(res);
++  });
++  // La limpieza, al arrancar y cada seis horas.
++  const pasar = function () {
++    const n = limpiar();
++    if (n) console.log('[' + new Date().toISOString() + '] GRABACIÓN: ' + n + ' borradas por viejas');
++  };
++  setTimeout(pasar, 10000).unref();
++  setInterval(pasar, 6 * 3600 * 1000).unref();
++}
++
++module.exports = { empezar, parar, limpiar, listar, montar, ruta, DIR };
+diff --git a/voice-app/test/parche32.test.js b/voice-app/test/parche32.test.js
+index b5d0937..b25d0b6 100644
+--- a/voice-app/test/parche32.test.js
++++ b/voice-app/test/parche32.test.js
+@@ -221,7 +221,8 @@ test('Jarvis dice cada frase entera: oído cerrado, sin armar el corte y sin uui
+   const r = await runConversacionTercero(e.endpoint, e.dialog, 'c1', e.o);
+   assert.strictEqual(r.endReason, 'goodbye');
+   assert.strictEqual(armados, 0);
+-  assert.deepStrictEqual(cortes, []);
++  // La grabación (parche 52) también habla con FreeSWITCH; lo que no puede haber es un corte.
++  assert.deepStrictEqual(cortes.filter((o) => o !== "uuid_record"), []);
+   assert.ok(oidoAlHablar.length >= 3);
+   assert.ok(oidoAlHablar.every((abierto) => abierto === false), JSON.stringify(oidoAlHablar));
+ });
+diff --git a/voice-app/test/parche52.test.js b/voice-app/test/parche52.test.js
+new file mode 100644
+index 0000000..fb433a9
+--- /dev/null
++++ b/voice-app/test/parche52.test.js
+@@ -0,0 +1,149 @@
++/**
++ * Parche 52: las llamadas a otras personas se graban (en estéreo), se sirven al backend con
++ * llave y se borran solas a los 30 días. Grabar nunca puede tumbar ni retrasar la llamada.
++ *
++ * FreeSWITCH es un doble: `node --test test/parche52.test.js`, dentro de la imagen y sin red.
++ */
++'use strict';
++
++const test = require('node:test');
++const assert = require('node:assert');
++const fs = require('node:fs');
++const os = require('node:os');
++const path = require('node:path');
++const { EventEmitter } = require('node:events');
++
++for (const nivel of ['log', 'warn', 'error', 'info']) console[nivel] = function () {};
++
++const DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'grab-'));
++process.env.GRABACIONES_DIR = DIR;
++process.env.TELEFONO_TERCEROS_TOKEN = 'llave';
++
++const grabacion = require('../lib/grabacion');
++const { runConversacionTercero } = require('../lib/conversacion-tercero');
++
++const TID = '11111111-2222-3333-4444-555555555555';
++
++function freeswitch(respuesta) {
++  const ordenes = [];
++  return {
++    uuid: 'uuid-del-canal',
++    ordenes,
++    async set(k, v) { ordenes.push(['set', k, v]); },
++    async api(cmd, args) {
++      ordenes.push([cmd, args]);
++      if (cmd === 'uuid_record' && respuesta) return respuesta(args);
++      return { body: '+OK' };
++    },
++    async forkAudioStart() {}, async forkAudioStop() {}, async play() {}
++  };
++}
++
++test('graba en estéreo con el id de la llamada y la para al acabar', async () => {
++  const ep = freeswitch();
++  const f = await grabacion.empezar(ep, TID);
++  assert.strictEqual(f, path.join(DIR, TID + '.wav'));
++  assert.deepStrictEqual(ep.ordenes[0], ['set', 'RECORD_STEREO', 'true']);
++  assert.deepStrictEqual(ep.ordenes[1], ['uuid_record', 'uuid-del-canal start ' + f]);
++  await grabacion.parar(ep, f);
++  assert.deepStrictEqual(ep.ordenes[2], ['uuid_record', 'uuid-del-canal stop ' + f]);
++});
++
++test('un id que no es un UUID no llega a FreeSWITCH (va dentro de una orden)', async () => {
++  const ep = freeswitch();
++  assert.strictEqual(await grabacion.empezar(ep, '../../etc/passwd'), null);
++  assert.strictEqual(await grabacion.empezar(ep, TID + ' stop /x'), null);
++  assert.deepStrictEqual(ep.ordenes, []);
++});
++
++test('si FreeSWITCH dice que no, no se lanza nada', async () => {
++  const ep = freeswitch(() => ({ body: '-ERR Cannot open file' }));
++  assert.strictEqual(await grabacion.empezar(ep, TID), null);
++});
++
++test('GRABAR=0 lo apaga', async () => {
++  process.env.GRABAR = '0';
++  try {
++    const ep = freeswitch();
++    assert.strictEqual(await grabacion.empezar(ep, TID), null);
++    assert.deepStrictEqual(ep.ordenes, []);
++  } finally { delete process.env.GRABAR; }
++});
++
++test('las de más de 30 días se borran, las demás no', () => {
++  const vieja = path.join(DIR, 'aaaaaaaa-2222-3333-4444-555555555555.wav');
++  const nueva = path.join(DIR, 'bbbbbbbb-2222-3333-4444-555555555555.wav');
++  fs.writeFileSync(vieja, 'x');
++  fs.writeFileSync(nueva, 'x');
++  const hace31 = (Date.now() - 31 * 86400000) / 1000;
++  fs.utimesSync(vieja, hace31, hace31);
++  assert.strictEqual(grabacion.limpiar(), 1);
++  assert.ok(!fs.existsSync(vieja) && fs.existsSync(nueva));
++  assert.deepStrictEqual(grabacion.listar().map((g) => g.id), ['bbbbbbbb-2222-3333-4444-555555555555']);
++  fs.unlinkSync(nueva);
++});
++
++test('la conversación graba desde el principio y no espera a que la grabación arranque', async () => {
++  const sesion = new EventEmitter();
++  sesion.setCaptureEnabled = () => {};
++  sesion.waitForUtterance = async () => { throw new Error('timeout'); };
++  const sucesos = [];
++  const lenta = {
++    empezar: () => new Promise((r) => setTimeout(() => { sucesos.push('grabando'); r('/grabaciones/x.wav'); }, 200)),
++    parar: async (ep, f) => { sucesos.push('parada ' + f); }
++  };
++  const ep = freeswitch();
++  ep.play = async (url) => { sucesos.push('dice ' + url); };
++  const r = await runConversacionTercero(ep, new EventEmitter(), 'c1', {
++    audioForkServer: { expectSession: async () => sesion, cancelExpectation() {} },
++    whisperClient: { transcribe: async () => '' },
++    ttsService: { generateSpeech: async (t) => t },
++    tercero: TID, apertura: 'Hola', guion: new Map(), guionListo: true,
++    esperarSaludo: async () => null, grabacion: lenta, fetch: async () => ({ ok: true, json: async () => ({}) })
++  });
++  assert.ok(['silence', 'max_turns'].includes(r.endReason), r.endReason);
++  assert.strictEqual(sucesos[0], 'dice Hola', 'la presentación no esperó a la grabación');
++  assert.strictEqual(sucesos[sucesos.length - 1], 'parada /grabaciones/x.wav');
++});
++
++test('si grabar falla, la llamada sigue igual', async () => {
++  const sesion = new EventEmitter();
++  sesion.setCaptureEnabled = () => {};
++  sesion.waitForUtterance = async () => { throw new Error('timeout'); };
++  const ep = freeswitch(() => { throw new Error('ESL caído'); });
++  const dichos = [];
++  ep.play = async (u) => { dichos.push(u); };
++  await runConversacionTercero(ep, new EventEmitter(), 'c1', {
++    audioForkServer: { expectSession: async () => sesion, cancelExpectation() {} },
++    whisperClient: { transcribe: async () => '' },
++    ttsService: { generateSpeech: async (t) => t },
++    tercero: TID, apertura: 'Hola', guion: new Map(), guionListo: true,
++    esperarSaludo: async () => null, fetch: async () => ({ ok: true, json: async () => ({}) })
++  });
++  assert.strictEqual(dichos[0], 'Hola');
++});
++
++test('servir pide la llave y solo ids de verdad', async () => {
++  const rutas = {};
++  const app = { get(r, fn) { rutas[r] = fn; } };
++  grabacion.montar(app);
++  fs.writeFileSync(path.join(DIR, TID + '.wav'), 'RIFF');
++  const res = () => {
++    const r = { codigo: 200, cuerpo: null, cabeceras: {} };
++    r.status = (c) => { r.codigo = c; return r; };
++    r.json = (j) => { r.cuerpo = j; return r; };
++    r.set = (k, v) => { r.cabeceras[k] = v; };
++    r.type = (t) => { r.cabeceras.type = t; };
++    return r;
++  };
++  const req = (llave, id) => ({ get: () => llave, params: { id } });
++  let r = res();
++  rutas['/api/grabacion/:id'](req('mala', TID), r);
++  assert.strictEqual(r.codigo, 403);
++  r = res();
++  rutas['/api/grabacion/:id'](req('llave', '..%2F..%2Fetc'), r);
++  assert.strictEqual(r.codigo, 404);
++  r = res();
++  rutas['/api/grabaciones'](req('llave'), r);
++  assert.strictEqual(r.cuerpo.grabaciones[0].id, TID);
++});

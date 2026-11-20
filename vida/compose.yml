@@ -1,0 +1,34 @@
+# El buscador de la vida en jacobo. Se copia a mano a ~/vida/servicio/ con su .env
+# (VIDA_TOKEN, chmod 600) y se levanta con `docker compose up -d --build`. El índice vive
+# en ~/vida/datos (crearla antes, del usuario 1000). Ver docs/VIDA.md.
+services:
+  vida:
+    build: .
+    image: vida:local
+    container_name: vida
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      VIDA_HOST: 0.0.0.0
+      VIDA_DB: /datos/vida.db
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - ${HOME}/vida/datos:/datos
+    ports:
+      - "8773:8773"
+    cpus: 1
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8773/vivo', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"

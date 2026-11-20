@@ -214,6 +214,21 @@ Lo que **no** se sabe todavía, y la primera llamada lo dirá:
 - **Qué número ve quien recibe la llamada**: debería ser el fijo de casa (lo pone
   Telefónica según el registro); está por confirmar.
 
+## La grabación (parche 52, 2026-11-20)
+
+Cada llamada a otra persona se graba en `caja` (`~/telefono-grabaciones`, 30 días), en
+estéreo: el otro a la izquierda y Jarvis a la derecha. Sin aviso al otro: decisión de Mikel,
+para sus llamadas personales.
+
+`llamada_grabacion` («no entendí lo que dijo Erik», «mándame la grabación»): baja el audio
+de la voice-app con la llave de los terceros, **vuelve a transcribir solo el canal del otro
+con el modelo grande del oído** (en directo va con el pequeño, por rapidez, y de ahí salió
+«en el mine»), con OpenAI de reserva, y le manda el audio por Telegram. Lo transcrito es lo
+que dijo otra persona: va en `_HERRAMIENTAS_AJENAS`, y no está en el teléfono (allí hay
+shell). Las llamadas viven en memoria del backend; tras un reinicio se toma la última de la
+lista de la voice-app, sin nombre. El oído corta a los 60 s de trabajo: una llamada muy
+larga cae a OpenAI.
+
 ## Lo que no hace
 
 - **No llama a quien no esté en tus contactos**, aunque se lo dictes con el número:
