@@ -1106,9 +1106,21 @@ cuando puedas» metido en la agenda es ruido, y en Ideas se queda olvidado. Es l
 El chat escrito del dashboard puede pensarlo una **sesión normal de Claude Code** en
 `caja` —tu suscripción, Sonnet 5.5, la misma familia que contesta el teléfono— en vez
 del bucle de OpenAI. Se enciende con `JARVIS_MOTOR_CHAT=claude` (por defecto `openai`).
-Solo el chat (y Telegram, notas de voz incluidas: ahí nadie espera en directo, ver
-`docs/TELEGRAM.md`): el modo llamada del navegador y el Atajo siguen con OpenAI, porque
-arrancar Claude Code cuesta unos segundos por turno y hablando se notan.
+El chat y Telegram (notas de voz incluidas, ver `docs/TELEGRAM.md`). El Atajo sigue con
+OpenAI.
+
+**El turno retransmitido (2026-11-21).** Con `JARVIS_VOZ_MOTOR=claude`, también lo que se
+dice en directo —el modo llamada del navegador y el Jarvis de escritorio, los dos por
+`/jarvis/voz`— lo piensa Claude, y **va hablando según escribe**: el servicio de caja
+lanza `claude -p` con `--output-format stream-json --include-partial-messages` y reenvía
+cada trozo (`POST /turno/flujo`, una línea JSON por evento); el backend los convierte en los
+eventos de siempre (`texto`, `herramienta` con su relleno, `fin` con `por_decir`), así que
+los clientes no cambian. Si Claude no puede ni empezar, contesta OpenAI; un corte a media
+respuesta se dice. Lo que escribe antes de usar una herramienta («Déjeme mirar.») se dice
+también, como con OpenAI. `_jarvis_turno_claude_flujo` y `_jarvis_turno_voz` en
+`backend/main.py`; `turno_flujo` en `chat/jarvis_claude.py`. Lo pidió Mikel: «tiene que ir
+por Claude y por jacobo, igual que en Telegram». Arrancar Claude cuesta ~2-3 s antes de la
+primera palabra (OpenAI, ~1 s).
 
 ```
 /jarvis ──▶ chat/jarvis_claude.py (caja) ──▶ claude -p ──▶ /mcp/chat ──▶ las herramientas

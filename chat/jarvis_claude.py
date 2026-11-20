@@ -178,6 +178,116 @@ def turno(cuerpo: dict, ayuda: str) -> tuple:
         _cupo.release()
 
 
+# ── El turno retransmitido (2026-11-21) ──────────────────────────────────────
+# Lo mismo que `turno`, pero soltando la respuesta según Claude la escribe: el Jarvis de
+# escritorio y el modo llamada del navegador empiezan a hablar con la primera frase en vez
+# de esperar a la respuesta entera. Claude Code lo da con `--output-format stream-json
+# --include-partial-messages`; aquí se traduce a una línea JSON por evento (NDJSON):
+#
+#   {"tipo": "mensaje"}                        empieza otro mensaje del modelo
+#   {"tipo": "delta", "texto": "…"}            un trozo de texto
+#   {"tipo": "herramienta", "nombre": "…"}     va a usar una herramienta del MCP
+#   {"tipo": "fin", "respuesta": "…", "modelo": "…"}   o   {"tipo": "error", "error": "…"}
+#
+# Las mismas reglas que el turno de siempre: los argumentos los monta `comando` (sin
+# terminal, solo el MCP de Jarvis); aquí solo cambia el formato de salida.
+
+def comando_flujo(mcp_config: str, sistema: str, ayuda: str, modelo: str = "") -> list:
+    args = comando(mcp_config, sistema, ayuda, modelo)
+    i = args.index("--output-format")
+    args[i + 1] = "stream-json"
+    args[i + 2:i + 2] = ["--verbose", "--include-partial-messages"]
+    return args
+
+
+def eventos_flujo(lineas):
+    """De las líneas de `claude -p --output-format stream-json` a nuestros eventos. Pura."""
+    for linea in lineas:
+        try:
+            d = json.loads(linea)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(d, dict):
+            continue
+        if d.get("type") == "stream_event":
+            e = d.get("event") or {}
+            tipo = e.get("type")
+            if tipo == "message_start":
+                yield {"tipo": "mensaje"}
+            elif tipo == "content_block_start" and (e.get("content_block") or {}).get("type") == "tool_use":
+                yield {"tipo": "herramienta", "nombre": str(e["content_block"].get("name") or "")[:80]}
+            elif tipo == "content_block_delta" and (e.get("delta") or {}).get("type") == "text_delta":
+                texto = str(e["delta"].get("text") or "")
+                if texto:
+                    yield {"tipo": "delta", "texto": texto}
+        elif d.get("type") == "result":
+            datos = leer_salida(json.dumps(d))
+            if "error" in datos:
+                yield {"tipo": "error", "error": datos["error"]}
+            else:
+                yield {"tipo": "fin", "respuesta": datos["respuesta"]}
+            return
+
+
+def turno_flujo(cuerpo: dict, ayuda: str, escribir) -> tuple:
+    """Un turno retransmitido. Si no puede ni empezar, devuelve (código, error) y no
+    escribe nada; si empieza, llama a `escribir(evento)` por cada uno y devuelve (200, None)."""
+    turno_id = str(cuerpo.get("turno") or "")
+    prompt   = str(cuerpo.get("prompt") or "").strip()
+    sistema  = str(cuerpo.get("sistema") or "")
+    modelo   = elegir_modelo(cuerpo.get("modelo"))
+    if not _UUID.match(turno_id) or not prompt:
+        return 400, {"error": "Falta el turno o el mensaje"}
+    if not _cupo.acquire(blocking=False):
+        return 429, {"error": "Ya hay demasiadas sesiones a la vez"}
+    try:
+        os.makedirs(DIRECTORIO, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="jarvis-") as tmp:
+            mcp = os.path.join(tmp, "mcp.json")
+            sis = os.path.join(tmp, "sistema.txt")
+            with open(os.open(mcp, os.O_WRONLY | os.O_CREAT, 0o600), "w", encoding="utf-8") as f:
+                json.dump(config_mcp(turno_id), f)
+            with open(sis, "w", encoding="utf-8") as f:
+                f.write(sistema)
+            try:
+                proceso = subprocess.Popen(comando_flujo(mcp, sis, ayuda, modelo), stdin=subprocess.PIPE,
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                           encoding="utf-8", cwd=DIRECTORIO, env=entorno())
+            except OSError as e:
+                return 503, {"error": f"No se pudo lanzar Claude Code ({e})"}
+            # Si se cuelga, lo mata esto: un `claude` huérfano no se queda corriendo.
+            reloj = threading.Timer(TIMEOUT_S, proceso.kill)
+            reloj.start()
+            hubo_final = False
+            try:
+                proceso.stdin.write(prompt)
+                proceso.stdin.close()
+                for evento in eventos_flujo(proceso.stdout):
+                    if evento["tipo"] in ("fin", "error"):
+                        hubo_final = True
+                        if evento["tipo"] == "fin":
+                            evento["modelo"] = modelo
+                    escribir(evento)
+                proceso.wait(timeout=10)
+            except (BrokenPipeError, ConnectionResetError):
+                # Quien escuchaba se fue (le cortaron hablando): no hay a quién contestar.
+                proceso.kill()
+                return 200, None
+            finally:
+                reloj.cancel()
+            if not hubo_final:
+                error = (proceso.stderr.read() or "")[-300:] if proceso.stderr else ""
+                print(f"jarvis-claude: el turno retransmitido acabó sin resultado "
+                      f"(código {proceso.returncode}): {error}", file=sys.stderr, flush=True)
+                try:
+                    escribir({"tipo": "error", "error": f"Claude Code salió sin terminar ({proceso.returncode})"})
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+        return 200, None
+    finally:
+        _cupo.release()
+
+
 # ── Las llamadas a otras personas (docs/LLAMADAS_TERCEROS.md) ─────────────────
 # Quien habla por teléfono con Erik es una sesión de Claude Code ABIERTA toda la llamada:
 # un `claude -p` por turno son unos segundos más de arranque, y por teléfono se notan. El
@@ -561,6 +671,24 @@ class Manejador(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(cuerpo)
 
+    def _flujo(self, cuerpo: dict) -> None:
+        """El turno retransmitido: NDJSON, una línea por evento, sin largo conocido (se
+        cierra la conexión al acabar)."""
+        empezado = []
+
+        def escribir(evento: dict) -> None:
+            if not empezado:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-ndjson")
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                empezado.append(True)
+            self.wfile.write((json.dumps(evento, ensure_ascii=False) + "\n").encode("utf-8"))
+            self.wfile.flush()
+        codigo, error = turno_flujo(cuerpo, self.ayuda, escribir)
+        if not empezado and error is not None:
+            self._responder(codigo, error)
+
     def do_GET(self):
         if self.path == "/salud":
             return self._responder(200, {"ok": True, "modelo": MODELO,
@@ -572,7 +700,7 @@ class Manejador(BaseHTTPRequestHandler):
         # Sin token configurado no entra nadie: fail-closed, como en el backend.
         if not TOKEN or not hmac.compare_digest(recibido.encode(), f"Bearer {TOKEN}".encode()):
             return self._responder(401, {"error": "Token inválido"})
-        if self.path not in ("/turno", "/tercero/abrir", "/tercero/turno", "/tercero/cerrar",
+        if self.path not in ("/turno", "/turno/flujo", "/tercero/abrir", "/tercero/turno", "/tercero/cerrar",
                              *_INVESTIGAR_RUTAS):
             return self._responder(404, {"error": "No existe"})
         try:
@@ -587,6 +715,8 @@ class Manejador(BaseHTTPRequestHandler):
             return self._responder(400, {"error": "JSON inválido"})
         if not isinstance(cuerpo, dict):
             return self._responder(400, {"error": "JSON inválido"})
+        if self.path == "/turno/flujo":
+            return self._flujo(cuerpo)
         if self.path in _INVESTIGAR_RUTAS:
             return self._responder(*_INVESTIGAR_RUTAS[self.path](cuerpo))
         if self.path == "/tercero/abrir":

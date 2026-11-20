@@ -23,14 +23,13 @@ están en la memoria del proyecto y sin empezar.
    backend, el puente al Whisper de jacobo que ya usa la llamada del navegador. Lo grabado
    antes de conectar sale primero. Al soltar, `{"tipo": "fin"}` y llega el texto. En el PC
    no corre ningún modelo (memoria «sin IA en el PC»).
-2. **Pensar**: lo piensa **Claude**, como las notas de voz de Telegram: `/jarvis` con
-   `voz: true` y `pensar_con_claude: true` (el prompt de voz, de una pieza). Si Claude no
-   contesta, el backend tira de OpenAI y el bocadillo lo dice. Lleva los últimos 12 turnos
-   de esta sesión, en memoria (al cerrar se olvidan, como el chat). Hasta el 2026-11-20 iba
-   por `/jarvis/voz`, que retransmite pero piensa siempre OpenAI; Mikel lo quiere por Claude
-   y por jacobo, como Telegram. Lo que Jarvis deja propuesto se aprueba en el dashboard o
-   en el móvil: aquí no hay botón.
-3. **Hablar**: la respuesta, frase a frase, va a `/voz/decir` (Fish con Azure detrás) y suena por MCI
+2. **Pensar**: lo piensa **Claude**, como Telegram, y **retransmitido**: `/jarvis/voz` con
+   `JARVIS_VOZ_MOTOR=claude` en el backend (ver «El turno retransmitido» en `docs/JARVIS.md`),
+   con OpenAI de reserva si Claude no puede empezar. Va diciendo cada frase según se
+   escribe, y el relleno («Miro la agenda.») mientras usa una herramienta. Lleva los
+   últimos 12 turnos de esta sesión, en memoria (al cerrar se olvidan, como el chat). Lo
+   que Jarvis deja propuesto se aprueba en el dashboard o en el móvil: aquí no hay botón.
+3. **Hablar**: cada frase entera va a `/voz/decir` (Fish con Azure detrás) y suena por MCI
    de Windows. La siguiente se pide mientras suena la anterior.
 
 Ningún endpoint nuevo: funciona con el backend tal como está.

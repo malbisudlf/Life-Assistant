@@ -666,6 +666,11 @@ JARVIS_CLAUDE_TOKEN   = os.getenv("JARVIS_CLAUDE_TOKEN", "")
 # Un turno con varias herramientas puede tardar; más que esto es que algo se ha colgado,
 # y entonces contesta el de OpenAI.
 JARVIS_CLAUDE_TIMEOUT = int(os.getenv("JARVIS_CLAUDE_TIMEOUT", "150"))
+# Quién piensa lo que se dice en voz alta en directo (`/jarvis/voz`: el modo llamada del
+# navegador y el Jarvis de escritorio). `claude` lo piensa Claude retransmitido —va
+# hablando según escribe— con OpenAI de reserva; `openai`, el de siempre. Ver «El turno
+# retransmitido» en docs/JARVIS.md.
+JARVIS_VOZ_MOTOR      = (os.getenv("JARVIS_VOZ_MOTOR", "openai") or "openai").strip().lower()
 # El modelo de la «potencia máxima» de la vista de Jarvis: el turno lo pide así y el
 # servicio de `caja` solo lo acepta si es este o el suyo de siempre. Más lento y gasta
 # más límite de la suscripción, por eso es un interruptor y no el de siempre.
@@ -41886,6 +41891,108 @@ def _jarvis_turno_claude(body) -> dict:
             "modelo": str(d.get("modelo") or "")[:64], "_ajeno": bool(datos["ajeno"])}
 
 
+def _jarvis_turno_claude_flujo(body):
+    """El turno de Claude retransmitido, con los mismos eventos que `_jarvis_turno`:
+    ("texto", {delta}), ("herramienta", {nombre, decir}) y ("fin", {...}) al final.
+
+    Lanza `ClaudeNoContesta` ANTES de soltar nada si no puede ni empezar, para que quien
+    llama tire de OpenAI sin que se haya dicho media frase. Una vez empezado, un corte es
+    un evento `error`: lo dicho, dicho está."""
+    if not (JARVIS_CLAUDE_URL and JARVIS_CLAUDE_TOKEN and JARVIS_MCP_CHAT_TOKEN):
+        raise ClaudeNoContesta("falta configurar JARVIS_CLAUDE_URL, JARVIS_CLAUDE_TOKEN "
+                               "o JARVIS_MCP_CHAT_TOKEN")
+    turno = _chat_turno_nuevo(body.mensaje)
+
+    def _recoger():
+        with _chat_turnos_lock:
+            return _chat_turnos.pop(turno, None) or {"usadas": [], "pendiente": None,
+                                                     "ajeno": {"turno_caducado"}}
+    try:
+        r = http.post(f"{JARVIS_CLAUDE_URL}/turno/flujo",
+                      headers={"Authorization": f"Bearer {JARVIS_CLAUDE_TOKEN}"},
+                      json={"turno": turno, "prompt": _prompt_chat(body),
+                            "sistema": _sistema_chat(voz=True),
+                            "modelo": JARVIS_CLAUDE_MODELO_POTENTE
+                                      if getattr(body, "potente", False) else ""},
+                      timeout=(10, JARVIS_CLAUDE_TIMEOUT), stream=True)
+    except requests.RequestException as e:
+        _recoger()
+        raise ClaudeNoContesta(f"no contesta ({type(e).__name__})") from e
+    if r.status_code >= 300:
+        r.close()
+        _recoger()
+        raise ClaudeNoContesta(f"respondió {r.status_code}")
+    actual, empezado, final, modelo, error = [], False, None, "", ""
+    try:
+        for linea in r.iter_lines(decode_unicode=True):
+            try:
+                ev = json.loads(linea) if linea else None
+            except ValueError:
+                continue
+            if not isinstance(ev, dict):
+                continue
+            tipo = ev.get("tipo")
+            if tipo == "mensaje":
+                actual = []            # lo de antes de una herramienta ya se dijo
+            elif tipo == "delta":
+                texto = str(ev.get("texto") or "")
+                actual.append(texto)
+                empezado = True
+                yield ("texto", {"delta": texto})
+            elif tipo == "herramienta":
+                nombre = str(ev.get("nombre") or "").removeprefix("mcp__jarvis__")
+                empezado = True
+                yield ("herramienta", {"nombre": nombre, "decir": _relleno_herramienta(nombre)})
+            elif tipo == "fin":
+                final = str(ev.get("respuesta") or "").strip()
+                modelo = str(ev.get("modelo") or "")[:64]
+            elif tipo == "error":
+                error = str(ev.get("error") or "")[:300]
+    except requests.RequestException as e:
+        error = error or type(e).__name__
+    finally:
+        r.close()
+        datos = _recoger()
+    if not final:
+        if not empezado:
+            raise ClaudeNoContesta(error or "terminó sin respuesta")
+        logger.error("Jarvis por voz: Claude se cortó a media respuesta (%s)", error)
+        yield ("error", {"detalle": "Se me ha cortado la respuesta. Vuelve a pedírmelo."})
+        return
+    dicho = "".join(actual).strip()
+    # Lo que NO ha salido ya por el altavoz: nada si lo último que escribió es la respuesta,
+    # el resto si se quedó a medias, y entera si lo dicho era otra cosa.
+    if dicho and final.startswith(dicho):
+        por_decir = final[len(dicho):].strip()
+    else:
+        por_decir = final
+    yield ("fin", {"respuesta": final, "herramientas": list(dict.fromkeys(datos["usadas"])),
+                   "pendiente": datos["pendiente"], "por_decir": por_decir,
+                   "motor": "claude", "modelo": modelo})
+    # El `fin` ya salió: la memoria se destila sin que nadie lo espere, como en
+    # `_jarvis_turno`. Un turno con texto ajeno no acaba en ella.
+    if not datos["ajeno"]:
+        _destilar_chat(body, final)
+
+
+def _jarvis_turno_voz(body):
+    """El turno de `/jarvis/voz`: Claude retransmitido si `JARVIS_VOZ_MOTOR=claude`, y si
+    Claude no puede ni empezar, OpenAI (diciéndolo). Si no, OpenAI directamente."""
+    if JARVIS_VOZ_MOTOR == "claude":
+        flujo = _jarvis_turno_claude_flujo(body)
+        try:
+            primero = next(flujo)
+        except ClaudeNoContesta as e:
+            logger.error("Jarvis por voz: Claude no ha contestado (%s); contesta OpenAI", e)
+        except StopIteration:
+            logger.error("Jarvis por voz: Claude no dijo nada; contesta OpenAI")
+        else:
+            yield primero
+            yield from flujo
+            return
+    yield from _jarvis_turno(body)
+
+
 def _jarvis_chat(body, *, voz_con_claude: bool = False) -> dict:
     """El turno del chat escrito: con Claude Code si toca, y si no contesta, con OpenAI.
 
@@ -43511,7 +43618,7 @@ def jarvis_voz(
         # antes del bucle solo llega a la primera llamada — el resto vuelve a ver la
         # boca por defecto ("sistema") y el gasto de esa llamada, que es la que más
         # cuesta, queda mal apuntado.
-        turno_iter = _jarvis_turno(turno)
+        turno_iter = _jarvis_turno_voz(turno)
         try:
             while True:
                 _boca_actual.set("voz")
