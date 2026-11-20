@@ -43,8 +43,9 @@ WhatsApp, correo recibido y enviado, citas pasadas del calendario e ideas. Pedid
 ## Ponerlo en marcha (lo hace Mikel o una sesión con su visto bueno)
 
 **En marcha desde el 2026-11-20** (backend `1d29a7a`): la primera pasada metió 5.350
-WhatsApp, 39 citas e ideas. **El correo no entra mientras `CORREO_LEER` siga apagado** en
-caja: la pasada usa la misma puerta que el resto de lecturas del buzón (`_buzon_listo`).
+WhatsApp, 39 citas e ideas. El correo pasa por la misma puerta que el resto de lecturas del
+buzón (`_buzon_listo`, o sea `CORREO_LEER`): encendido en caja ese mismo día, entraron 143
+recibidos y 220 enviados del último año.
 
 1. **En jacobo**: copiar `vida/` a `~/vida/servicio/`, crear `~/vida/datos` y un `.env` con
    `VIDA_TOKEN=<aleatorio>` (`chmod 600`), y `docker compose up -d --build`.
