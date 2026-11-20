@@ -2508,8 +2508,10 @@ export default function Dashboard() {
   /** El fotograma de ahora, o nada. Va en el cuerpo del turno (`camara`). */
   const fotogramaCamara = () => {
     try {
-      const b64 = camaraRef.current?.() || "";
-      return b64 ? { camara: b64 } : {};
+      // Un texto (la frontal) o {b64, lado} (la trasera del móvil, «los ojos»).
+      const f = camaraRef.current?.() || "";
+      if (!f) return {};
+      return typeof f === "string" ? { camara: f } : { camara: f.b64, camara_lado: f.lado };
     } catch { return {}; }
   };
 

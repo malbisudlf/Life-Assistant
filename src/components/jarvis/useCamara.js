@@ -11,6 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // pequeño (unos 40-80 KB en JPEG) para no frenar el turno.
 const ANCHO_FOTOGRAMA = 640;
 const CALIDAD_FOTOGRAMA = 0.72;
+export const ANCHO_TRASERA = 1024;
 
 /** Abre la cámara mientras `activa` y devuelve la referencia del <video>, en qué estado
  *  está y `capturar()`, que da el fotograma actual en base64 (sin el prefijo data:).
@@ -19,7 +20,7 @@ const CALIDAD_FOTOGRAMA = 0.72;
  *  vídeo cambia de sitio —el panel «Visión» o la pantalla entera del modo inmersivo— y
  *  el que aparece tiene que recibir el directo que ya está abierto, sin volver a pedir
  *  la cámara. `videoRef` sigue siendo el que está a la vista, para las manos y la foto. */
-export function useCamara(activa) {
+export function useCamara(activa, lado = "user") {
   const videoRef  = useRef(null);
   const streamRef = useRef(null);
   const ponVideo  = useCallback((el) => {
@@ -44,7 +45,7 @@ export function useCamara(activa) {
     // A 60 fps si la cámara los da: las manos se siguen al ritmo de los fotogramas, y a
     // 30 el cursor se nota más lento. Si no los da, se queda en lo que pueda.
     medios.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 },
-                                   frameRate: { ideal: 60 }, facingMode: "user" }, audio: false })
+                                   frameRate: { ideal: 60 }, facingMode: lado }, audio: false })
       .then((s) => {
         if (cancelado) { s.getTracks().forEach(t => t.stop()); return; }
         stream = s;
@@ -66,17 +67,20 @@ export function useCamara(activa) {
       if (videoRef.current) videoRef.current.srcObject = null;
       setEstado("pidiendo");
     };
-  }, [activa, ponVideo]);
+  }, [activa, lado, ponVideo]);
 
-  const capturar = useCallback(() => {
+  // `ancho`: con la cámara trasera se manda más grande (ANCHO_TRASERA), porque lo que se
+  // enseña suele ser texto pequeño —una etiqueta, unos ingredientes— que a 640 no se lee.
+  const capturar = useCallback((ancho = ANCHO_FOTOGRAMA) => {
     const v = videoRef.current;
     if (!v || v.readyState < 2 || !v.videoWidth) return "";
-    const alto = Math.round((v.videoHeight * ANCHO_FOTOGRAMA) / v.videoWidth);
+    const w = Math.min(ancho, v.videoWidth);
+    const alto = Math.round((v.videoHeight * w) / v.videoWidth);
     const lienzo = document.createElement("canvas");
-    lienzo.width = ANCHO_FOTOGRAMA;
+    lienzo.width = w;
     lienzo.height = alto;
     try {
-      lienzo.getContext("2d").drawImage(v, 0, 0, ANCHO_FOTOGRAMA, alto);
+      lienzo.getContext("2d").drawImage(v, 0, 0, w, alto);
       return lienzo.toDataURL("image/jpeg", CALIDAD_FOTOGRAMA).split(",")[1] || "";
     } catch {
       return "";

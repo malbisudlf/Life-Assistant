@@ -5,7 +5,7 @@
  *  modo inmersivo (`inmersivo`) el vídeo está de fondo en la pantalla entera y aquí solo
  *  quedan los mandos, con el «EN DIRECTO» siempre a la vista. */
 export function PanelCamara({ ponVideo, estado, error, jarvisVe, onJarvisVe, manos, onManos, estadoManos, asa,
-                              inmersivo, onInmersivo }) {
+                              inmersivo, onInmersivo, trasera = false, onGirar }) {
   return (
     <>
       <div className="jh-panel-titulo jh-asa" {...asa}>
@@ -16,7 +16,8 @@ export function PanelCamara({ ponVideo, estado, error, jarvisVe, onJarvisVe, man
       </div>
       {!inmersivo && (
         <div className="jh-camara">
-          <video ref={ponVideo} muted playsInline autoPlay className="jh-camara-video" />
+          {/* La trasera no va en espejo: es el mundo, no uno mismo. */}
+          <video ref={ponVideo} muted playsInline autoPlay className={`jh-camara-video${trasera ? " trasera" : ""}`} />
           <span className="jh-camara-reticula" aria-hidden="true" />
           {estado !== "en_directo" && <div className="jh-camara-aviso">{error || "Abriendo la cámara…"}</div>}
         </div>
@@ -28,6 +29,14 @@ export function PanelCamara({ ponVideo, estado, error, jarvisVe, onJarvisVe, man
                 title="Con esto encendido, cada mensaje lleva lo que ve la cámara en ese momento">
           {jarvisVe ? "Jarvis le ve" : "Jarvis no mira"}
         </button>
+        {onGirar && (
+          <button type="button" className={`jh-boton-fino${trasera ? " activo" : ""}`} onClick={onGirar}
+                  aria-pressed={trasera}
+                  title="Cambiar a la otra cámara. Con la trasera, Jarvis lee etiquetas y mira lo que le enseñe">
+            {trasera ? "⟲ Trasera" : "⟲ Frontal"}
+          </button>
+        )}
+        {!trasera && <>
         <button type="button" className={`jh-boton-fino${manos ? " activo" : ""}`} onClick={onManos}
                 aria-pressed={manos}
                 title="Mover el cursor con el índice, pellizcar para pulsar y pellizcar y arrastrar para mover los paneles">
@@ -38,6 +47,7 @@ export function PanelCamara({ ponVideo, estado, error, jarvisVe, onJarvisVe, man
                 title="La cámara a pantalla completa con los paneles flotando encima: cada dedo pulsa al empujarlo hacia la pantalla">
           {inmersivo ? "Salir del inmersivo" : "Modo inmersivo"}
         </button>
+        </>}
       </div>
     </>
   );

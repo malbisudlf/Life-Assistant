@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  barras, claveDatos, colocar, etiquetaDia, guardar, leerGuardados, repartir,
+  abanico, barras, claveDatos, colocar, etiquetaDia, eurosCortos, guardar, leerGuardados, repartir,
   resumenSerie, textoValor, tocaReponer, trazo,
 } from "../../src/lib/hudPaneles";
 
@@ -83,14 +83,47 @@ describe("hudPaneles: las recetas guardadas", () => {
     expect(tocaReponer({ instancia: "i2", paneles: [] }, { instancia: "i1", paneles: [] })).toBe(false);
   });
   it("comparte petición entre paneles iguales y distingue el destino del tráfico", () => {
-    expect(claveDatos("sueno", panel)).toBe("sueno|14|");
-    expect(claveDatos("trafico", { dias: 14, destino: "uni" })).toBe("trafico|14|uni");
-    expect(claveDatos("sueno", { dias: 14, destino: "uni" })).toBe("sueno|14|");
+    expect(claveDatos("sueno", panel)).toBe("sueno|14||");
+    expect(claveDatos("trafico", { dias: 14, destino: "uni" })).toBe("trafico|14|uni|");
+    expect(claveDatos("sueno", { dias: 14, destino: "uni" })).toBe("sueno|14||");
+    expect(claveDatos("dia", { dias: 1, param: "2026-08-03" })).toBe("dia|1||2026-08-03");
   });
   it("reparte los tres primeros a la derecha y el resto a la izquierda", () => {
     const ps = [1, 2, 3, 4, 5].map(n => ({ id: String(n) }));
     const r = repartir(ps);
     expect(r.derecha.map(p => p.id)).toEqual(["1", "2", "3"]);
     expect(r.izquierda.map(p => p.id)).toEqual(["4", "5"]);
+  });
+});
+
+describe("hudPaneles: el abanico de una simulación", () => {
+  const puntos = [
+    { d: "2026", p10: 50000, p50: 50000, p90: 50000, base: 55000 },
+    { d: "2027", p10: 40000, p50: 52000, p90: 66000, base: 58000 },
+    { d: "2028", p10: 38000, p50: 55000, p90: 80000, base: 62000 },
+  ];
+
+  it("banda cerrada, mediana y la de sin el gasto, en la misma escala", () => {
+    const a = abanico(puntos, 220, 90);
+    expect(a.banda.startsWith("M") && a.banda.endsWith("Z")).toBe(true);
+    expect(a.mediana.split("L")).toHaveLength(3);
+    expect(a.base).not.toBeNull();
+    expect(a.min).toBe(38000);
+    expect(a.max).toBe(80000);
+    expect(a.cero).toBeNull();
+    expect(a.ultimo.d).toBe("2028");
+  });
+
+  it("si baja de cero, el cero se ve; sin gasto, no hay segunda línea", () => {
+    const a = abanico([{ d: "2026", p10: -5000, p50: 1000, p90: 9000 }, { d: "2027", p10: -9000, p50: 2000, p90: 15000 }]);
+    expect(a.cero).not.toBeNull();
+    expect(a.base).toBeNull();
+  });
+
+  it("sin puntos no hay abanico, y los euros caben en el eje", () => {
+    expect(abanico([])).toBeNull();
+    expect(eurosCortos(52300)).toBe("52 k€");
+    expect(eurosCortos(1250000)).toBe("1,3 M€");
+    expect(eurosCortos(-800)).toBe("-800 €");
   });
 });

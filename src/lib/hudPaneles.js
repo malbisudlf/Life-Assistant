@@ -6,7 +6,7 @@
 
 /** Cada cuánto se vuelve a pedir cada clase de dato. El tráfico cambia en minutos; el
  *  sueño de anoche, una vez al día. */
-export const REFRESCO_MS = { serie: 10 * 60_000, lista: 5 * 60_000, cifra: 2 * 60_000 };
+export const REFRESCO_MS = { serie: 10 * 60_000, lista: 5 * 60_000, cifra: 2 * 60_000, casa: 15_000 };
 
 const CLAVE = "la_hud_paneles";
 
@@ -77,8 +77,48 @@ export function barras(puntos = [], ancho = 220, alto = 70, margen = 6) {
 /** Lo que identifica los datos que pide una fuente de un panel: dos paneles con la misma
  *  fuente y los mismos días comparten petición. */
 export function claveDatos(fuente, panel = {}) {
-  return `${fuente}|${panel.dias || 14}|${fuente === "trafico" ? panel.destino || "" : ""}`;
+  return `${fuente}|${panel.dias || 14}|${fuente === "trafico" ? panel.destino || "" : ""}|${panel.param || ""}`;
 }
+
+/** El abanico de una simulación (`simular_finanzas`) en un lienzo de `ancho`×`alto`: la
+ *  banda del percentil 10 al 90, la mediana y, si hay gasto, la mediana sin él. Todas en la
+ *  MISMA escala (son euros contra euros: aquí sí importa cuánto, no solo la forma), y con
+ *  el cero dentro si alguna baja de él. Devuelve los trazos y las etiquetas del eje. */
+export function abanico(puntos = [], ancho = 220, alto = 90, margen = 6) {
+  const ps = puntos.filter(p => [p.p10, p.p50, p.p90].every(Number.isFinite));
+  if (!ps.length) return null;
+  const vs = ps.flatMap(p => [p.p10, p.p90, ...(Number.isFinite(p.base) ? [p.base] : [])]);
+  let min = Math.min(...vs);
+  let max = Math.max(...vs);
+  if (min > 0 && min < max * 0.25) min = 0;
+  if (max === min) { min -= 1; max += 1; }
+  const util = ancho - margen * 2;
+  const x = i => Math.round((margen + (ps.length > 1 ? (i * util) / (ps.length - 1) : util / 2)) * 10) / 10;
+  const y = v => Math.round((alto - margen - ((v - min) / (max - min)) * (alto - margen * 2)) * 10) / 10;
+  const linea = clave => ps.map((p, i) => `${i ? "L" : "M"}${x(i)} ${y(p[clave])}`).join(" ");
+  const arriba = ps.map((p, i) => `${i ? "L" : "M"}${x(i)} ${y(p.p90)}`).join(" ");
+  const abajo = ps.map((p, i) => `L${x(i)} ${y(p.p10)}`).reverse().join(" ");
+  return {
+    banda: `${arriba} ${abajo} Z`,
+    mediana: linea("p50"),
+    base: ps.every(p => Number.isFinite(p.base)) ? linea("base") : null,
+    cero: min < 0 && max > 0 ? y(0) : null,
+    min, max,
+    ultimo: ps[ps.length - 1],
+  };
+}
+
+/** «52.300 €» → «52 k€», «1.250.000» → «1,3 M€»: lo que cabe en el eje de un panel. */
+export function eurosCortos(v) {
+  if (!Number.isFinite(v)) return "—";
+  const abs = Math.abs(v);
+  if (abs >= 1e6) return `${(v / 1e6).toFixed(1).replace(".", ",")} M€`;
+  if (abs >= 1e3) return `${Math.round(v / 1e3)} k€`;
+  return `${Math.round(v)} €`;
+}
+
+/** Cómo se pinta cada cosa de la línea de un día (`dia_reconstruir`). */
+export const ICONO_DIA = { agenda: "◆", lugar: "⌂", entreno: "▲", whatsapp: "✉", correo: "@", idea: "✦" };
 
 /** La copia de las recetas que guarda el navegador, con la instancia del backend que las
  *  dio. Es lo que permite reponerlas tras un despliegue (el backend las tiene en memoria)

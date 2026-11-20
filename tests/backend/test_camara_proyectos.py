@@ -29,7 +29,7 @@ class TestCamara:
     def test_el_fotograma_se_describe_y_va_como_dato(self, client, auth_headers, chat_visto, monkeypatch):
         pedidos = []
         monkeypatch.setattr(main, "_describir_camara",
-                            lambda b64, pregunta="": pedidos.append((b64, pregunta)) or "Lleva una camiseta azul")
+                            lambda b64, pregunta="", trasera=False: pedidos.append((b64, pregunta)) or "Lleva una camiseta azul")
         r = client.post("/jarvis", headers=auth_headers,
                         json={"mensaje": "¿qué llevo puesto?", "camara": FOTOGRAMA})
         assert r.status_code == 200
@@ -59,6 +59,33 @@ class TestCamara:
         r = client.post("/jarvis", headers=auth_headers,
                         json={"mensaje": "hola", "camara": "A" * (main.CAMARA_MAX_B64 + 1)})
         assert r.status_code == 422
+        r = client.post("/jarvis", headers=auth_headers,
+                        json={"mensaje": "hola", "camara": FOTOGRAMA, "camara_lado": "de_lado"})
+        assert r.status_code == 422
+
+    def test_la_trasera_del_movil_lee_con_detalle(self, client, auth_headers, chat_visto, monkeypatch):
+        """Los ojos de Jarvis (2026-11-20): con la trasera, la visión mira en alto y se le
+        pide leer entero y la técnica de un ejercicio; y al modelo se le dice que es algo
+        que el señor le está enseñando, no él."""
+        pedidos = []
+
+        class Vision:
+            class chat:
+                class completions:
+                    @staticmethod
+                    def create(**kw):
+                        pedidos.append(kw)
+                        return type("R", (), {"choices": [type("C", (), {"message": type("M", (), {
+                            "content": "Etiqueta: 12 g de azúcar por 100 g"})()})()], "usage": None})()
+        monkeypatch.setattr(main, "get_openai_client", lambda: Vision)
+        r = client.post("/jarvis", headers=auth_headers,
+                        json={"mensaje": "¿tiene mucho azúcar?", "camara": FOTOGRAMA, "camara_lado": "trasera"})
+        assert r.status_code == 200
+        kw, = pedidos
+        assert kw["messages"][1]["content"][1]["image_url"]["detail"] == "high"
+        assert "ENTEROS" in kw["messages"][0]["content"] and "técnica" in kw["messages"][0]["content"]
+        assert "cámara trasera de su móvil" in chat_visto["mensaje"] and "12 g de azúcar" in chat_visto["mensaje"]
+        assert chat_visto["camara"] == ""
 
 
 class TestProyectos:

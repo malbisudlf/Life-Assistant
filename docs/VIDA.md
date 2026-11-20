@@ -57,6 +57,12 @@ recibidos y 220 enviados del último año.
    calendario de mes en mes, cada `VIDA_CADA_MIN`.
 4. Probar: «¿qué le dije a Aimar del piso?».
 
+## Listar un día
+
+`POST /listar {desde, hasta, fuentes?, limite?}` (ISO en UTC; `hasta` no entra) devuelve lo
+de un trozo de calendario por orden, con el texto recortado a 240 caracteres. Lo usa la
+máquina del tiempo (`dia_reconstruir`, «¿qué hice el 3 de agosto?»; ver `docs/JARVIS.md`).
+
 ## Lo que falta
 
 - **Fotos de iCloud** (fecha y sitio de cada foto: «¿dónde estaba el 3 de agosto?»). Pide

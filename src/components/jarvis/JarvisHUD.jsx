@@ -19,7 +19,7 @@ import {
   escalaDePinza, cajaEscalada,
 } from "../../lib/gestos";
 import { proyectosDelMenu } from "../../lib/proyectos";
-import { useCamara } from "./useCamara";
+import { ANCHO_TRASERA, useCamara } from "./useCamara";
 import { PanelCamara } from "./Camara";
 import Manos from "./Manos";
 import PanelProyectos from "./Proyectos";
@@ -45,7 +45,9 @@ const MENU_ESPERA_MS = 6000;
 
 // Desde dónde NO se coge un panel para moverlo: lo que se pulsa o se escribe, y el texto
 // que se quiere poder seleccionar.
-const NO_ARRASTRA = 'button, input, textarea, select, a, label, [role="button"], .jh-proy-texto';
+// La escena de la maqueta tampoco: arrastrar ahí la gira (Holograma.jsx).
+const NO_ARRASTRA = 'button, input, textarea, select, a, label, [role="button"], .jh-proy-texto, .jh-holo-escena';
+const PANEL_CASA = { id: "casa", titulo: "La casa", tipo: "casa", fuentes: ["casa"], dias: 1 };
 // Por debajo de esta velocidad al soltar (px/ms) el panel se queda donde está.
 const VELOCIDAD_LANZAR = 0.35;
 
@@ -128,9 +130,14 @@ export default function JarvisHUD({
   // ── Cámara, manos y proyectos ──
   const [camaraOn, setCamaraOn]   = useState(false);
   const [jarvisVe, setJarvisVe]   = useState(true);
+  // La cámara trasera (en el móvil): «los ojos de Jarvis», para enseñarle lo que tiene
+  // delante. Sin manos ni inmersivo, que cuentan con verse a uno mismo en espejo.
+  const [trasera, setTrasera]     = useState(false);
   const [manosOn, setManosOn]     = useState(false);
   const [estadoManos, setEstadoManos] = useState("apagada");
   const [proyectosOn, setProyectosOn] = useState(false);
+  // La maqueta de la casa abierta con el botón «Casa» (la que pone Jarvis es un panel vivo).
+  const [casaOn, setCasaOn] = useState(false);
   // El modo inmersivo: la cámara a pantalla completa, los paneles flotando encima como
   // ventanas de cristal y cada dedo pulsando (Manos.jsx). Enciende la cámara y las manos;
   // al salir se quedan como estén, y apagar la cámara lo apaga.
@@ -195,13 +202,30 @@ export default function JarvisHUD({
     const t = setTimeout(() => setRadial(null), MENU_ESPERA_MS);
     return () => clearTimeout(t);
   }, [radial]);
-  const { videoRef, ponVideo, estado: estadoCamara, error: errorCamara, capturar } = useCamara(camaraOn);
+  const { videoRef, ponVideo, estado: estadoCamara, error: errorCamara, capturar } =
+    useCamara(camaraOn, trasera ? "environment" : "user");
   // El fotograma viaja con cada mensaje solo con la cámara en directo y «Jarvis ve».
   // Al cerrar la vista o apagar la cámara, el dashboard deja de tener a quién pedírselo.
+  // Con la trasera va más grande y dice de qué cámara es (la visión mira distinto).
+  const capturador = useCallback(() => {
+    if (!trasera) return capturar();
+    const b64 = capturar(ANCHO_TRASERA);
+    return b64 ? { b64, lado: "trasera" } : "";
+  }, [trasera, capturar]);
   useEffect(() => {
-    onCapturador?.(camaraOn && jarvisVe ? capturar : null);
+    onCapturador?.(camaraOn && jarvisVe ? capturador : null);
     return () => onCapturador?.(null);
-  }, [camaraOn, jarvisVe, capturar, onCapturador]);
+  }, [camaraOn, jarvisVe, capturador, onCapturador]);
+  const girarCamara = useCallback(() => {
+    setTrasera(t => {
+      if (!t) { setManosOn(false); setInmersivo(false); }
+      return !t;
+    });
+  }, []);
+  /** «Los ojos»: la trasera, Jarvis mirando, y nada de manos. El botón 👁 del móvil. */
+  const abrirOjos = useCallback(() => {
+    setCamaraOn(true); setTrasera(true); setJarvisVe(true); setManosOn(false); setInmersivo(false);
+  }, []);
 
   // ── Paneles que se mueven ──
   // Mientras se arrastra, la posición se escribe directamente en el `transform` del panel
@@ -474,6 +498,8 @@ export default function JarvisHUD({
           </button>
           <button type="button" className={`jh-boton-fino${proyectosOn ? " activo" : ""}`}
                   onClick={() => setProyectosOn(v => !v)} aria-pressed={proyectosOn}>Proyectos</button>
+          <button type="button" className={`jh-boton-fino${casaOn ? " activo" : ""}`}
+                  onClick={() => setCasaOn(v => !v)} aria-pressed={casaOn}>Casa</button>
           {mensajes.length > 0 && !enLlamada && (
             <button type="button" className="jh-boton-fino" onClick={onNueva} disabled={pensando}
                     title="Empezar una conversación nueva (no borra lo que Jarvis recuerda de usted)">
@@ -533,6 +559,7 @@ export default function JarvisHUD({
                          jarvisVe={jarvisVe} onJarvisVe={() => setJarvisVe(v => !v)}
                          manos={manosOn} onManos={() => setManosOn(v => !v)} estadoManos={estadoManos}
                          inmersivo={verInmersivo} onInmersivo={alternarInmersivo}
+                         trasera={trasera} onGirar={girarCamara}
                          asa={asaDe("camara")} />
           </section>
         )}
@@ -616,6 +643,10 @@ export default function JarvisHUD({
                       onClick={() => { setCamaraOn(v => !v); if (camaraOn) { setManosOn(false); setInmersivo(false); } }}
                       aria-pressed={camaraOn} aria-label="Cámara"
                       title={camaraOn ? "Apagar la cámara" : "Encender la cámara: Jarvis le ve y puede usar las manos"}>📷</button>
+              <button type="button" className={`jh-icono jh-solo-tactil${camaraOn && trasera ? " activo jh-icono-vivo" : ""}`}
+                      onClick={() => (camaraOn && trasera ? setCamaraOn(false) : abrirOjos())}
+                      aria-pressed={camaraOn && trasera} aria-label="Los ojos de Jarvis"
+                      title="La cámara trasera: enséñele lo que tiene delante y pregúntele">👁</button>
               <span className="jh-prompt" aria-hidden="true">›</span>
               <input
                 ref={inputRef}
@@ -668,6 +699,13 @@ export default function JarvisHUD({
             <Esquinas />
             <PanelProyectos asa={asaDe("proyectos")} datos={proyectos.datos} recargar={proyectos.recargar}
                             abrir={abrirProyecto} />
+          </section>
+        )}
+        {casaOn && (
+          <section className="jh-panel jh-panel-vivo jh-movible" data-panel="casa" style={estiloPanel("casa")}
+                   aria-label="La casa" {...movibleDe("casa")}>
+            <Esquinas />
+            <PanelVivo panel={PANEL_CASA} asa={asaDe("casa")} onQuitar={() => setCasaOn(false)} />
           </section>
         )}
         {vivosPorColumna.derecha.map(p => (
@@ -1011,6 +1049,72 @@ const CSS = `
 .jh-vivo-cuando { font-family: 'DM Mono', monospace; font-size: 11px; color: var(--jh-c); white-space: nowrap; }
 .jh-vivo-que { color: var(--jh-texto); min-width: 0; overflow-wrap: anywhere; }
 .jh-vivo-cerrar { padding: 0 6px; line-height: 1.3; }
+.jh-dia-nombre { margin-bottom: 6px; }
+.jh-dia-cifras { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-bottom: 6px; }
+.jh-dia-cifra { display: flex; flex-direction: column; }
+.jh-dia-valor { font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 18px; line-height: 1.05; color: var(--jh-c); }
+.jh-dia-etiqueta { font-size: 10px; color: var(--jh-tenue); text-transform: uppercase; letter-spacing: .08em; }
+.jh-dia-linea { max-height: 300px; overflow-y: auto; overscroll-behavior: contain; padding-right: 4px; }
+.jh-dia-fila { display: flex; gap: 8px; padding: 4px 0; border-top: 1px dashed var(--jh-c3); font-size: 12px; }
+.jh-dia-marca { width: 12px; flex-shrink: 0; text-align: center; color: var(--jh-c); }
+.jh-dia-entreno .jh-dia-marca, .jh-dia-idea .jh-dia-marca { color: var(--jh-amb); }
+.jh-dia-lugar .jh-vivo-que { color: var(--jh-tenue); }
+.jh-abanico-eje { font-family: 'DM Mono', monospace; font-size: 8px; fill: var(--jh-tenue); }
+.jh-abanico-cero { stroke: var(--jh-rojo); stroke-width: .8; stroke-dasharray: 2 3; }
+/* La casa en holograma (Holograma.jsx) */
+.jh-holo-escena {
+  position: relative; height: 230px; display: grid; place-items: center; perspective: 700px;
+  perspective-origin: 50% 30%; cursor: grab; touch-action: none; user-select: none; overflow: hidden;
+}
+.jh-holo-escena:active { cursor: grabbing; }
+.jh-holo-escena.grande { height: min(78vh, 760px); perspective: 1400px; }
+.jh-holo-mundo { position: relative; transform-style: preserve-3d; transition: transform .25s ease-out; }
+.jh-holo-escena:active .jh-holo-mundo { transition: none; }
+.jh-holo-piso {
+  position: absolute; inset: 0; transform-style: preserve-3d; transition: opacity .4s, transform .4s;
+  border: 1px solid var(--jh-c3); background: rgba(94,231,255,.035);
+  box-shadow: 0 0 18px rgba(94,231,255,.08) inset;
+}
+/* Las plantas no atrapan el puntero, solo sus habitaciones: si no, la de arriba (aunque
+   esté apagada) se queda con el clic de la de abajo. */
+.jh-holo-piso { pointer-events: none; }
+.jh-holo-hab { pointer-events: auto; }
+.jh-holo-piso.fuera { opacity: .12; }
+.jh-holo-piso.fuera .jh-holo-hab { pointer-events: none; }
+.jh-holo-planta {
+  position: absolute; left: -2px; top: -15px; font-family: 'DM Mono', monospace; font-size: 8px;
+  letter-spacing: .12em; text-transform: uppercase; color: var(--jh-tenue); white-space: nowrap;
+}
+.jh-holo-hab {
+  position: absolute; padding: 2px; border: 1px solid var(--jh-c2); background: rgba(94,231,255,.07);
+  color: var(--jh-texto); font: inherit; cursor: pointer; overflow: hidden; display: flex;
+  align-items: flex-start; justify-content: flex-start; transition: background .3s, box-shadow .3s, border-color .3s;
+}
+.jh-holo-hab:hover, .jh-holo-hab.elegida { border-color: var(--jh-c); box-shadow: 0 0 10px var(--jh-c2); }
+.jh-holo-hab.encendida { background: rgba(255,181,71,.32); border-color: var(--jh-amb); box-shadow: 0 0 16px rgba(255,181,71,.55); }
+.jh-holo-hab.sin-luces { cursor: default; background: rgba(94,231,255,.03); }
+.jh-holo-hab.privado {
+  cursor: not-allowed; border-style: dashed; border-color: var(--jh-c3);
+  background: repeating-linear-gradient(45deg, rgba(190,235,250,.05) 0 3px, transparent 3px 7px);
+}
+.jh-holo-hab:disabled { pointer-events: none; }
+.jh-holo-nombre { font-size: 7px; line-height: 1.1; text-align: left; opacity: .85; pointer-events: none; }
+.jh-holo-escena.grande .jh-holo-nombre { font-size: 12px; }
+.jh-holo-hab.privado .jh-holo-nombre { color: var(--jh-tenue); }
+.jh-holo-latido {
+  position: absolute; right: 3px; bottom: 3px; width: 6px; height: 6px; border-radius: 50%;
+  background: #7dffc4; box-shadow: 0 0 8px #7dffc4; animation: jhLatido 1.6s infinite;
+}
+.jh-holo-mandos { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.jh-holo-mandos .activo { background: var(--jh-c3); }
+.jh-holo-info { margin-top: 6px; font-size: 11.5px; color: var(--jh-tenue); min-height: 1.4em; }
+.jh-holo-info b { color: var(--jh-texto); font-weight: 600; }
+.jh-holo-capa {
+  position: fixed; inset: 6vh 8vw; z-index: 120; padding: 18px; border: 1px solid var(--jh-c2);
+  background: rgba(2,6,11,.96); box-shadow: 0 0 40px rgba(94,231,255,.15);
+}
+@media (prefers-reduced-motion: reduce) { .jh-holo-mundo, .jh-holo-piso { transition: none; } .jh-holo-latido { animation: none; } }
+.jh-abanico-anos { display: flex; justify-content: space-between; font-family: 'DM Mono', monospace; font-size: 10px; color: var(--jh-tenue); }
 @media (prefers-reduced-motion: reduce) { .jh-panel-vivo { animation: none; } }
 
 /* La cámara */
@@ -1021,6 +1125,9 @@ const CSS = `
   background: #000; border-radius: 2px;
 }
 .jh-camara-video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); display: block; filter: saturate(.85) contrast(1.05); }
+.jh-camara-video.trasera { transform: none; }
+.jh-solo-tactil { display: none; }
+@media (pointer: coarse) { .jh-solo-tactil { display: inline-flex; } }
 .jh-camara-reticula {
   position: absolute; inset: 0; pointer-events: none;
   background:

@@ -475,6 +475,9 @@ class TestJarvisDespachador:
         # Y el buscador de la vida, sin el índice de jacobo.
         monkeypatch.setattr(main, "VIDA_URL", "http://jacobo.test:8773")
         monkeypatch.setattr(main, "VIDA_TOKEN", "x" * 32)
+        # Y la investigación de noche, sin el servicio del chat de caja.
+        monkeypatch.setattr(main, "JARVIS_CLAUDE_URL", "http://172.17.0.1:3340")
+        monkeypatch.setattr(main, "JARVIS_CLAUDE_TOKEN", "x" * 32)
         esquema = main._jarvis_esquema()
         nombres = {h["function"]["name"] for h in esquema}
         # Todas menos las internas, que solo ejecuta un botón y no se anuncian a ningún modelo.

@@ -27,6 +27,7 @@ TITULO_MAX  = 200
 TEXTO_MAX   = 4000
 QUIEN_MAX   = 80
 LIMITE_MAX  = 40
+LISTAR_MAX  = 400
 # Palabras que no ayudan a encontrar nada y que, en modo «todas», dejarían sin resultados
 # una búsqueda que Jarvis escriba en lenguaje natural.
 VACIAS = frozenset("""
@@ -202,6 +203,31 @@ class Indice:
             if filas:
                 return {"modo": modo, "palabras": lista, "resultados": [self._fila(f) for f in filas]}
         return {"modo": "", "palabras": lista, "resultados": []}
+
+    def listar(self, desde: str, hasta: str, fuentes=None, limite: int = 200) -> dict:
+        """Lo que pasó entre dos instantes (ISO en UTC, `desde` incluido y `hasta` no), por
+        orden. Es lo que pide la máquina del tiempo («¿qué hice el 3 de agosto?»): no hay
+        palabras que buscar, solo un trozo de calendario. El texto va recortado; el
+        entero se busca con `buscar`."""
+        bien = re.compile(r"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}Z)?$")
+        if not (bien.match(desde or "") and bien.match(hasta or "")):
+            return {"documentos": [], "total": 0}
+        try:
+            limite = max(1, min(int(limite or 200), LISTAR_MAX))
+        except (TypeError, ValueError):
+            limite = 200
+        filtros, params = ["fecha >= ?", "fecha < ?"], [desde, hasta]
+        fuentes = [f for f in (fuentes or []) if FUENTE_RE.match(str(f))]
+        if fuentes:
+            filtros.append("fuente in (%s)" % ",".join("?" * len(fuentes)))
+            params += fuentes
+        donde = " and ".join(filtros)
+        with self._lock:
+            total = self._db.execute(f"select count(*) from docs where {donde}", params).fetchone()[0]
+            filas = self._db.execute(
+                f"select id, fuente, fecha, titulo, quien, extra, substr(texto, 1, 240) as fragmento "
+                f"from docs where {donde} order by fecha limit ?", [*params, limite]).fetchall()
+        return {"documentos": [self._fila(f) for f in filas], "total": total}
 
     @staticmethod
     def _fila(f) -> dict:

@@ -5,10 +5,13 @@
 //
 // Nada de lo que escribe el modelo llega a ser marcado: el título es un nodo de texto y
 // lo demás son números y filas que da el backend.
-import { useEffect, useRef, useState } from "react";
-import { API, authHeaders, apiFetch } from "../../lib/api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { API, authHeaders, jsonHeaders, apiFetch } from "../../lib/api";
+import { trasTocar } from "../../lib/holograma";
+import { Holograma } from "./Holograma";
 import {
-  REFRESCO_MS, barras, claveDatos, colocar, etiquetaDia, resumenSerie, textoValor, trazo,
+  ICONO_DIA, REFRESCO_MS, abanico, barras, claveDatos, colocar, etiquetaDia, eurosCortos,
+  resumenSerie, textoValor, trazo,
 } from "../../lib/hudPaneles";
 
 const ANCHO = 220;
@@ -18,6 +21,7 @@ const COLORES = ["var(--jh-c)", "var(--jh-amb)"];
 /** Los datos de las fuentes de un panel, refrescados solos. `null` mientras llegan. */
 function useDatos(panel) {
   const [datos, setDatos] = useState({});
+  const [vuelta, setVuelta] = useState(0);
   const claves = (panel.fuentes || []).map(f => claveDatos(f, panel)).join("#");
   const panelRef = useRef(panel);
   useEffect(() => { panelRef.current = panel; }, [panel]);
@@ -32,6 +36,7 @@ function useDatos(panel) {
       await Promise.all((p.fuentes || []).map(async (fuente) => {
         const q = new URLSearchParams({ fuente, dias: String(p.dias || 14) });
         if (fuente === "trafico" && p.destino) q.set("destino", p.destino);
+        if (p.param) q.set("param", p.param);
         try {
           const r = await apiFetch(`${API}/hud/datos?${q}`, { headers: authHeaders() });
           nuevos[fuente] = r.ok ? await r.json() : { fallo: true };
@@ -46,9 +51,29 @@ function useDatos(panel) {
     }
     pedir();
     return () => { vivo = false; clearTimeout(reloj); };
-  }, [claves]);
+  }, [claves, vuelta]);
 
-  return datos;
+  const recargar = useCallback(() => setVuelta(v => v + 1), []);
+  return { datos, setDatos, recargar };
+}
+
+/** La maqueta de la casa, con lo de tocar: la habitación cambia en el acto (lo que se ve
+ *  mientras la orden viaja) y se vuelve a preguntar a la casa al poco. */
+function Casa({ datos, setDatos, recargar }) {
+  const tocar = useCallback(async (area, encender) => {
+    setDatos(d => ({
+      ...d,
+      casa: { ...d.casa, pisos: (d.casa?.pisos || []).map(p => ({
+        ...p, areas: p.areas.map(a => (a.id === area.id ? trasTocar(a, encender) : a)) })) },
+    }));
+    try {
+      await apiFetch(`${API}/casa/holograma/luces`, {
+        method: "POST", headers: jsonHeaders(), body: JSON.stringify({ area: area.id, encender }),
+      });
+    } catch { /* lo dirá la siguiente lectura */ }
+    setTimeout(recargar, 1200);
+  }, [setDatos, recargar]);
+  return <Holograma datos={datos} onTocar={tocar} />;
 }
 
 function Serie({ series, tipo }) {
@@ -96,9 +121,83 @@ function Serie({ series, tipo }) {
   );
 }
 
+/** La línea de un día (`dia_reconstruir`): las cifras del cuerpo arriba y, debajo, todo lo
+ *  que pasó por horas, cada cosa con su marca. */
+function Dia({ datos }) {
+  return (
+    <>
+      <div className="jh-nota jh-dia-nombre">{datos.nombre}</div>
+      {datos.cifras?.length > 0 && (
+        <div className="jh-dia-cifras">
+          {datos.cifras.map(c => (
+            <div key={c.n} className="jh-dia-cifra">
+              <span className="jh-dia-valor">{textoValor(c.v, c.u)}</span>
+              <span className="jh-dia-etiqueta">{c.n}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="jh-dia-linea">
+        {datos.items?.length
+          ? datos.items.map((it, i) => (
+            <div key={`${it.a}-${i}`} className={`jh-dia-fila jh-dia-${it.k}`}>
+              <span className="jh-vivo-cuando">{it.a}</span>
+              <span className="jh-dia-marca" aria-hidden="true">{ICONO_DIA[it.k] || "·"}</span>
+              <span className="jh-vivo-que">{it.b}</span>
+            </div>
+          ))
+          : <div className="jh-nota">De ese día no hay nada guardado</div>}
+      </div>
+      {datos.nota && <div className="jh-nota">{datos.nota}</div>}
+    </>
+  );
+}
+
+const ALTO_ABANICO = 96;
+
+/** El abanico de una simulación (`simular_finanzas`): del malo (p10) al bueno (p90), la
+ *  mediana encima y, si hay gasto, la mediana sin él en discontinua. */
+function Abanico({ datos }) {
+  const a = abanico(datos.puntos, ANCHO, ALTO_ABANICO);
+  if (!a) return <div className="jh-nota">{datos.nota || "Sin datos"}</div>;
+  const puntos = datos.puntos || [];
+  return (
+    <>
+      <svg className="jh-vivo-grafica" viewBox={`0 0 ${ANCHO} ${ALTO_ABANICO}`} role="img"
+           aria-label={`Simulación hasta ${a.ultimo.d}: mediana ${eurosCortos(a.ultimo.p50)}`}>
+        <path d={a.banda} fill="var(--jh-c)" opacity=".16" />
+        {a.cero !== null && <line x1="0" x2={ANCHO} y1={a.cero} y2={a.cero} className="jh-abanico-cero" />}
+        {a.base && <path d={a.base} fill="none" stroke="var(--jh-amb)" strokeWidth="1.4" strokeDasharray="4 3" />}
+        <path d={a.mediana} fill="none" stroke="var(--jh-c)" strokeWidth="1.8" strokeLinejoin="round" />
+        <text x="2" y="10" className="jh-abanico-eje">{eurosCortos(a.max)}</text>
+        <text x="2" y={ALTO_ABANICO - 2} className="jh-abanico-eje">{eurosCortos(a.min)}</text>
+      </svg>
+      <div className="jh-abanico-anos">
+        <span>{puntos[0]?.d}</span><span>{a.ultimo.d}</span>
+      </div>
+      <div className="jh-vivo-pie">
+        <div className="jh-vivo-leyenda">
+          <span className="jh-vivo-punto" style={{ background: "var(--jh-c)" }} />
+          <span className="jh-vivo-nombre">Mediana</span>
+          <span className="jh-vivo-valor">{eurosCortos(a.ultimo.p50)}</span>
+          <span className="jh-vivo-media">{eurosCortos(a.ultimo.p10)} – {eurosCortos(a.ultimo.p90)}</span>
+        </div>
+        {a.base && (
+          <div className="jh-vivo-leyenda">
+            <span className="jh-vivo-punto" style={{ background: "var(--jh-amb)" }} />
+            <span className="jh-vivo-nombre">Sin el gasto</span>
+            <span className="jh-vivo-valor">{eurosCortos(a.ultimo.base)}</span>
+          </div>
+        )}
+      </div>
+      <div className="jh-nota">{datos.nombre} · {datos.nota}</div>
+    </>
+  );
+}
+
 /** Un panel dibujado por Jarvis. `asa` son las props de arrastre de la vista. */
 export function PanelVivo({ panel, asa, onQuitar }) {
-  const datos = useDatos(panel);
+  const { datos, setDatos, recargar } = useDatos(panel);
   const fuentes = panel.fuentes || [];
   const llegados = fuentes.map(f => datos[f]).filter(Boolean);
   const cargando = llegados.length < fuentes.length;
@@ -108,6 +207,9 @@ export function PanelVivo({ panel, asa, onQuitar }) {
   let cuerpo;
   if (cargando) cuerpo = <div className="jh-nota">Trayendo datos…</div>;
   else if (fallo) cuerpo = <div className="jh-nota">No he podido traer los datos</div>;
+  else if (primero.clase === "dia") cuerpo = <Dia datos={primero} />;
+  else if (primero.clase === "abanico") cuerpo = <Abanico datos={primero} />;
+  else if (primero.clase === "casa") cuerpo = <Casa datos={primero} setDatos={setDatos} recargar={recargar} />;
   else if (primero.clase === "lista") {
     cuerpo = primero.items?.length
       ? primero.items.map((it, i) => (

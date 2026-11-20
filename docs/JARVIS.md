@@ -1342,6 +1342,75 @@ trabajar en ellos».
   respuesta y el PR, hablarle (`POST /programador/mensaje`) y **«+ Nuevo»**, que encarga
   por `/jarvis/ejecutar` con `encargar_proyecto`: pulsar «Encargar» es el «sí».
 - **En móvil** las columnas no caben y no se ven; la cámara y las manos son de escritorio.
+  La excepción son **los ojos** (abajo).
+
+### Los ojos: la cámara trasera del móvil (2026-11-20)
+
+Con la vista abierta en el móvil, **👁** (solo en pantallas táctiles) enciende la cámara
+TRASERA con «Jarvis le ve»: se le enseña lo que se tiene delante y se le pregunta. «¿Tiene
+mucho azúcar?» con una etiqueta, «¿voy bien de profundidad?» con la sentadilla en el espejo,
+«¿qué pieza va ahora?» con el mueble a medias. En el panel Visión, **⟲** cambia de cámara.
+
+- Cada turno (escrito o en llamada) lleva el fotograma, como siempre, pero a 1.024 px
+  (`ANCHO_TRASERA`: el texto de una etiqueta a 640 no se lee) y con `camara_lado: "trasera"`.
+- La visión mira en `detail: high` y con otro encargo (`_CAMARA_TRASERA`): leer ENTERO lo que
+  importe, identificar objetos y piezas, y la técnica de un ejercicio. Al modelo le llega
+  como «lo que le enseña con la trasera», no como él.
+- Sin espejo, y sin manos ni inmersivo, que cuentan con verse uno mismo.
+- No es vídeo: es una foto al mandar cada mensaje, como «Jarvis le ve».
+
+### La máquina del tiempo (2026-11-20)
+
+«¿Qué hice el 3 de agosto?» → `dia_reconstruir` cruza ese día de todas partes y lo dibuja en
+la vista como un panel `dia`: las cifras del Watch arriba y, debajo, una línea por horas.
+Sección «La máquina del tiempo» de `backend/main.py`.
+
+- **De dónde sale**: el calendario (`_eventos_entre`), las métricas y entrenos de ese día
+  (`health_metrics`), dónde estuvo (`presencia_tramos`, **solo 35 días**: de antes se dice),
+  y del buscador de jacobo (`POST /listar`, `docs/VIDA.md`) con quién habló por WhatsApp,
+  los correos y las ideas.
+- **De los mensajes viaja con quién, cuántos y a qué horas**, no el texto; y es ajeno
+  (`_HERRAMIENTAS_AJENAS`). Para lo que se dijo, `vida_buscar`.
+- **Una fuente caída se dice** (`sin_mirar`): un hueco no es «no hiciste nada».
+- El día se corta a medianoche de aquí (`_dia_bordes`, también el del cambio de hora) y se
+  guarda 10 min en memoria.
+
+### El simulador del «¿y si…?» (2026-11-20)
+
+«¿Cómo queda mi cartera en cinco años si me compro un coche de 25.000 en seis meses?» →
+`simular_finanzas` parte del dinero de ahora (Indexa y ETFs invertidos, Revolut en
+efectivo), simula 1.000 futuros mes a mes y dibuja un panel `abanico`: del percentil 10 al
+90, la mediana y, si hay gasto, la mediana sin él en discontinua.
+
+- **Euros de hoy**: los escenarios (`SIM_ESCENARIOS`: pesimista, normal, optimista) son
+  rentabilidades por encima de la inflación con su volatilidad; el efectivo no rinde.
+- **Con y sin el gasto se usan los mismos sorteos**: la diferencia es el coste de verdad (el
+  gasto más lo que habría rentado), no ruido entre dos tiradas. Semilla fija por supuestos:
+  el panel no baila al refrescarse.
+- **Los supuestos y el dinero de ese momento van en el `param` del panel** (`_sim_param`):
+  enseña la simulación que se hizo. Sin modelo ni API de pago; ~1 s.
+- No es un consejo de inversión, y Jarvis lo dice una vez.
+
+### La casa en holograma (2026-11-20)
+
+La maqueta 3D de la casa, planta a planta, en un panel de la vista: lo abre el botón
+**Casa** de la cabecera o Jarvis («enséñame la casa», `casa_holograma`). Las habitaciones
+con luz brillan en ámbar, la presencia late en verde, y **tocar una habitación enciende o
+apaga todas sus luces**. Se gira arrastrando la escena (o con ⟲ ⟳, que se pulsan también
+con un pellizco), los números eligen planta (con «Todas», el toque cae en la de arriba) y
+⤢ la abre en grande. `src/components/jarvis/Holograma.jsx`, lógica en `src/lib/holograma.js`,
+backend en la sección «La casa en holograma».
+
+- **Las plantas y habitaciones son las de Home Assistant** (sus *floors* y *areas*), leídas
+  con una plantilla (`POST /api/template`) cada 10 min; los estados, de la caché de siempre.
+  Las áreas sin planta no salen. La forma es una rejilla; `CASA_PLANO` puede dar la de verdad.
+- **En la casa vive más gente**: las habitaciones de los demás (`CASA_HOLO_OTROS`,
+  `CASA_HOLO_PRIVADAS`) salen como un volumen «privado» sin un dato ni un mando, y el
+  backend rechaza tocarlas (403). Lo de `_CASA_PRIVADO` no entra nunca.
+- **Tocar va por `_j_casa_ordenar`** (`POST /casa/holograma/luces`), con su catálogo, su
+  lista blanca y su registro, y solo `light.*`. Lo que se ve cambia en el acto y se vuelve a
+  preguntar a la casa al segundo.
+- Es CSS 3D (perspectiva y `preserve-3d`), sin motor gráfico ni dependencia nueva.
 
 ## Spotify: elegir qué suena
 

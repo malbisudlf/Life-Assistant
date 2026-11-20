@@ -21,6 +21,12 @@ const DATOS = {
          puntos: [{ d: "2026-11-10", v: 48 }, { d: "2026-11-12", v: 52 }] },
   agenda: { clase: "lista", nombre: "Agenda", items: [{ a: "15:00", b: "Clase de redes" }] },
   trafico: { clase: "cifra", nombre: "A uni", valor: 29, unidad: "min", nota: "+7 min sobre lo normal · AP-8" },
+  dia: { clase: "dia", nombre: "Lunes 03/08/2026", cifras: [{ n: "Pasos", v: 12345, u: "" }],
+         items: [{ a: "10:30", b: "Dentista · Centro", k: "agenda" }, { a: "12:00", b: "<b>WhatsApp con Aimar</b>", k: "whatsapp" }],
+         nota: "Sin mirar: el calendario" },
+  simulacion: { clase: "abanico", nombre: "Escenario normal", unidad: "€", nota: "Mediano 55.000 €",
+                puntos: [{ d: "2026", p10: 50000, p50: 50000, p90: 50000, base: 55000 },
+                         { d: "2027", p10: 40000, p50: 52000, p90: 66000, base: 58000 }] },
 };
 
 beforeEach(() => {
@@ -78,5 +84,21 @@ describe("PanelVivo", () => {
     expect(screen.getByText("<img src=x onerror=alert(1)>")).toBeTruthy();
     fireEvent.click(container.querySelector("button[aria-label^='Quitar el panel']"));
     expect(quitar).toHaveBeenCalledTimes(1);
+  });
+
+  it("la línea de un día: cifras, cada cosa con su hora, y los nombres como texto", async () => {
+    pintar({ titulo: "El 03/08/2026", tipo: "dia", fuentes: ["dia"], dias: 1, param: "2026-08-03" });
+    await waitFor(() => expect(screen.getByText("Dentista · Centro")).toBeTruthy());
+    expect(screen.getByText("12.345")).toBeTruthy();
+    expect(screen.getByText("<b>WhatsApp con Aimar</b>")).toBeTruthy();
+    expect(screen.getByText("Sin mirar: el calendario")).toBeTruthy();
+    expect(apiFetch.mock.calls[0][0]).toBe("http://backend.test/hud/datos?fuente=dia&dias=1&param=2026-08-03");
+  });
+
+  it("el abanico: banda, mediana y la de sin el gasto", async () => {
+    const { container } = pintar({ titulo: "¿Y si…?", tipo: "abanico", fuentes: ["simulacion"], dias: 1, param: "i=1;n=1" });
+    await waitFor(() => expect(container.querySelectorAll("svg path")).toHaveLength(3));
+    expect(screen.getByText("Sin el gasto")).toBeTruthy();
+    expect(screen.getByText("52 k€", { selector: ".jh-vivo-valor" })).toBeTruthy();
   });
 });

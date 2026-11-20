@@ -21,6 +21,8 @@ API (todo con llave salvo `/vivo`):
                  → {guardados, rechazados}               (como mucho MAX_LOTE por petición)
   POST /buscar   {consulta, fuentes?, desde?, hasta?, limite?}
                  → {modo, palabras, resultados: [{id, fuente, fecha, titulo, quien, fragmento}]}
+  POST /listar   {desde, hasta, fuentes?, limite?}       (ISO en UTC; `hasta` no entra)
+                 → {total, documentos: [{id, fuente, fecha, titulo, quien, fragmento}]}
   POST /olvidar  {fuente} o {ids: [...]}                 → {borrados}
 """
 
@@ -107,6 +109,17 @@ async def buscar(request):
     return web.json_response(r)
 
 
+async def listar(request):
+    datos = await _json(request)
+    fuentes = datos.get("fuentes") if isinstance(datos.get("fuentes"), list) else None
+    inicio = time.monotonic()
+    r = await asyncio.to_thread(request.app["indice"].listar, str(datos.get("desde") or ""),
+                                str(datos.get("hasta") or ""), fuentes, datos.get("limite") or 200)
+    log.info("listar: %d de %d en %d ms", len(r["documentos"]), r["total"],
+             int((time.monotonic() - inicio) * 1000))
+    return web.json_response(r)
+
+
 async def olvidar(request):
     datos = await _json(request)
     ids = datos.get("ids") if isinstance(datos.get("ids"), list) else None
@@ -122,6 +135,7 @@ def crear_app(indice: Indice) -> web.Application:
     app.router.add_get("/salud", salud)
     app.router.add_post("/indexar", indexar)
     app.router.add_post("/buscar", buscar)
+    app.router.add_post("/listar", listar)
     app.router.add_post("/olvidar", olvidar)
     return app
 
