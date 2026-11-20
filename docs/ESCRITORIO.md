@@ -30,6 +30,16 @@ están en la memoria del proyecto y sin empezar.
 
 Ningún endpoint nuevo: funciona con el backend tal como está.
 
+**Solo aparece al hablarle** (2026-11-20, a petición de Mikel): en reposo el reactor se
+oculta y no se dibuja (no gasta nada; despierto, unos 65 MB y menos del 0,1 % de CPU). Ctrl +
+Alt lo trae, y se queda mientras oye, piensa, habla o enseña la respuesta. «Dejarlo siempre a
+la vista», en el menú del botón derecho (con él a la vista), lo fija (`siempre_visible` en
+`escritorio.json`). La regla, en `debe_verse` de `escritorio_logica.py`.
+
+**«Se ha roto el turno» el día que se estrenó** no era de aquí: el backend mandaba 139
+herramientas a OpenAI, que admite 128, y todos los turnos por OpenAI fallaban. Ver
+`_esquema_openai` en `backend/main.py`.
+
 ## Lo que no se puede relajar
 
 - **AltGr no cuenta.** Para Windows es Ctrl + Alt, y con ella se escribe la @. Y si

@@ -44,7 +44,7 @@ from pathlib import Path
 import tkinter as tk
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from escritorio_logica import Frases, LectorSSE, Tecla, recorta_historial  # noqa: E402
+from escritorio_logica import Frases, LectorSSE, Tecla, debe_verse, recorta_historial  # noqa: E402
 
 # Otra carpeta solo para probarlo contra un backend de mentira sin tocar la sesión de verdad.
 DIR      = Path(os.environ.get("JARVIS_ESCRITORIO_DIR") or Path.home() / ".jarvis-pc")
@@ -323,6 +323,9 @@ class App:
         self.config = cargar_config()
         self.token = str(self.config.get("token") or "")
         self.mudo = bool(self.config.get("mudo"))
+        # Por defecto el reactor solo aparece al hablarle (ver `debe_verse`).
+        self.siempre = bool(self.config.get("siempre_visible"))
+        self.visible = True
         self.estado = "reposo" if self.token else "sin_sesion"
         self.historial: list = []
         self.cola: "queue.Queue" = queue.Queue()
@@ -417,7 +420,20 @@ class App:
         if self._ocultar_en and time.time() > self._ocultar_en and self.estado == "reposo":
             self.bocadillo.withdraw()
             self._ocultar_en = 0.0
+        self._ver(debe_verse(self.estado, self.bocadillo.winfo_viewable() == 1, self.siempre or bool(self._arrastre)))
         self.root.after(30, self._latido)
+
+    def _ver(self, si: bool) -> None:
+        """Enseña u oculta el reactor. Oculto no se dibuja: no gasta nada."""
+        if si == self.visible:
+            return
+        self.visible = si
+        if si:
+            self.root.deiconify()
+            self.root.attributes("-topmost", True)
+            self.root.lift()
+        else:
+            self.root.withdraw()
 
     # ── oír ──
     def empezar_a_oir(self) -> None:
@@ -642,6 +658,8 @@ class App:
         m = tk.Menu(self.root, tearoff=0)
         m.add_command(label="Hablar (o mantenga Ctrl + Alt)", command=lambda: self._raton_sube_simulado())
         m.add_command(label="Activar la voz" if self.mudo else "Silenciar la voz", command=self._alternar_mudo)
+        m.add_command(label="Ocultarlo cuando no le hablo" if self.siempre else "Dejarlo siempre a la vista",
+                      command=self._alternar_siempre)
         m.add_command(label="Olvidar la conversación", command=lambda: self.historial.clear())
         m.add_separator()
         m.add_command(label="Cerrar sesión", command=self._sesion_caducada)
@@ -659,6 +677,11 @@ class App:
         if self.mudo:
             self.voz.callar()
 
+    def _alternar_siempre(self) -> None:
+        self.siempre = not self.siempre
+        self.config["siempre_visible"] = self.siempre
+        guardar_config(self.config)
+
     def salir(self) -> None:
         self.micro.cerrar()
         self.voz.callar()
@@ -666,6 +689,10 @@ class App:
 
     # ── el reactor ──
     def _dibujar(self) -> None:
+        if not self.visible:
+            # Oculto no hay nada que pintar; se mira de vez en cuando por si vuelve.
+            self.root.after(200, self._dibujar)
+            return
         c, s = self.lienzo, self.escala
         c.delete("all")
         self.fase += 1

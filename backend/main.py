@@ -41107,6 +41107,45 @@ def _ajeno_bloquea(nombre: str, fuentes, se_confirma: bool = False,
                      "Jarvis, dile quién lo pidió y qué pidió."}
 
 
+# OpenAI no acepta más de 128 herramientas por petición (400 `array_above_max_length`), y
+# el registro pasó de ahí el 2026-11-20: TODOS los turnos por OpenAI —la voz, el Jarvis de
+# escritorio, Telegram— se rompían con «Se ha roto el turno» mientras el chat escrito, que
+# piensa Claude y no tiene ese tope, seguía bien. Cuando sobran, se quitan para OpenAI las
+# de administrar y programar, por este orden (de lo que nadie pide hablando a lo que algo
+# más): siguen en el chat escrito. Lo comprueba `test_esquema_openai_cabe`.
+JARVIS_OPENAI_MAX_HERRAMIENTAS = 128
+_PRESCINDIBLES_OPENAI = (
+    "mcp_catalogo", "mcp_conectar", "mcp_desconectar", "mcp_servidores", "mcp_herramientas",
+    "mcp_usar", "indexadores_flaresolverr", "indexadores_probar", "reintentar_job",
+    "relanzar_agente", "lanzar_streaming", "jobs", "contar_revision", "arreglar_revision",
+    "responder_a_la_sesion", "encargar_a_una_sesion", "configurar_resumen_diario",
+    "estado_resumen_diario", "borrar_anticipacion", "olvidar_patron", "indexadores_estado",
+    "pelis_versiones", "errores", "github_prs", "desplegar", "hablar_con_el_programador",
+    "ver_proyectos", "encargar_proyecto", "anular_noche", "whatsapp_cancelar_programado",
+)
+
+
+def _esquema_openai(esquema: list, limite: int = JARVIS_OPENAI_MAX_HERRAMIENTAS) -> list:
+    """El esquema recortado al tope de OpenAI, quitando primero lo prescindible."""
+    sobran = len(esquema) - limite
+    if sobran <= 0:
+        return esquema
+    fuera = set()
+    nombres = {h["function"]["name"] for h in esquema}
+    for nombre in _PRESCINDIBLES_OPENAI:
+        if len(fuera) >= sobran:
+            break
+        if nombre in nombres:
+            fuera.add(nombre)
+    recortado = [h for h in esquema if h["function"]["name"] not in fuera]
+    if len(recortado) > limite:
+        # Ni con todo lo prescindible: se corta por el final y se avisa, mejor que un 400.
+        logger.error("Jarvis: %d herramientas y OpenAI admite %d; amplía _PRESCINDIBLES_OPENAI",
+                     len(recortado), limite)
+        recortado = recortado[:limite]
+    return recortado
+
+
 def _jarvis_esquema() -> list:
     # Sin ningún servidor conectado, las herramientas que OPERAN sobre uno no se anuncian:
     # un esquema con herramientas muertas se paga por token en cada turno y solo sirve
@@ -42408,7 +42447,7 @@ def _jarvis_turno_bruto(body: JarvisIn, destilar_luego: list):
     mensajes.append({"role": "user", "content": mensaje})
 
     cliente   = get_openai_client()
-    esquema   = _jarvis_esquema()      # una vez: ahora leer la config MCP toca Supabase
+    esquema   = _esquema_openai(_jarvis_esquema())   # una vez: leer la config MCP toca Supabase
     usadas    = []
     # Lo que alguna herramienta pidió decir LITERALMENTE (un error que trae su arreglo
     # dentro). Se guarda por si el modelo acaba sin decir nada: ver _texto_garantizado.

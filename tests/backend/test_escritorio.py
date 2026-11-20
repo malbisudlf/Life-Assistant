@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "agent"))
 
-from escritorio_logica import Frases, LectorSSE, Tecla, para_voz, recorta_historial  # noqa: E402
+from escritorio_logica import Frases, LectorSSE, Tecla, debe_verse, para_voz, recorta_historial  # noqa: E402
 
 
 def _secuencia(tecla, pasos):
@@ -83,3 +83,13 @@ def test_historial_recortado_y_con_la_forma_del_backend():
     h = [{"rol": "user", "texto": f"t{i}"} for i in range(20)] + [{"rol": "system", "texto": "x"}, "basura"]
     r = recorta_historial(h, maximo=5)
     assert len(r) == 5 and r[-1] == {"rol": "user", "texto": "t19"}
+
+
+def test_el_reactor_solo_se_ve_al_hablarle():
+    """2026-11-20: en reposo desaparece; oyendo, pensando, hablando, con un error o sin
+    sesión se ve, y mientras siga abierta la respuesta. «Siempre a la vista» lo deja fijo."""
+    assert not debe_verse("reposo", bocadillo=False)
+    for estado in ("escucha", "piensa", "habla", "error", "sin_sesion"):
+        assert debe_verse(estado, bocadillo=False)
+    assert debe_verse("reposo", bocadillo=True)
+    assert debe_verse("reposo", bocadillo=False, siempre=True)

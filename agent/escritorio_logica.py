@@ -128,3 +128,11 @@ def recorta_historial(historial: list, maximo: int = 12) -> list:
     limpio = [{"rol": t["rol"], "texto": str(t["texto"])[:2000]} for t in historial
               if isinstance(t, dict) and t.get("rol") in ("user", "assistant") and t.get("texto")]
     return limpio[-maximo:]
+
+
+def debe_verse(estado: str, bocadillo: bool, siempre: bool = False) -> bool:
+    """¿Se enseña el reactor? Solo mientras se le habla o tiene algo que decir (2026-11-20,
+    Mikel: «no quiero que esté siempre en la pantalla»): oyendo, pensando, hablando, con un
+    error o sin sesión, y mientras el bocadillo con la respuesta siga abierto. En reposo
+    desaparece; Ctrl + Alt lo trae. `siempre` lo deja fijo (menú del botón derecho)."""
+    return siempre or bocadillo or estado != "reposo"
