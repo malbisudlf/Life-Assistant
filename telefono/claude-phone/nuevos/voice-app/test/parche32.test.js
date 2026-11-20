@@ -221,7 +221,8 @@ test('Jarvis dice cada frase entera: oído cerrado, sin armar el corte y sin uui
   const r = await runConversacionTercero(e.endpoint, e.dialog, 'c1', e.o);
   assert.strictEqual(r.endReason, 'goodbye');
   assert.strictEqual(armados, 0);
-  assert.deepStrictEqual(cortes, []);
+  // La grabación (parche 52) también habla con FreeSWITCH; lo que no puede haber es un corte.
+  assert.deepStrictEqual(cortes.filter((o) => o !== "uuid_record"), []);
   assert.ok(oidoAlHablar.length >= 3);
   assert.ok(oidoAlHablar.every((abierto) => abierto === false), JSON.stringify(oidoAlHablar));
 });

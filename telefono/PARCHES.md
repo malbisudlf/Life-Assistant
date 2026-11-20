@@ -2300,7 +2300,9 @@ conteste, turbo ni se lanza: menos pasadas de GPU en las pausas a media frase.
 
 ## El parche 52: la grabación de las llamadas a otros
 
-**Escrito el 2026-11-20, SIN aplicar.** Mikel pidió a Jarvis que preguntara a un amigo dónde
+**Escrito y aplicado el 2026-11-20** (copias `*.bak-p52` e imagen
+`claude-phone-voice-app:antes-p52` para volver atrás; extensión registrada, rutas probadas con
+y sin llave; foto exportada). Falta oírla en una llamada real. Mikel pidió a Jarvis que preguntara a un amigo dónde
 estaba y le llegó «en el mine»: el oído (con el modelo pequeño, por rapidez) entendió mal y no
 había forma de saber qué dijo. Ahora cada llamada a un tercero se graba.
 

@@ -28,6 +28,7 @@
  */
 
 const { armarAnticipo, transcribirFrase } = require('./anticipo');
+const grabacion = require('./grabacion');
 
 // El saludo: tope total, lo que se espera a que empiece a hablar y el silencio que lo da
 // por dicho (un «¿Sí?» no necesita los 1,5 s de `endSilenceMs`).
@@ -426,6 +427,11 @@ async function runConversacionTercero(endpoint, dialog, callId, o) {
     await endpoint.play(url);
   };
 
+  // Parche 52: se graba desde el principio, sin esperar: arrancar la grabación no puede
+  // retrasar ni un milisegundo el «¿Sí?» del otro ni la presentación.
+  const grabar = o.grabacion || grabacion;
+  const grabando = grabar.empezar(endpoint, o.tercero, log);
+
   try {
     const esperada = o.audioForkServer.expectSession(callId, { timeoutMs: 10000 });
     await endpoint.forkAudioStart({
@@ -576,6 +582,7 @@ async function runConversacionTercero(endpoint, dialog, callId, o) {
                             new Promise(function (r) { setTimeout(r, CIERRE_MS); })]);
       } catch (e) { /* ya parado */ }
     }
+    await grabar.parar(endpoint, await grabando);
   }
   return { endReason: fin };
 }

@@ -415,7 +415,7 @@ index b2f02ad..6e9dea7 100644
      '# Claude API Server',
      `CLAUDE_API_URL=${claudeApiUrl}`,
 diff --git a/voice-app/index.js b/voice-app/index.js
-index 5e58907..c0106fd 100644
+index 5e58907..0ab50fb 100644
 --- a/voice-app/index.js
 +++ b/voice-app/index.js
 @@ -31,6 +31,9 @@ var connectWithRetry = connectionRetry.connectWithRetry;
@@ -457,7 +457,7 @@ index 5e58907..c0106fd 100644
    });
  
    httpServer.app.use("/api", outboundRouter);
-@@ -218,6 +234,36 @@ function initializeServers() {
+@@ -218,6 +234,40 @@ function initializeServers() {
    httpServer.app.use("/api", queryRouter);
    console.log("[" + new Date().toISOString() + "] QUERY API enabled (/api/query, /api/devices)");
  
@@ -475,6 +475,10 @@ index 5e58907..c0106fd 100644
 +    if (!llave || req.get("X-Auth-Token") !== llave) return res.status(403).json({ ok: false });
 +    res.json({ ok: true, oido: { configurado: !!process.env.OIDO_URL, disponible: whisperClient.oidoDisponible() } });
 +  });
++
++  // Parche 52: las grabaciones de las llamadas a otros, para el backend (con la misma llave),
++  // y su limpieza a los GRABACIONES_DIAS días.
++  require("./lib/grabacion").montar(httpServer.app);
 +
 +  // Parche 34: lo que se dice siempre igual, ya sintetizado (en segundo plano).
 +  setTimeout(function () {
@@ -494,7 +498,7 @@ index 5e58907..c0106fd 100644
    // Finalize HTTP server
    httpServer.finalize();
  
-@@ -238,6 +284,14 @@ function checkReadyState() {
+@@ -238,6 +288,14 @@ function checkReadyState() {
  
      // Register SIP INVITE handler
      srf.invite(function(req, res) {

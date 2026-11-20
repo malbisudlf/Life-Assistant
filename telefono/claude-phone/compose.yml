@@ -45,6 +45,9 @@ services:
     # RTP ports 30000-30100 avoid conflict with 3CX SBC (uses 20000-20099)
     environment:
       - EXTERNAL_IP=${EXTERNAL_IP}
+    # Parche 52: aquí graba las llamadas a otros (uuid_record); la voice-app las sirve y limpia.
+    volumes:
+      - ${HOME}/telefono-grabaciones:/grabaciones
 
   voice-app:
     build: ${HOME}/.claude-phone-cli/voice-app
@@ -56,6 +59,8 @@ services:
     volumes:
       - ${HOME}/.claude-phone-cli/voice-app/audio:/app/audio
       - ${HOME}/.claude-phone-cli/voice-app/config:/app/config
+      # Parche 52: las grabaciones de las llamadas a otros (las escribe FreeSWITCH).
+      - ${HOME}/telefono-grabaciones:/grabaciones
     depends_on:
       - drachtio
       - freeswitch
