@@ -588,6 +588,14 @@ class TestRepeticionSemanal:
         assert proxima > ahora
         assert proxima.strftime("%Y-%m-%d %H:%M") == "2026-09-14 08:00"
 
+    def test_la_de_las_23_que_se_rinde_pasada_la_medianoche_no_pierde_un_dia(self):
+        """Diaria a las 23:28 del viernes, se rinde el sábado a las 00:08: la próxima es el
+        sábado a las 23:28, no el domingo (lo destapó el CI de las 00:01 del 2026-11-21)."""
+        viernes = datetime(2026, 11, 20, 23, 28, tzinfo=main.LOCAL_TZ)
+        ahora = datetime(2026, 11, 21, 0, 8, tzinfo=main.LOCAL_TZ)
+        proxima = main._alarma_proxima(viernes, [1, 2, 3, 4, 5, 6, 7], ahora)
+        assert proxima.strftime("%Y-%m-%d %H:%M") == "2026-11-21 23:28"
+
     def test_sin_dias_no_hay_proxima(self):
         assert main._alarma_proxima(datetime.now(main.LOCAL_TZ), [], datetime.now(main.LOCAL_TZ)) is None
 

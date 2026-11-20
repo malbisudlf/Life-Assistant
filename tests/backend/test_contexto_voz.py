@@ -41,6 +41,15 @@ def _fuentes(monkeypatch, eventos=None, clases=None, tareas=None,
 
 
 class TestTexto:
+    def test_lo_que_empezo_ayer_y_sigue_es_de_hoy(self, monkeypatch):
+        """A las 00:05, lo de 23:55 a 00:45 está en curso (CI de las 00:01 del 2026-11-21)."""
+        ahora = datetime(2026, 11, 21, 0, 5, tzinfo=main.LOCAL_TZ)
+        _fuentes(monkeypatch, eventos={"events": [
+            {"title": "Guardia", "start": _iso(ahora - timedelta(minutes=10)),
+             "end": _iso(ahora + timedelta(minutes=40))}]})
+        lineas = main._contexto_agenda(ahora)
+        assert "Guardia, en curso hasta las 00:45" in lineas[0]
+
     def test_lo_que_queda_de_hoy_y_lo_de_manana(self, monkeypatch):
         ahora = datetime.now(main.LOCAL_TZ)
         manana = ahora + timedelta(days=1)

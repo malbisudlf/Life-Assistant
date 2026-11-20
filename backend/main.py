@@ -17092,11 +17092,13 @@ def _alarma_proxima(cuando: datetime, dias, ahora: datetime) -> Optional[datetim
         return None
     base    = cuando.astimezone(LOCAL_TZ).replace(tzinfo=None, second=0, microsecond=0)
     limite  = ahora.astimezone(LOCAL_TZ).replace(tzinfo=None)
-    partida = max(base, limite)
-    # Desde el día siguiente: una alarma semanal no puede sonar dos veces el mismo día.
-    for salto in range(1, 9):
-        candidata = (partida + timedelta(days=salto)).replace(hour=base.hour,
-                                                              minute=base.minute)
+    # Desde el día siguiente al de la alarma (una semanal no puede sonar dos veces el mismo
+    # día) o desde HOY si eso ya pasó. Antes se contaba un día desde «ahora», y una diaria de
+    # las 23:28 que se rendía pasada la medianoche saltaba a pasado mañana: perdía un día
+    # (lo destapó el CI a las 00:01 del 2026-11-21).
+    inicio = max(base.date() + timedelta(days=1), limite.date())
+    for salto in range(0, 9):
+        candidata = datetime.combine(inicio + timedelta(days=salto), base.time())
         if candidata.isoweekday() in dias and candidata > limite:
             return candidata.replace(tzinfo=LOCAL_TZ)
     return None
@@ -30964,7 +30966,10 @@ def _contexto_agenda(ahora: datetime) -> list:
             fin = _j_local(ev.get("end") or "") if ev.get("end") else ini
         except (ValueError, TypeError, AttributeError):
             continue
-        if ini.date() not in por_dia or (ini.date() == hoy and fin <= ahora):
+        # Lo que empezó ayer y sigue (a las 00:05, lo de 23:55 a 00:45) es de hoy, en curso:
+        # antes se quedaba fuera por la fecha de inicio (CI de las 00:01 del 2026-11-21).
+        dia = hoy if ini.date() < hoy and fin > ahora else ini.date()
+        if dia not in por_dia or (dia == hoy and fin <= ahora):
             continue
         hora  = "todo el día" if ev.get("isAllDay") else ini.strftime("%H:%M")
         titulo, oculto = _titulo_de_evento(ev)
@@ -30973,7 +30978,7 @@ def _contexto_agenda(ahora: datetime) -> list:
             texto += f" (en {str(ev['location'])[:60]})"
         if ini <= ahora < fin and not ev.get("isAllDay"):
             texto += f", en curso hasta las {fin.strftime('%H:%M')}"
-        por_dia[ini.date()].append((0 if ev.get("isAllDay") else 1, ini, texto))
+        por_dia[dia].append((0 if ev.get("isAllDay") else 1, ini, texto))
 
     for dia, nombre in ((hoy, "Lo que queda de hoy"),
                         (manana, f"Mañana, {DIAS_SEMANA[manana.weekday()]}")):
