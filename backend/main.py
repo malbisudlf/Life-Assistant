@@ -42357,6 +42357,11 @@ class JarvisIn(BaseModel):
     # La «potencia máxima» de la vista de Jarvis: el turno lo piensa
     # JARVIS_CLAUDE_MODELO_POTENTE. Solo cuenta con el motor `claude` y por escrito.
     potente:   bool = False
+    # Una respuesta para decir en voz alta que piensa Claude y no OpenAI, como las notas de
+    # voz de Telegram (`voz_con_claude`): la pide el Jarvis de escritorio (2026-11-20, Mikel:
+    # «tiene que ir por Claude y por jacobo, igual que en Telegram»). Solo cuenta en
+    # `/jarvis`; `/jarvis/voz` retransmite y sigue con OpenAI por velocidad.
+    pensar_con_claude: bool = False
     # Un fotograma de la cámara de la vista J.A.R.V.I.S. (JPEG en base64, sin prefijo).
     # Se describe y se suelta: ver `_con_camara`.
     camara:    str = Field(default="", max_length=CAMARA_MAX_B64, pattern=r"^[A-Za-z0-9+/=]*$")
@@ -42815,7 +42820,7 @@ def jarvis(
     _check_rate("jarvis", _client_ip(request), JARVIS_MAX_REQUESTS, JARVIS_WINDOW_SECONDS)
     marca = _boca_actual.set("chat")
     try:
-        return _jarvis_chat(_con_camara(body))
+        return _jarvis_chat(_con_camara(body), voz_con_claude=body.pensar_con_claude)
     finally:
         _boca_actual.reset(marca)
 

@@ -44,7 +44,7 @@ from pathlib import Path
 import tkinter as tk
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from escritorio_logica import Frases, LectorSSE, Tecla, debe_verse, recorta_historial  # noqa: E402
+from escritorio_logica import Frases, Tecla, debe_verse, recorta_historial  # noqa: E402
 
 # Otra carpeta solo para probarlo contra un backend de mentira sin tocar la sesión de verdad.
 DIR      = Path(os.environ.get("JARVIS_ESCRITORIO_DIR") or Path.home() / ".jarvis-pc")
@@ -488,43 +488,41 @@ class App:
             self.en_ui(self.poner, "reposo")
             return
         self.en_ui(self._mostrar, texto, "")
-        cuerpo = {"mensaje": texto[:2000], "historial": recorta_historial(self.historial), "voz": True}
-        frases, lector, dicho, respuesta = Frases(), LectorSSE(), [], ""
+        # Lo piensa Claude, como las notas de voz de Telegram (`pensar_con_claude`): por
+        # `/jarvis`, de una pieza y con el prompt de voz. Si Claude no contesta, el backend
+        # tira de OpenAI y lo dice en `motor_aviso`.
+        cuerpo = {"mensaje": texto[:2000], "historial": recorta_historial(self.historial),
+                  "voz": True, "pensar_con_claude": True}
         try:
-            with httpx.stream("POST", f"{self.base}/jarvis/voz", json=cuerpo,
-                              headers=self.cabeceras(), timeout=httpx.Timeout(120, connect=10)) as r:
-                if r.status_code == 401:
-                    self.en_ui(self._sesion_caducada)
-                    return
-                if r.status_code >= 300:
-                    self.en_ui(self._decir_error, f"El backend ha contestado {r.status_code}.")
-                    return
-                for trozo in r.iter_bytes():
-                    for tipo, datos in lector.trozo(trozo):
-                        if tipo == "texto":
-                            for frase in frases.mete(str(datos.get("delta") or "")):
-                                dicho.append(frase)
-                                self.voz.di(frase)
-                                self.en_ui(self._hablar, " ".join(dicho))
-                        elif tipo == "fin":
-                            respuesta = str(datos.get("respuesta") or "").strip()
-                        elif tipo == "error":
-                            self.en_ui(self._decir_error, str(datos.get("detalle") or "Se ha roto el turno."))
-                            return
+            r = httpx.post(f"{self.base}/jarvis", json=cuerpo, headers=self.cabeceras(),
+                           timeout=httpx.Timeout(170, connect=10))
         except Exception as e:   # noqa: BLE001
             self.en_ui(self._decir_error, f"No llego al backend ({type(e).__name__}).")
             return
-        for frase in frases.resto():
-            dicho.append(frase)
+        if r.status_code == 401:
+            self.en_ui(self._sesion_caducada)
+            return
+        if r.status_code >= 300:
+            self.en_ui(self._decir_error, f"El backend ha contestado {r.status_code}.")
+            return
+        try:
+            datos = r.json()
+        except ValueError:
+            self.en_ui(self._decir_error, "El backend ha contestado algo que no entiendo.")
+            return
+        respuesta = str(datos.get("respuesta") or "").strip() or "No sé qué decirle, señor."
+        partidor = Frases()
+        for frase in partidor.mete(respuesta) + partidor.resto():
             self.voz.di(frase)
-        if not dicho and respuesta:            # el turno no retransmitió: se dice entero
-            dicho.append(respuesta)
-            for frase in Frases().mete(respuesta + "\n") or [respuesta]:
-                self.voz.di(frase)
-        final = respuesta or " ".join(dicho)
-        self.historial += [{"rol": "user", "texto": texto}, {"rol": "assistant", "texto": final}]
+        visto = respuesta
+        if datos.get("pendiente"):
+            # Aquí no hay botón: lo propuesto se aprueba en el dashboard o en el móvil.
+            visto += "\n\n(Pendiente de su confirmación en el dashboard o el móvil.)"
+        if datos.get("motor_aviso"):
+            visto += f"\n\n({datos['motor_aviso']})"
+        self.historial += [{"rol": "user", "texto": texto}, {"rol": "assistant", "texto": respuesta}]
         self.historial = recorta_historial(self.historial)
-        self.en_ui(self._hablar, final, True)
+        self.en_ui(self._hablar, visto, True)
 
     # ── lo que se ve ──
     def _mostrar(self, oido: str, respuesta: str) -> None:

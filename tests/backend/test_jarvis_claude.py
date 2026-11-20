@@ -233,6 +233,17 @@ class TestElChat:
         client.post("/jarvis", headers=auth_headers, json={"mensaje": "hola", "voz": True})
         assert mock_requests.called("POST", "/turno") == []
 
+    def test_el_escritorio_habla_pero_piensa_claude(self, client, auth_headers, mock_requests,
+                                                    con_claude):
+        """El Jarvis de escritorio (2026-11-20): respuesta para decir en voz alta, pero
+        pensada por Claude con el prompt de voz, como las notas de voz de Telegram."""
+        mock_requests.add("POST", "caja.test:3340/turno", FakeResponse({"respuesta": "A sus órdenes"}))
+        r = client.post("/jarvis", headers=auth_headers,
+                        json={"mensaje": "hola", "voz": True, "pensar_con_claude": True})
+        assert r.json()["respuesta"] == "A sus órdenes"
+        [(_, _, kw)] = mock_requests.called("POST", "/turno")
+        assert kw["json"]["sistema"] == main._sistema_chat(voz=True)
+
     def test_la_memoria_se_sigue_destilando(self, client, auth_headers, mock_requests,
                                             monkeypatch):
         monkeypatch.setattr(main, "JARVIS_MOTOR_CHAT", "claude")
