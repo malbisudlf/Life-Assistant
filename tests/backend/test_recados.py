@@ -294,7 +294,11 @@ class TestElReloj:
         main._recados_tick()
         assert fila["estado"] == estado and recados.llamadas == []
         if respuesta == "Hoy no":
-            assert main._fecha_utc(fila["proximo"]) > datetime.now(timezone.utc) + timedelta(hours=1)
+            # «Hoy no» es mañana, en hora local. No vale «más de una hora desde ahora»: con
+            # RECADOS_DESDE=0 (el fixture) mañana empieza a medianoche de Madrid, y pasadas
+            # las 22:00 UTC eso queda a menos de una hora — el CI se rompió así el 2026-11-20.
+            proximo = main._fecha_utc(fila["proximo"]).astimezone(main.LOCAL_TZ)
+            assert proximo.date() > datetime.now(main.LOCAL_TZ).date()
 
     def test_no_contestar_no_es_un_no(self, recados, monkeypatch):
         fila = self._vencido(recados)
