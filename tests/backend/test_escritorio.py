@@ -93,3 +93,14 @@ def test_el_reactor_solo_se_ve_al_hablarle():
         assert debe_verse(estado, bocadillo=False)
     assert debe_verse("reposo", bocadillo=True)
     assert debe_verse("reposo", bocadillo=False, siempre=True)
+
+
+def test_el_canvas_del_reactor_no_se_pisa():
+    """El 2026-11-21 el lienzo de la pantalla se guardó en `self.lienzo`, que es el Canvas del
+    reactor: el bucle de dibujo murió en el primer fotograma y el reactor salía vacío (la voz
+    seguía). Solo una asignación a `self.lienzo`, la del Canvas."""
+    ruta = os.path.join(os.path.dirname(__file__), "..", "..", "agent", "escritorio.py")
+    with open(ruta, encoding="utf-8") as f:
+        codigo = f.read()
+    assert codigo.count("self.lienzo = ") == 1
+    assert "self.lienzo = tk.Canvas(" in codigo

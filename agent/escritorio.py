@@ -388,14 +388,16 @@ class App:
         self._ocultar_en = 0.0
 
         self.voz = Voz(self)
-        # El lienzo (dibujar sobre la pantalla y los tutoriales). Si falla, el reactor sigue
+        # El lienzo de la pantalla (dibujar encima y los tutoriales), en `self.pantalla`: OJO,
+        # `self.lienzo` es el Canvas del reactor (el 2026-11-21 se pisaron y el reactor dejó de
+        # pintarse). Si falla, el reactor sigue
         # siendo el de siempre: es un añadido, no una dependencia.
         try:
             from lienzo import Lienzo
-            self.lienzo = Lienzo(self, CLAVE)
+            self.pantalla = Lienzo(self, CLAVE)
         except Exception as e:   # noqa: BLE001
             log.warning("lienzo: no arranca (%s)", type(e).__name__)
-            self.lienzo = None
+            self.pantalla = None
         self.root.after(30, self._latido)
         self.root.after(33, self._dibujar)
         if not self.base:
@@ -439,10 +441,10 @@ class App:
             self.bocadillo.withdraw()
             self._ocultar_en = 0.0
         guiando = False
-        if self.lienzo is not None:
+        if self.pantalla is not None:
             try:
-                self.lienzo.latido()
-                guiando = self.lienzo.guiando
+                self.pantalla.latido()
+                guiando = self.pantalla.guiando
             except Exception as e:   # noqa: BLE001 — un fallo del lienzo no tumba el reactor
                 log.warning("lienzo: %s", type(e).__name__)
         self._volando()
@@ -761,8 +763,8 @@ class App:
         guardar_config(self.config)
 
     def salir(self) -> None:
-        if self.lienzo is not None:
-            self.lienzo.cerrar()
+        if self.pantalla is not None:
+            self.pantalla.cerrar()
         self.micro.cerrar()
         self.voz.callar()
         self.root.destroy()
