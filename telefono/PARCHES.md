@@ -2326,6 +2326,37 @@ Aplicarlo (con su visto bueno): `mkdir ~/telefono-grabaciones`; imagen `antes-p5
 `~/.claude-phone/docker-compose.yml`); `docker compose up -d --build voice-app freeswitch`
 **sin llamadas en curso**; comprobar que se registra en el 3CX; `exportar.sh` de la foto.
 
+## El parche 53: la llamada a tres
+
+**Escrito el 2026-11-21, sin aplicar.** «Jarvis, ponme con Erik» en una llamada con Jarvis:
+marca a Erik por O2 y los mete a los dos en una conferencia con Jarvis dentro, callado hasta
+que Mikel le nombra. El porqué, las reglas y lo probado, en «La llamada a tres» de
+`docs/LLAMADAS_TERCEROS.md`.
+
+- `voice-app/lib/a-tres.js` (nuevo): `Salida` (lo que la conversación usa como endpoint:
+  fuera de la conferencia, el endpoint tal cual; dentro, `play` suena para todos y espera a
+  su `play-file-done`, `uuid_break` es `conference … stop all` y la música de espera no
+  suena), `LlamadaATres` (marca, conferencia con el perfil `sla`, el fork y la transcripción
+  de la pata del otro, «cuelga», «déjanos solos», el final al backend) y
+  `empezarSiLoPide` (la marca `📞 A TRES:` de Claude).
+- `conversation-loop.js` y `sip-handler.js` (los dos bucles, igual): envuelven el endpoint en
+  la `Salida`; en la llamada a tres, Jarvis se duerme tras cada respuesta, las órdenes de la
+  llamada van antes que las de la escucha, a Claude le llega el aviso de la llamada a tres y
+  al colgar se cuelga al otro y se suelta la línea.
+- `escucha-pasiva.js`: `oyente`, que recibe cada frase transcrita dormida (para el resumen).
+  `musica.js`: no suena en la conferencia. `index.js`: `aTres.configurar` con srf,
+  FreeSWITCH y la línea O2.
+- Tests: `test/parche53.test.js` (15). Los 278 de la voice-app en verde en una copia montada
+  desde la foto.
+- Del lado del backend, `POST /telefono/a-tres` y `POST /telefono/a-tres/{tid}/fin`; y la
+  línea `📞 A TRES:` en el RUNBOOK.
+
+Aplicarlo (con su visto bueno, y **después** de desplegar el backend): imagen `antes-p53`;
+aplicar `telefono/parche-53.diff` en `~/.claude-phone-cli` (copias `*.bak-p53`); `docker
+compose up -d --build voice-app` **sin llamadas en curso**; comprobar que se registra en el
+3CX; copiar el RUNBOOK a `~/telefono-jarvis/CLAUDE.md`; `exportar.sh` de la foto. Y la
+prueba que falta: una llamada de verdad con alguien al otro lado.
+
 ## Avería del 2026-11-18: FreeSWITCH sin perfil SIP, y nadie se enteró
 
 De las 15:19 a las 16:13 (hora de Madrid) **todas las llamadas fallaron con 503**, las de Mikel

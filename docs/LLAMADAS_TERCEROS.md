@@ -229,6 +229,65 @@ shell). Las llamadas viven en memoria del backend; tras un reinicio se toma la �
 lista de la voice-app, sin nombre. El oído corta a los 60 s de trabajo: una llamada muy
 larga cae a OpenAI.
 
+## La llamada a tres (parche 53, 2026-11-21)
+
+«Jarvis, ponme con Erik», dicho en una llamada con Jarvis (el modo coche o cualquier otra).
+Jarvis marca a Erik por el fijo, Mikel oye el tono mientras suena y, si lo coge, los dos
+quedan en una conferencia de FreeSWITCH con Jarvis dentro, callado. «Jarvis, ¿tengo libre
+el jueves?» lo contesta para los dos. Al colgar llegan el resumen y, si quedaron en firme
+día y hora, el botón para apuntarlo, como al acabar una llamada a un tercero.
+
+```
+Mikel: «Jarvis, ponme con Erik»
+   │  Claude (teléfono): «Le pongo con Erik, señor.» + 📞 A TRES: Erik
+   ▼
+voice-app (lib/a-tres.js) ── POST /telefono/a-tres {nombre, dicho}
+   │  backend: contacto, número de persona, línea libre y el nombre en lo que dijo Mikel
+   │  conferencia «sla» ← Mikel (oye el tono) ── O2 ─▶ suena Erik ── descuelga ─▶ Erik dentro
+   │  fork de Mikel: la escucha pasiva de siempre (solo su voz despierta a Jarvis)
+   │  fork de Erik: se transcribe para el resumen, nunca busca el nombre
+   ▼
+cuelga cualquiera ── POST /telefono/a-tres/{tid}/fin {fin, turnos}
+   └─ backend: resumen y cita con un modelo sin herramientas → aviso y botón
+```
+
+Lo que lo hace seguro, y no se toca sin pensarlo:
+
+- **Solo despierta la voz de Mikel**, por canal y no por huella: la escucha pasiva oye el
+  fork de SU pata. «Jarvis, abre la puerta» dicho por Erik entra por el fork de Erik, que
+  solo transcribe. En la llamada a tres, además, Jarvis vuelve a dormirse tras cada
+  respuesta: si no, el «vale, hasta luego» de Mikel a Erik en los 8 s siguientes le llegaría
+  a él.
+- **Lo que dice Erik no llega al Claude con shell**, como un WhatsApp. Va al resumen (un
+  modelo sin herramientas, `_resumir_tercero` y `_tercero_cita`, con la transcripción
+  marcada como dato) y a «Jarvis, apunta eso» (al backend sin pasar por Claude). A Claude
+  solo le llega lo que pide Mikel, con un aviso de que le oyen los dos.
+- **La marca no basta para marcar.** Claude pone `📞 A TRES: <nombre>`, pero el backend
+  exige además que el nombre salga en lo que Mikel acaba de decir (`_nombrado_en`). Una
+  marca colada por un dato no llama a nadie. Y las reglas de siempre: solo contactos, solo
+  números de persona en España (también en la voice-app), la línea es una.
+- **Sin franja horaria ni «¿Llamo a Erik?»**: llama él, y está al teléfono, como si
+  marcase desde su móvil. `TERCEROS_A_TRES=0` la apaga sola.
+
+Lo que entiende la llamada, sin pasar por Claude (solo con el nombre delante):
+«Jarvis, cuelga» cuelga a Erik y Mikel sigue con Jarvis; «Jarvis, déjanos solos» (o
+«vete», «adiós») saca a Jarvis: deja de escuchar y de transcribir, **tira lo que llevaba
+apuntado** y no llega resumen; los dos siguen hablando hasta que cuelgue uno. Si cuelga
+Erik, Mikel oye «Erik ha colgado, señor» y sigue con Jarvis a la escucha. Tope:
+`A_TRES_MAX_MIN` (120) en la voice-app.
+
+Cómo suena: Jarvis habla para los dos (`conference play`, esperando a su
+`play-file-done`). La música de espera y la de Spotify no entran en la conferencia. **No
+hay susurro** («dímelo solo a mí»): reproducir a un solo miembro no se pudo probar sin RTP
+de verdad (el fichero no avanzaba), y queda para cuando se pruebe con dos teléfonos.
+
+Lo que se probó el 2026-11-21 en el FreeSWITCH de caja, sin teléfonos y con dos patas sin
+nadie al otro lado: el perfil `sla` (16 kHz, sin controles por teclado ni sonidos de
+entrada; el `default` cuelga con `#`), reproducir a todos con su evento de fin, parar a
+mitad, mp3 por `shout://` y `http://`, y sacar a una pata con `kick` sin que cuelgue (sigue
+viva y reproduce). Lo que **falta**: una llamada de verdad a dos teléfonos (que el fork de
+Mikel sigue oyendo dentro de la conferencia, el tono por la conferencia, y cómo suena).
+
 ## Lo que no hace
 
 - **No llama a quien no esté en tus contactos**, aunque se lo dictes con el número:
