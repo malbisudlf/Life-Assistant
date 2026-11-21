@@ -107,8 +107,9 @@ export function Holograma({ datos, onTocar }) {
   if (grande) {
     return (
       <>
+        {/* Los mandos van solo dentro de la capa (en `vista`): repetirlos aquí pintaba dos
+            juegos de botones con los mismos nombres a la vez. */}
         <div className="jh-nota">Abierta en grande.</div>
-        {mandos}
         {/* Dentro de la vista (`.jh`) y no en <body>: de ahí salen sus colores. */}
         {createPortal(
           <div className="jh-holo-capa" role="dialog" aria-label="La casa en grande"

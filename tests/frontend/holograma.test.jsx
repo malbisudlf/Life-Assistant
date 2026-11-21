@@ -82,6 +82,18 @@ describe("Holograma", () => {
     expect(container.querySelectorAll(".jh-holo-piso.fuera")).toHaveLength(1);
   });
 
+  it("en grande, un solo juego de mandos (el de la capa) y × la cierra", () => {
+    render(<Holograma datos={DATOS} onTocar={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Abrir la maqueta en grande" }));
+    expect(screen.getByText("Abierta en grande.")).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "Girar a la izquierda" })).toHaveLength(1);
+    const cerrar = screen.getAllByRole("button", { name: "Cerrar la maqueta grande" });
+    expect(cerrar).toHaveLength(1);
+    expect(screen.getByRole("dialog", { name: "La casa en grande" }).contains(cerrar[0])).toBe(true);
+    fireEvent.click(cerrar[0]);
+    expect(screen.queryByText("Abierta en grande.")).toBeNull();
+  });
+
   it("sin casa lo dice", () => {
     render(<Holograma datos={{ ok: false, motivo: "Home Assistant no contesta." }} onTocar={() => {}} />);
     expect(screen.getByText("Home Assistant no contesta.")).toBeTruthy();
