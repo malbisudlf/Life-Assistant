@@ -110,6 +110,26 @@ def test_lo_que_el_nivel_no_permite_no_existe(pc):
     nombres = {t.name for t in asyncio.run(pc.crear_servidor().list_tools())}
     assert {"pantalla", "ventanas", "estado", "abrir", "multimedia", "bloquear", "decir"} <= nombres
     assert not nombres & {"escribir", "teclas", "clic", "cerrar_ventana"}
+    # Las manos finas y el lienzo (2026-11-21) son de `usar`: por nombre y con frenos.
+    assert {"elementos", "pulsar", "rellenar", "dibujar", "tutorial"} <= nombres
+
+
+def test_mirar_solo_ve_los_nombres(pc, monkeypatch):
+    pytest.importorskip("mcp.server.fastmcp")
+    import asyncio
+    monkeypatch.setattr(pc, "NIVEL", "mirar")
+    nombres = {t.name for t in asyncio.run(pc.crear_servidor().list_tools())}
+    assert "elementos" in nombres
+    assert not nombres & {"pulsar", "rellenar", "dibujar", "tutorial"}
+
+
+def test_sin_reactor_lo_arranca_y_si_no_llega_lo_dice(pc, monkeypatch, tmp_path):
+    arrancado = []
+    monkeypatch.setattr(pc, "LIENZO_JSON", tmp_path / "lienzo.json")
+    monkeypatch.setattr(pc, "_arrancar_escritorio", lambda: arrancado.append(True))
+    with pytest.raises(RuntimeError, match="reactor"):
+        pc._lienzo("/dibujar", {}, espera_s=0.1)
+    assert arrancado == [True]
 
 
 def test_se_apaga_solo_tras_los_minutos_sin_uso(pc, monkeypatch):

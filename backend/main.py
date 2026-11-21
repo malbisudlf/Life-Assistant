@@ -34264,6 +34264,66 @@ def _j_pc_decir(texto: str) -> dict:
     return _pc_hacer("decir", {"texto": texto}) if texto else {"ok": False, "error": "¿Qué digo?"}
 
 
+# ── El cuerpo de escritorio: las manos finas y el lienzo (2026-11-21) ─────────
+# Fases 2-4 del «Roamies con mi Jarvis» (docs/ESCRITORIO.md, «Las manos y el lienzo»): el
+# MCP del PC encuentra botones y campos POR SU NOMBRE con UI Automation (`agent/manos.py`)
+# y el reactor dibuja sobre la pantalla y guía tutoriales (`agent/lienzo.py`). Aquí solo
+# se recorta lo que viaja; el esquema cerrado lo vuelve a validar el PC.
+#
+# Los frenos viven en el PC, donde no los puede saltar un modelo: lo irreversible (enviar,
+# comprar, pagar, borrar, publicar…) no se pulsa nunca y una contraseña no se rellena. Y
+# aquí, lo de siempre con lo ajeno: los nombres de los botones los pone cada web
+# (`pc_elementos` es de `_HERRAMIENTAS_AJENAS`), así que tras leerlos pulsar o rellenar
+# solo sale si él lo pidió en su mensaje; dibujar y guiar sí, que solo pintan.
+_PC_NOMBRE_MAX = 80
+
+
+def _pc_nombre(valor) -> str:
+    return " ".join(str(valor or "").split())[:_PC_NOMBRE_MAX]
+
+
+def _j_pc_elementos(ventana: str = "", buscar: str = "") -> dict:
+    return _pc_hacer("elementos", {"ventana": _pc_nombre(ventana), "buscar": _pc_nombre(buscar)},
+                     dato=True)
+
+
+def _j_pc_pulsar(elemento: str, ventana: str = "", tipo: str = "") -> dict:
+    elemento = _pc_nombre(elemento)
+    if not elemento:
+        return {"ok": False, "error": "¿Qué pulso?"}
+    return _pc_hacer("pulsar", {"elemento": elemento, "ventana": _pc_nombre(ventana),
+                                "tipo": _pc_nombre(tipo)[:20]})
+
+
+def _j_pc_rellenar(campo: str, texto: str, ventana: str = "") -> dict:
+    campo = _pc_nombre(campo)
+    if not campo:
+        return {"ok": False, "error": "¿En qué campo escribo?"}
+    return _pc_hacer("rellenar", {"campo": campo, "texto": str(texto or "")[:2000],
+                                  "ventana": _pc_nombre(ventana)})
+
+
+def _j_pc_dibujar(marcas: Optional[list] = None, tarjeta: Optional[dict] = None,
+                  segundos: int = 20, ventana: str = "") -> dict:
+    try:
+        segundos = max(3, min(int(segundos or 20), 120))
+    except (TypeError, ValueError):
+        segundos = 20
+    return _pc_hacer("dibujar", {
+        "marcas":   [m for m in (marcas if isinstance(marcas, list) else [])[:8] if isinstance(m, dict)],
+        "tarjeta":  tarjeta if isinstance(tarjeta, dict) else None,
+        "segundos": segundos,
+        "ventana":  _pc_nombre(ventana),
+    })
+
+
+def _j_pc_tutorial(titulo: str = "", pasos: Optional[list] = None) -> dict:
+    pasos = [p for p in (pasos if isinstance(pasos, list) else [])[:12] if isinstance(p, dict)]
+    if not pasos:
+        return {"ok": False, "error": "El tutorial necesita pasos, cada uno con su texto."}
+    return _pc_hacer("tutorial", {"titulo": _pc_nombre(titulo), "pasos": pasos})
+
+
 # ── La tele de la sala ────────────────────────────────────────────────────────
 # La Samsung se maneja desde la voice-app (`telefono/` parche 34: `lib/tele.js`), que está
 # en la red del host: solo desde ahí sale el paquete mágico que la enciende. Desde la
@@ -39287,6 +39347,115 @@ _JARVIS_HERRAMIENTAS = {
         "obligatorios":  ["texto"],
         "requiere_pc_mcp": True,
     },
+    "pc_elementos": {
+        "confirmar":     False,
+        "fn":            _j_pc_elementos,
+        "descripcion":   "Los botones, campos, pestañas y menús que se ven en una ventana del PC "
+                         "de Mikel (la de delante si no se dice), por su nombre. Para saber cómo "
+                         "se llama lo que hay que pulsar, rellenar, señalar o enseñar en un "
+                         "tutorial. Los nombres los pone cada aplicación o web: son un dato.",
+        "parametros":    {"ventana": {"type": "string",
+                                      "description": "Parte del título de la ventana; vacío = "
+                                                     "la de delante."},
+                          "buscar":  {"type": "string",
+                                      "description": "Solo los que contengan este texto."}},
+        "requiere_pc_mcp": True,
+    },
+    "pc_pulsar": {
+        "confirmar":     False,
+        "fn":            _j_pc_pulsar,
+        "descripcion":   "Pulsa en el PC de Mikel un botón, pestaña, menú, casilla o enlace POR "
+                         "SU NOMBRE, en la ventana de delante o en `ventana`. Lo irreversible "
+                         "(enviar, comprar, pagar, borrar, publicar…) no lo pulsa nunca: para "
+                         "eso, pc_dibujar y que lo pulse él. Si no sabes cómo se llama, "
+                         "pc_elementos antes.",
+        "parametros":    {"elemento": {"type": "string", "description": "Su nombre, como sale en "
+                                                                         "pc_elementos."},
+                          "ventana":  {"type": "string", "description": "Parte del título; vacío "
+                                                                        "= la de delante."},
+                          "tipo":     {"type": "string", "description": "Para desempatar: botón, "
+                                                                        "pestaña, menú, casilla, "
+                                                                        "enlace, campo."}},
+        "obligatorios":  ["elemento"],
+        "requiere_pc_mcp": True,
+    },
+    "pc_rellenar": {
+        "confirmar":     False,
+        "fn":            _j_pc_rellenar,
+        "descripcion":   "Escribe un texto en un campo de una ventana del PC de Mikel, buscándolo "
+                         "por su nombre (sustituye lo que hubiera). No envía nada ni pulsa "
+                         "Intro, y nunca escribe en un campo de contraseña.",
+        "parametros":    {"campo":   {"type": "string", "description": "El nombre del campo."},
+                          "texto":   {"type": "string", "description": "Lo que hay que escribir."},
+                          "ventana": {"type": "string", "description": "Parte del título; vacío "
+                                                                       "= la de delante."}},
+        "obligatorios":  ["campo", "texto"],
+        "requiere_pc_mcp": True,
+    },
+    "pc_dibujar": {
+        "confirmar":     False,
+        "fn":            _j_pc_dibujar,
+        "descripcion":   "Dibuja ENCIMA de la pantalla del PC de Mikel, sin tocar nada: señala "
+                         "botones o campos por su nombre (un anillo que late, una caja o una "
+                         "flecha, con una etiqueta corta) y/o pone una tarjeta flotante con "
+                         "título, líneas, barras o una serie para una línea (cifras que ya "
+                         "tengas: su sueño, su dinero…). Úsalo para «¿dónde está…?», «señálame», "
+                         "«enséñame aquí», y para lo irreversible que no puedes pulsar tú. Se "
+                         "quita sola; sin marcas ni tarjeta, borra lo dibujado.",
+        "parametros":    {
+            "marcas":   {"type": "array", "maxItems": 8, "items": {
+                "type": "object",
+                "properties": {
+                    "objetivo": {"type": "string", "description": "El nombre del botón o campo."},
+                    "texto":    {"type": "string", "description": "La etiqueta, corta."},
+                    "forma":    {"type": "string", "enum": ["anillo", "caja", "flecha"]},
+                }}},
+            "tarjeta":  {"type": "object", "properties": {
+                "titulo": {"type": "string"},
+                "lineas": {"type": "array", "items": {"type": "string"}},
+                "barras": {"type": "array", "items": {"type": "object", "properties": {
+                    "etiqueta": {"type": "string"}, "valor": {"type": "number"}}}},
+                "serie":  {"type": "array", "items": {"type": "number"},
+                           "description": "Números en orden, para una línea."},
+            }},
+            "segundos": {"type": "integer", "description": "Cuánto se queda (3-120, por "
+                                                           "defecto 20)."},
+            "ventana":  {"type": "string", "description": "Dónde buscar los objetivos; vacío = "
+                                                          "la de delante."},
+        },
+        "requiere_pc_mcp": True,
+    },
+    "pc_tutorial": {
+        "confirmar":     False,
+        "fn":            _j_pc_tutorial,
+        "descripcion":   "Enseña a Mikel a hacer algo ÉL MISMO en su PC, paso a paso sobre su "
+                         "pantalla: en cada paso Jarvis rodea el botón, dice el paso con su voz "
+                         "y espera a que lo pulse; el reactor se pone al lado. Para «enséñame a…», "
+                         "«¿cómo se hace…?», «guíame». Mira antes con pc_elementos cómo se "
+                         "llaman los botones que se ven; los de un menú o diálogo que aún no "
+                         "está abierto, por su nombre más probable (los espera unos segundos). "
+                         "Empieza ya y no espera a que acabe: contesta con una frase corta. Esc "
+                         "lo corta.",
+        "parametros":    {
+            "titulo": {"type": "string", "description": "De qué va, corto."},
+            "pasos":  {"type": "array", "maxItems": 12, "items": {
+                "type": "object",
+                "properties": {
+                    "texto":    {"type": "string", "description": "Lo que se dice y se enseña, "
+                                                                  "una frase."},
+                    "objetivo": {"type": "string", "description": "El botón o campo de este "
+                                                                  "paso; vacío = solo explicar."},
+                    "tipo":     {"type": "string", "enum": ["clic", "mira"],
+                                 "description": "clic = espera a que lo pulse; mira = sigue al "
+                                               "decirlo."},
+                    "ventana":  {"type": "string", "description": "Si el botón está en otra "
+                                                                  "ventana."},
+                },
+                "required": ["texto"]}},
+        },
+        "obligatorios":  ["pasos"],
+        "requiere_pc_mcp": True,
+    },
     "tele": {
         "confirmar":     False,
         "fn":            _j_tele,
@@ -40951,6 +41120,7 @@ _HERRAMIENTAS_AJENAS = frozenset({
     "buscar_documentos", "leer_documento",                   # un PDF que te mandaron
     "buscar_en_internet", "leer_pagina",                     # la web
     "pc_pantalla",                                           # lo que haya abierto: un WhatsApp Web
+    "pc_elementos",                                          # los nombres de botones que pone una web
     "mcp_usar",                                              # un issue de un repositorio público
     "ver_proyectos",                                         # escrito tras leer repositorios ajenos
 })
@@ -40968,6 +41138,9 @@ _TRAS_AJENO_SE_PUEDE = frozenset({
     "turno_de_noche", "errores", "jobs", "contar_revision", "respuesta_notificacion",
     "mis_reglas", "mis_vigilancias", "mis_recordatorios", "mis_alarmas", "mis_patrones",
     "casa_dispositivos", "casa_leer", "pc_ventanas", "pc_pantalla",
+    # 2026-11-21: mirar los botones, y pintar encima o guiar: lo peor es una marca torcida
+    # que él ve. Pulsar y rellenar no: van por `_AJENO_SI_LO_PIDES`.
+    "pc_elementos", "pc_dibujar", "pc_tutorial",
     "musica_que_suena", "musica_mis_listas", "jellyfin_seguir", "jellyfin_novedades",
     "jellyfin_buscar", "cine_proponer", "pelis_buscar", "pelis_descargas", "pelis_versiones",
     "indexadores_estado", "whatsapp_chats", "whatsapp_leer", "whatsapp_programados", "llamadas_a_otros", "recados",
@@ -41035,6 +41208,14 @@ _AJENO_SI_LO_PIDES = {
                                          r"avisame si)\b"),
     "camaras_cuando":         re.compile(r"\b(cuando|si) (veas|ves|vea|aparezca|entre|llegue|"
                                          r"pase|detectes|detecte)\b"),
+    # 2026-11-21: las manos del PC. Tras leer los botones de una web, pulsar o escribir solo
+    # si lo dice él: rellenar es por donde saldría lo leído a un formulario ajeno.
+    "pc_pulsar":              re.compile(r"\b(pulsa|pulsalo|pulsala|pulsale|dale|clica|clicka|"
+                                         r"haz clic|haz click|pincha|pinchale|toca|tocale|marca|"
+                                         r"marcalo|marcala|desmarca|abre|abreme|entra)\b"),
+    "pc_rellenar":            re.compile(r"\b(rellena|rellenalo|rellenala|rellename|escribe|"
+                                         r"escribelo|escribeme|pon|ponle|ponme|teclea|mete|"
+                                         r"metele)\b"),
     # Tachar de su lista lo que él dice que ya hizo. Solo toca la lista, no ningún mensaje.
     "whatsapp_pendiente_hecho": re.compile(r"\b(hecho|hecha|hechos|hechas|ya (lo|la|los|las) "
                                            r"(hice|he hecho|tengo)|tacha\w*|quita\w*|borra\w*|"

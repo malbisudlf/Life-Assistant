@@ -217,3 +217,62 @@ class TestSinConfigurar:
         for n in ("pc_pantalla", "pc_ventanas", "pc_abrir", "pc_multimedia", "pc_bloquear",
                   "pc_decir"):
             assert main._JARVIS_HERRAMIENTAS[n]["confirmar"] is False
+
+
+class TestManosYLienzo:
+    """Las manos finas y el lienzo del PC (2026-11-21): pulsar y rellenar por nombre,
+    dibujar encima y guiar un tutorial. Los frenos de lo irreversible viven en el PC
+    (`tests/backend/test_manos.py`); aquí, lo que viaja y lo ajeno."""
+
+    def test_pulsar_viaja_recortado_a_su_herramienta(self, pc):
+        _mcp(pc, _texto("Pulsado «Guardar»"))
+        r = main._j_pc_pulsar("  Guardar  " + "x" * 200, ventana="Word", tipo="botón")
+        assert r == {"ok": True, "resultado": "Pulsado «Guardar»"}
+        call, = [c[2]["json"] for c in pc.calls if c[2]["json"].get("method") == "tools/call"]
+        assert call["params"]["name"] == "pulsar"
+        assert len(call["params"]["arguments"]["elemento"]) == 80
+        assert call["params"]["arguments"]["ventana"] == "Word"
+
+    def test_sin_nombre_no_se_llama_al_pc(self, pc):
+        assert main._j_pc_pulsar("")["ok"] is False
+        assert main._j_pc_rellenar("", "hola")["ok"] is False
+        assert main._j_pc_tutorial("x", [])["ok"] is False
+        assert not pc.calls
+
+    def test_dibujar_tira_lo_que_no_es_una_marca(self, pc):
+        _mcp(pc, _texto('{"ok": true}'))
+        main._j_pc_dibujar(marcas=[{"objetivo": "Guardar"}, "basura"] + [{"x": 0.1, "y": 0.1}] * 20,
+                           tarjeta="no", segundos=999)
+        call, = [c[2]["json"] for c in pc.calls if c[2]["json"].get("method") == "tools/call"]
+        args = call["params"]["arguments"]
+        assert len(args["marcas"]) == 7 and all(isinstance(m, dict) for m in args["marcas"])
+        assert args["tarjeta"] is None and args["segundos"] == 120
+
+    def test_los_nombres_de_los_botones_son_ajenos(self, pc):
+        _mcp(pc, _texto('{"elementos": []}'))
+        r = main._j_pc_elementos()
+        assert r["aviso"] == main._AVISO_PANTALLA
+        assert "pc_elementos" in main._HERRAMIENTAS_AJENAS
+
+    def test_tras_leerlos_se_puede_pintar_pero_no_pulsar_si_no_lo_pide(self):
+        leido = {"pc_elementos"}
+        for n in ("pc_elementos", "pc_dibujar", "pc_tutorial"):
+            assert main._ajeno_bloquea(n, leido) is None
+        for n in ("pc_pulsar", "pc_rellenar"):
+            assert main._ajeno_bloquea(n, leido) is not None
+
+    def test_si_lo_pide_el_si_se_pulsa(self):
+        leido = {"pc_elementos"}
+        pedidas = main._ajeno_pedidas("Pulsa guardar en el Word")
+        assert main._ajeno_bloquea("pc_pulsar", leido, pedidas=pedidas) is None
+        pedidas = main._ajeno_pedidas("Rellena el nombre con Tony Stark")
+        assert main._ajeno_bloquea("pc_rellenar", leido, pedidas=pedidas) is None
+        assert "pc_pulsar" not in main._ajeno_pedidas("¿qué botones hay?")
+
+    def test_se_anuncian_sin_confirmar_y_no_por_telefono(self, pc):
+        nombres = {h["function"]["name"] for h in main._jarvis_esquema()}
+        nuevas = {"pc_elementos", "pc_pulsar", "pc_rellenar", "pc_dibujar", "pc_tutorial"}
+        assert nuevas <= nombres
+        assert all(main._JARVIS_HERRAMIENTAS[n]["confirmar"] is False for n in nuevas)
+        # El teléfono no tiene pantalla delante: ni las ve.
+        assert not nuevas & main._MCP_SERVIDOR_HERRAMIENTAS

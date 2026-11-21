@@ -335,11 +335,21 @@ class App:
         self.manual = False            # escuchando por un clic, no por la tecla
         self.fase = 0.0
         self.pensando_desde = 0.0
+        self.dir = DIR
+        self._vuelo = None             # a dónde vuela el reactor durante un tutorial
+        self._casa = None              # de dónde salió, para volver
 
+        # Píxeles físicos en todas las pantallas (per-monitor v2): el lienzo dibuja sobre los
+        # rectángulos que da UI Automation, que son físicos, y el PC de Mikel tiene una
+        # pantalla al 100 % y otra al 125 %. Con «system aware» las marcas caían desplazadas
+        # en la segunda.
         try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+            ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
         except Exception:   # noqa: BLE001
-            pass
+            try:
+                ctypes.windll.shcore.SetProcessDpiAwareness(2)
+            except Exception:   # noqa: BLE001
+                pass
         self.root = tk.Tk()
         self.escala = max(1.0, self.root.winfo_fpixels("1i") / 96)
         self.lado = int(LADO * self.escala)
@@ -378,6 +388,14 @@ class App:
         self._ocultar_en = 0.0
 
         self.voz = Voz(self)
+        # El lienzo (dibujar sobre la pantalla y los tutoriales). Si falla, el reactor sigue
+        # siendo el de siempre: es un añadido, no una dependencia.
+        try:
+            from lienzo import Lienzo
+            self.lienzo = Lienzo(self, CLAVE)
+        except Exception as e:   # noqa: BLE001
+            log.warning("lienzo: no arranca (%s)", type(e).__name__)
+            self.lienzo = None
         self.root.after(30, self._latido)
         self.root.after(33, self._dibujar)
         if not self.base:
@@ -420,8 +438,49 @@ class App:
         if self._ocultar_en and time.time() > self._ocultar_en and self.estado == "reposo":
             self.bocadillo.withdraw()
             self._ocultar_en = 0.0
-        self._ver(debe_verse(self.estado, self.bocadillo.winfo_viewable() == 1, self.siempre or bool(self._arrastre)))
+        guiando = False
+        if self.lienzo is not None:
+            try:
+                self.lienzo.latido()
+                guiando = self.lienzo.guiando
+            except Exception as e:   # noqa: BLE001 — un fallo del lienzo no tumba el reactor
+                log.warning("lienzo: %s", type(e).__name__)
+        self._volando()
+        self._ver(debe_verse(self.estado, self.bocadillo.winfo_viewable() == 1,
+                             self.siempre or bool(self._arrastre) or guiando or bool(self._vuelo)))
         self.root.after(30, self._latido)
+
+    # ── el vuelo (durante un tutorial, el reactor se pone junto al paso) ──
+    def volar(self, destino) -> None:
+        """`destino` (x, y) de la esquina del reactor, o None para volver a su sitio."""
+        if destino is None:
+            if self._casa is not None:
+                self._vuelo, self._casa = self._casa, None
+            return
+        if self._casa is None and not self._vuelo:
+            self._casa = (self.root.winfo_x(), self.root.winfo_y())
+        m = ctypes.windll.user32.GetSystemMetrics
+        izq, arr, ancho, alto = m(76), m(77), m(78), m(79)
+        x = max(izq, min(int(destino[0]), izq + ancho - self.lado))
+        y = max(arr, min(int(destino[1]), arr + alto - self.lado))
+        self._vuelo = (x, y)
+
+    def _volando(self) -> None:
+        if not self._vuelo:
+            return
+        x, y = self.root.winfo_x(), self.root.winfo_y()
+        dx, dy = self._vuelo[0] - x, self._vuelo[1] - y
+        if abs(dx) + abs(dy) < 3:
+            self.root.geometry(f"+{self._vuelo[0]}+{self._vuelo[1]}")
+            self._vuelo = None
+            return
+        paso_x = int(dx * 0.25) or (dx > 0) - (dx < 0)
+        paso_y = int(dy * 0.25) or (dy > 0) - (dy < 0)
+        self.root.geometry(f"+{x + paso_x}+{y + paso_y}")
+
+    def mostrar_aviso(self, texto: str) -> None:
+        self._mostrar("", texto)
+        self._ocultar_en = time.time() + 5
 
     def _ver(self, si: bool) -> None:
         """Enseña u oculta el reactor. Oculto no se dibuja: no gasta nada."""
@@ -702,6 +761,8 @@ class App:
         guardar_config(self.config)
 
     def salir(self) -> None:
+        if self.lienzo is not None:
+            self.lienzo.cerrar()
         self.micro.cerrar()
         self.voz.callar()
         self.root.destroy()

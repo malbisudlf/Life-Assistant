@@ -343,7 +343,7 @@ servicio ni el SSH, que entra en la sesión 0, lo tienen).
 | Nivel (`PC_MCP_NIVEL`) | Herramientas |
 |---|---|
 | `mirar` | `pantalla` (captura JPEG, 1568 px de lado), `ventanas`, `estado` (si hay alguien delante: segundos sin tocar teclado ni ratón; CPU, memoria, la ventana activa) |
-| `usar` (por defecto) | además `abrir` (una app del menú Inicio por su nombre, una web `http(s)` o una carpeta: «descargas»), `enfocar`, `multimedia` (pausa, siguiente, volumen), `bloquear` y `decir` (habla por los altavoces con la voz de Windows) |
+| `usar` (por defecto) | además `abrir` (una app del menú Inicio por su nombre, una web `http(s)` o una carpeta: «descargas»), `enfocar`, `multimedia` (pausa, siguiente, volumen), `bloquear` y `decir` (habla por los altavoces con la voz de Windows). Desde el 2026-11-21, `pulsar` y `rellenar` por nombre (UI Automation, sin lo irreversible ni contraseñas), `dibujar` y `tutorial` (los pinta el reactor): ver «Las manos y el lienzo» en `docs/ESCRITORIO.md`. `elementos` es de `mirar` |
 | `total` | además `escribir`, `teclas` («ctrl+s»), `clic` y `cerrar_ventana` |
 
 Lo que el nivel no permite **no se registra**: el modelo ni lo ve, como el catálogo del MCP
