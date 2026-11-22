@@ -2328,7 +2328,9 @@ Aplicarlo (con su visto bueno): `mkdir ~/telefono-grabaciones`; imagen `antes-p5
 
 ## El parche 53: la llamada a tres
 
-**Escrito el 2026-11-21, sin aplicar.** «Jarvis, ponme con Erik» en una llamada con Jarvis:
+**Escrito el 2026-11-21 y aplicado el 2026-11-22** (imagen `claude-phone-voice-app:antes-p53` y
+copias `*.bak-p53` para volver atrás; registrada en el 3CX; RUNBOOK copiado, con su `.bak-p53`;
+foto exportada). Falta una llamada de verdad con alguien al otro lado. «Jarvis, ponme con Erik» en una llamada con Jarvis:
 marca a Erik por O2 y los mete a los dos en una conferencia con Jarvis dentro, callado hasta
 que Mikel le nombra. El porqué, las reglas y lo probado, en «La llamada a tres» de
 `docs/LLAMADAS_TERCEROS.md`.

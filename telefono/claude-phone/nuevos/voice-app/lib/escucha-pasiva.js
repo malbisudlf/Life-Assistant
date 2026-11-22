@@ -150,6 +150,8 @@ class EscuchaPasiva {
     const memoria = parseInt(process.env.ESCUCHA_PASIVA_MEMORIA_S, 10);
     this.memoriaMs = (Number.isFinite(memoria) && memoria >= 0 ? memoria : 90) * 1000;
     this._reciente = [];
+    // Parche 53: en la llamada a tres, cada frase de Mikel va también al resumen (lib/a-tres.js).
+    this.oyente = null;
   }
 
   /** Parche 47: guarda lo oído (dormido, sin nombrarle) durante `memoriaMs`. */
@@ -326,6 +328,8 @@ class EscuchaPasiva {
             if (!nombrada) { await dormirMs(1000); continue; }
           }
         }
+        // Parche 53: la llamada a tres apunta lo que dice Mikel (en memoria, para el resumen).
+        if (this.oyente && texto) { try { this.oyente(texto); } catch (e) { /* apuntar no corta la escucha */ } }
         // Lo que se habla sin nombrarle no se registra: ni el texto, solo que no era.
         // Si el tono ya sonó y el texto final no trae el nombre, mejor preguntar que callar.
         if (!hallada && nombrada) hallada = { resto: '' };

@@ -42,6 +42,8 @@ class MusicaPasiva {
   async sonar() {
     const r = ruta();
     if (!r) return false;
+    // Parche 53: en la llamada a tres la música la oiría también el otro.
+    if (this.endpoint && this.endpoint.enConferencia) return false;
     if (this.sonando) return true;
     try {
       const res = await this.endpoint.api('uuid_displace', this.endpoint.uuid + ' start ' + r + ' 0 mux');

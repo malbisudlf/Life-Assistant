@@ -415,7 +415,7 @@ index b2f02ad..6e9dea7 100644
      '# Claude API Server',
      `CLAUDE_API_URL=${claudeApiUrl}`,
 diff --git a/voice-app/index.js b/voice-app/index.js
-index 5e58907..0ab50fb 100644
+index 5e58907..6ef1dcd 100644
 --- a/voice-app/index.js
 +++ b/voice-app/index.js
 @@ -31,6 +31,9 @@ var connectWithRetry = connectionRetry.connectWithRetry;
@@ -447,17 +447,24 @@ index 5e58907..0ab50fb 100644
    // Start Multi-Registration for all devices
    if (!registrar) {
      registrar = new MultiRegistrar(srf, {
-@@ -204,7 +219,8 @@ function initializeServers() {
+@@ -204,7 +219,15 @@ function initializeServers() {
      whisperClient: whisperClient,
      claudeBridge: claudeBridge,
      ttsService: ttsService,
 -    wsPort: config.ws_port
 +    wsPort: config.ws_port,
 +    lineaO2: lineaO2
++  });
++
++  // Parche 53: la llamada a tres marca desde dentro de una conversación.
++  require("./lib/a-tres").configurar({
++    srf: function () { return srf; },
++    mediaServer: function () { return mediaServer; },
++    lineaO2: function () { return lineaO2; }
    });
  
    httpServer.app.use("/api", outboundRouter);
-@@ -218,6 +234,40 @@ function initializeServers() {
+@@ -218,6 +241,40 @@ function initializeServers() {
    httpServer.app.use("/api", queryRouter);
    console.log("[" + new Date().toISOString() + "] QUERY API enabled (/api/query, /api/devices)");
  
@@ -498,7 +505,7 @@ index 5e58907..0ab50fb 100644
    // Finalize HTTP server
    httpServer.finalize();
  
-@@ -238,6 +288,14 @@ function checkReadyState() {
+@@ -238,6 +295,14 @@ function checkReadyState() {
  
      // Register SIP INVITE handler
      srf.invite(function(req, res) {
@@ -906,10 +913,10 @@ index 23326b5..be96efc 100644
    isAvailable
  };
 diff --git a/voice-app/lib/conversation-loop.js b/voice-app/lib/conversation-loop.js
-index ec1c60c..510f434 100644
+index ec1c60c..43f7003 100644
 --- a/voice-app/lib/conversation-loop.js
 +++ b/voice-app/lib/conversation-loop.js
-@@ -13,29 +13,36 @@
+@@ -13,29 +13,38 @@
   */
  
  const logger = require('./logger');
@@ -929,6 +936,8 @@ index ec1c60c..510f434 100644
 +const cronometro = require('./cronometro');
 +// Parche 47: «Jarvis, apunta eso» lo cumple la llamada con lo que acaba de oír.
 +const apunte = require('./apunte');
++// Parche 53: «Jarvis, ponme con Erik»: la llamada a tres.
++const aTres = require('./a-tres');
  
  // Audio cue URLs
 -const READY_BEEP_URL = 'http://127.0.0.1:3000/static/ready-beep.wav';
@@ -964,7 +973,7 @@ index ec1c60c..510f434 100644
  ];
  
  function getRandomThinkingPhrase() {
-@@ -44,7 +51,7 @@ function getRandomThinkingPhrase() {
+@@ -44,7 +53,7 @@ function getRandomThinkingPhrase() {
  
  function isGoodbye(transcript) {
    const lower = transcript.toLowerCase().trim();
@@ -973,7 +982,7 @@ index ec1c60c..510f434 100644
    return goodbyePhrases.some(phrase => {
      return lower === phrase || lower.includes(` ${phrase}`) ||
             lower.startsWith(`${phrase} `) || lower.endsWith(` ${phrase}`);
-@@ -122,7 +129,11 @@ function extractVoiceLine(response) {
+@@ -122,7 +131,11 @@ function extractVoiceLine(response) {
   * @param {string} [options.initialContext] - Context for outbound calls (why we're calling)
   * @param {boolean} [options.skipGreeting=false] - Skip greeting (for outbound, greeting already played)
   * @param {number} [options.maxTurns=20] - Maximum conversation turns
@@ -986,7 +995,7 @@ index ec1c60c..510f434 100644
   */
  async function runConversationLoop(endpoint, dialog, callUuid, options) {
    const {
-@@ -134,8 +145,13 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -134,8 +147,13 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
      initialContext = null,
      skipGreeting = false,
      deviceConfig = null,
@@ -1001,7 +1010,26 @@ index ec1c60c..510f434 100644
  
    // Extract devicePrompt and voiceId from deviceConfig (for Cephanie etc)
    const devicePrompt = deviceConfig?.prompt || null;
-@@ -164,7 +180,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -144,10 +162,18 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+   let forkRunning = false;
+   let callActive = true;
+   let dtmfHandler = null;
++  // Parche 53: lo que suena pasa por aquí; en la llamada a tres, suena para los dos.
++  const endpointReal = endpoint;
++  endpoint = aTres.envolver(endpoint, (m) => logger.info(m, { callUuid }));
++  let tres = null;
+ 
+   // Track when call ends to prevent operations on dead endpoints
++  // Parche 53: para no quedarse esperando a la llamada a tres si cuelga Mikel.
++  let alColgar = () => {};
++  const colgado = new Promise((r) => { alColgar = r; });
+   const onDialogDestroy = () => {
+     callActive = false;
++    alColgar();
+     logger.info('Call ended (dialog destroyed)', { callUuid });
+   };
+ 
+@@ -164,7 +190,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
      // Play greeting (skip for outbound where initial message already played)
      if (!skipGreeting && callActive) {
        const greetingUrl = await ttsService.generateSpeech(
@@ -1010,7 +1038,7 @@ index ec1c60c..510f434 100644
          voiceId
        );
        await endpoint.play(greetingUrl);
-@@ -178,12 +194,16 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -178,12 +204,16 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
          `[SYSTEM CONTEXT - DO NOT REPEAT]: You just called the user to tell them: "${initialContext}". They have answered. Now listen to their response and help them.`,
          { callId: callUuid, devicePrompt: devicePrompt, isSystemPrime: true }
        ).catch(err => logger.warn('Prime query failed', { callUuid, error: err.message }));
@@ -1028,7 +1056,7 @@ index ec1c60c..510f434 100644
      }
  
      // Start audio fork for entire call
-@@ -195,7 +215,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -195,7 +225,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
        sessionPromise = audioForkServer.expectSession(callUuid, { timeoutMs: 10000 });
      } catch (err) {
        logger.warn('Failed to set up session expectation', { callUuid, error: err.message });
@@ -1037,7 +1065,7 @@ index ec1c60c..510f434 100644
      }
  
      await endpoint.forkAudioStart({
-@@ -212,7 +232,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -212,7 +242,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
        logger.warn('Audio fork session failed', { callUuid, error: err.message });
        // Cancel the pending expectation if still there
        audioForkServer.cancelExpectation && audioForkServer.cancelExpectation(callUuid);
@@ -1046,7 +1074,7 @@ index ec1c60c..510f434 100644
      }
  
      // Set up DTMF handler for # key
-@@ -245,6 +265,24 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -245,6 +275,24 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
  
      // Main conversation loop
      let turnCount = 0;
@@ -1071,7 +1099,7 @@ index ec1c60c..510f434 100644
  
      while (turnCount < maxTurns && callActive) {
        turnCount++;
-@@ -256,82 +294,217 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -256,82 +304,232 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
          break;
        }
  
@@ -1083,6 +1111,15 @@ index ec1c60c..510f434 100644
 -      } catch (e) {
 -        if (!callActive) break;
 -        logger.warn('Ready beep failed', { callUuid, error: e.message });
++      // Parche 53: en la llamada a tres solo despierta su nombre, cada vez; con Jarvis
++      // fuera («déjanos solos»), se espera a que cuelgue uno de los dos.
++      if (tres && !tres.activa) tres = null;
++      if (tres && tres.privado) {
++        await Promise.race([tres.esperarFin(), colgado]);
++        continue;
++      }
++      if (tres && !pendienteConfirmar) pasiva.dormir();
++
 +      // Parche 22: dormido, el turno no empieza hasta que alguien le nombra.
 +      let transcript = null;
 +      let llamado = false;
@@ -1249,8 +1286,7 @@ index ec1c60c..510f434 100644
 +          if (!pendienteConfirmar) pasiva.dormir();
 +          continue;
 +        }
- 
--      logger.info('Transcribed', { callUuid, transcript });
++
 +        // Handle empty transcription
 +        if (!transcript || transcript.trim().length < 2) {
 +          const clarifyUrl = await ttsService.generateSpeech(
@@ -1260,6 +1296,13 @@ index ec1c60c..510f434 100644
 +          if (callActive) await endpoint.play(clarifyUrl);
 +          continue;
 +        }
++      }
+ 
+-      logger.info('Transcribed', { callUuid, transcript });
++      // Parche 53: «cuelga», «déjanos solos»… en la llamada a tres, antes que nada.
++      if (tres && tres.activa) {
++        if (!llamado) tres.anotar('mikel', transcript);
++        if (!pendienteConfirmar && await tres.orden(transcript)) continue;
 +      }
  
 -      // Handle empty transcription
@@ -1346,7 +1389,7 @@ index ec1c60c..510f434 100644
        // ============================================
        // THINKING FEEDBACK
        // ============================================
-@@ -339,36 +512,25 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -339,36 +537,25 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
        // Check if call still active before thinking feedback
        if (!callActive) break;
  
@@ -1385,7 +1428,7 @@ index ec1c60c..510f434 100644
 +      crono.marca('consulta');
 +      const claudeResponse = await pensar({
 +        consultar: () => claudeBridge.query(
-+          (llamado ? AVISO_PASIVA : '') +
++          (tres && tres.activa ? tres.aviso() : (llamado ? AVISO_PASIVA : '')) +
 +          (avisoLectura || (fueInterrupcion ? AVISO_INTERRUPCION : '')) + transcript,
 +          { callId: callUuid, devicePrompt: devicePrompt }
 +        ),
@@ -1401,7 +1444,7 @@ index ec1c60c..510f434 100644
  
        // Check if call ended during Claude processing
        if (!callActive) {
-@@ -376,14 +538,41 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -376,14 +563,50 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
          break;
        }
  
@@ -1412,6 +1455,7 @@ index ec1c60c..510f434 100644
        // 5. Extract and play voice line
        const voiceLine = extractVoiceLine(claudeResponse);
        logger.info('Voice line', { callUuid, voiceLine });
++      if (tres && tres.activa) tres.anotar('jarvis', voiceLine);
  
        const responseUrl = await ttsService.generateSpeech(voiceLine, voiceId);
 -      if (callActive) await endpoint.play(responseUrl);
@@ -1441,10 +1485,18 @@ index ec1c60c..510f434 100644
 +        pendienteConfirmar = pc.pendiente;
 +        interrumpio = pc.interrumpio;
 +      }
++      // Parche 53: «📞 A TRES: Erik» → marca y, si descuelga, los mete en conferencia.
++      if (callActive && !interrumpio && !tres) {
++        tres = await aTres.empezarSiLoPide(claudeResponse, transcript, {
++          salida: endpoint, endpoint: endpointReal, callUuid, ttsService, voiceId, whisperClient,
++          audioForkServer, wsPort, pasiva, log: (m) => logger.info(m, { callUuid }),
++          sigueActiva: () => callActive
++        });
++      }
  
        logger.info('Turn complete', { callUuid, turn: turnCount });
      }
-@@ -391,15 +580,17 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -391,15 +614,17 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
      // Max turns reached
      if (turnCount >= maxTurns && callActive) {
        const maxUrl = await ttsService.generateSpeech(
@@ -1464,7 +1516,7 @@ index ec1c60c..510f434 100644
      logger.error('Conversation loop error', {
        callUuid,
        error: error.message,
-@@ -409,7 +600,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -409,7 +634,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
      try {
        if (session) session.setCaptureEnabled(false);
        if (callActive) {
@@ -1473,7 +1525,19 @@ index ec1c60c..510f434 100644
          await endpoint.play(errUrl);
        }
      } catch (e) {
-@@ -447,6 +638,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+@@ -418,6 +643,11 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
+   } finally {
+     logger.info('Conversation loop cleanup', { callUuid });
+ 
++    // Parche 53: si había llamada a tres, se cuelga al otro y se suelta la línea.
++    if (tres) {
++      try { await tres.terminar(); } catch (e) { /* la limpieza no puede fallar */ }
++    }
++
+     // Remove dialog listener
+     dialog.off('destroy', onDialogDestroy);
+ 
+@@ -447,6 +677,7 @@ async function runConversationLoop(endpoint, dialog, callUuid, options) {
        }
      }
    }
@@ -2343,10 +2407,10 @@ index 7447c27..f568659 100644
  
      // Include conversation stats for conversation mode
 diff --git a/voice-app/lib/sip-handler.js b/voice-app/lib/sip-handler.js
-index 3fd7e7b..5f8d6d8 100644
+index 3fd7e7b..a271e7c 100644
 --- a/voice-app/lib/sip-handler.js
 +++ b/voice-app/lib/sip-handler.js
-@@ -4,32 +4,39 @@
+@@ -4,32 +4,41 @@
   */
  
  const { setTimeout: sleep } = require('node:timers/promises');
@@ -2366,6 +2430,8 @@ index 3fd7e7b..5f8d6d8 100644
 +const cronometro = require('./cronometro');
 +// Parche 47: «Jarvis, apunta eso» lo cumple la llamada con lo que acaba de oír.
 +const apunte = require('./apunte');
++// Parche 53: «Jarvis, ponme con Erik»: la llamada a tres.
++const aTres = require('./a-tres');
  
  // Audio cue URLs
 -const READY_BEEP_URL = 'http://127.0.0.1:3000/static/ready-beep.wav';
@@ -2404,7 +2470,7 @@ index 3fd7e7b..5f8d6d8 100644
  ];
  
  function getRandomThinkingPhrase() {
-@@ -59,7 +66,7 @@ function extractDialedExtension(req) {
+@@ -59,7 +68,7 @@ function extractDialedExtension(req) {
  
  function isGoodbye(transcript) {
    const lower = transcript.toLowerCase().trim();
@@ -2413,7 +2479,16 @@ index 3fd7e7b..5f8d6d8 100644
    return goodbyePhrases.some(function(phrase) {
      return lower === phrase || lower.includes(' ' + phrase) ||
             lower.startsWith(phrase + ' ') || lower.endsWith(' ' + phrase);
-@@ -118,13 +125,20 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
+@@ -113,18 +122,29 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
+ 
+   let session = null;
+   let forkRunning = false;
++  // Parche 53: lo que suena pasa por aquí; en la llamada a tres, suena para los dos.
++  const endpointReal = endpoint;
++  endpoint = aTres.envolver(endpoint, function (m) { console.log('[' + new Date().toISOString() + '] ' + m); });
++  let tres = null;
+ 
+   // Get device-specific settings
    const deviceName = deviceConfig ? deviceConfig.name : 'Morpheus';
    const devicePrompt = deviceConfig ? deviceConfig.prompt : null;
    const voiceId = (deviceConfig && deviceConfig.voiceId) ? deviceConfig.voiceId : DEFAULT_VOICE_ID;
@@ -2437,7 +2512,7 @@ index 3fd7e7b..5f8d6d8 100644
      // Play device-specific greeting with device voice
      const greetingUrl = await ttsService.generateSpeech(greeting, voiceId);
      await endpoint.play(greetingUrl);
-@@ -146,105 +160,255 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
+@@ -146,105 +166,282 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
      // Main conversation loop
      let turnCount = 0;
      const MAX_TURNS = 20;
@@ -2458,7 +2533,10 @@ index 3fd7e7b..5f8d6d8 100644
 +    const musica = new MusicaPasiva(endpoint, logTurno);
 +    armarAnticipo(session, whisperClient, { activo: function (pausa) { return pasiva.anticipar(pausa, whisperClient); } });
 +    let viva = true;
-+    dialog.on('destroy', function () { viva = false; });
++    // Parche 53: para no quedarse esperando a la llamada a tres si cuelga Mikel.
++    let alColgar = function () {};
++    const colgado = new Promise(function (r) { alColgar = r; });
++    dialog.on('destroy', function () { viva = false; alColgar(); });
 +
 +    while (turnCount < MAX_TURNS && viva) {
        turnCount++;
@@ -2469,6 +2547,25 @@ index 3fd7e7b..5f8d6d8 100644
 -        await endpoint.play(READY_BEEP_URL);
 -      } catch (e) {
 -        console.log('[' + new Date().toISOString() + '] BEEP: Ready beep failed, continuing');
++      // Parche 53: en la llamada a tres solo despierta su nombre, cada vez; con Jarvis
++      // fuera («déjanos solos»), se espera a que cuelgue uno de los dos.
++      if (tres && !tres.activa) tres = null;
++      if (tres && tres.privado) {
++        await Promise.race([tres.esperarFin(), colgado]);
++        continue;
+       }
+-
+-      session.setCaptureEnabled(true);
+-      console.log('[' + new Date().toISOString() + '] LISTEN Waiting for speech...');
+-
+-      let utterance = null;
+-      try {
+-        utterance = await session.waitForUtterance({ timeoutMs: 30000 });
+-        console.log('[' + new Date().toISOString() + '] LISTEN Got: ' + utterance.audio.length + ' bytes');
+-      } catch (err) {
+-        console.log('[' + new Date().toISOString() + '] LISTEN Timeout: ' + err.message);
++      if (tres && !pendienteConfirmar) pasiva.dormir();
++
 +      // Parche 22: dormido, el turno no empieza hasta que alguien le nombra.
 +      let transcript = null;
 +      let llamado = false;
@@ -2503,15 +2600,12 @@ index 3fd7e7b..5f8d6d8 100644
 +        }
        }
  
--      session.setCaptureEnabled(true);
--      console.log('[' + new Date().toISOString() + '] LISTEN Waiting for speech...');
+-      session.setCaptureEnabled(false);
 -
--      let utterance = null;
--      try {
--        utterance = await session.waitForUtterance({ timeoutMs: 30000 });
--        console.log('[' + new Date().toISOString() + '] LISTEN Got: ' + utterance.audio.length + ' bytes');
--      } catch (err) {
--        console.log('[' + new Date().toISOString() + '] LISTEN Timeout: ' + err.message);
+-      if (!utterance) {
+-        const promptUrl = await ttsService.generateSpeech("I didn't hear anything. Are you still there?", voiceId);
+-        await endpoint.play(promptUrl);
+-        continue;
 +      if (transcript === null) {
 +        // READY BEEP
 +        if (!interrumpio) {
@@ -2582,11 +2676,28 @@ index 3fd7e7b..5f8d6d8 100644
 +        }
        }
  
--      session.setCaptureEnabled(false);
+-      // GOT-IT BEEP
+-      try {
+-        await endpoint.play(GOTIT_BEEP_URL);
+-      } catch (e) {
+-        console.log('[' + new Date().toISOString() + '] BEEP: Got-it beep failed, continuing');
++      // Parche 53: «cuelga», «déjanos solos»… en la llamada a tres, antes que nada.
++      if (tres && tres.activa) {
++        if (!llamado) tres.anotar('mikel', transcript);
++        if (!pendienteConfirmar && await tres.orden(transcript)) continue;
+       }
+ 
+-      // Transcribe
+-      const transcript = await whisperClient.transcribe(utterance.audio, {
+-        format: 'pcm',
+-        sampleRate: 16000
+-      });
 -
--      if (!utterance) {
--        const promptUrl = await ttsService.generateSpeech("I didn't hear anything. Are you still there?", voiceId);
--        await endpoint.play(promptUrl);
+-      console.log('[' + new Date().toISOString() + '] WHISPER: "' + transcript + '"');
+-
+-      if (!transcript || transcript.trim().length < 2) {
+-        const clarifyUrl = await ttsService.generateSpeech("Sorry, I didn't catch that. Could you repeat?", voiceId);
+-        await endpoint.play(clarifyUrl);
 +      // Parche 22: «modo coche», «modo normal», «gracias» (dormido otra vez)…
 +      // Parche 35: contestando a «¿lo hago?», «vale» es un sí, no «vuelve a dormirte».
 +      const ordenPasiva = (pendienteConfirmar && siONo(transcript, pendienteConfirmar.pregunta)) ? null : pasiva.orden(transcript);
@@ -2595,22 +2706,18 @@ index 3fd7e7b..5f8d6d8 100644
          continue;
        }
  
--      // GOT-IT BEEP
--      try {
--        await endpoint.play(GOTIT_BEEP_URL);
--      } catch (e) {
--        console.log('[' + new Date().toISOString() + '] BEEP: Got-it beep failed, continuing');
-+      if (isGoodbye(transcript)) {
+       if (isGoodbye(transcript)) {
+-        const byeUrl = await ttsService.generateSpeech("Goodbye! Call again anytime.", voiceId);
 +        const byeUrl = await ttsService.generateSpeech("Hasta luego. Llámame cuando quieras.", voiceId);
-+        await endpoint.play(byeUrl);
-+        break;
+         await endpoint.play(byeUrl);
+         break;
        }
  
--      // Transcribe
--      const transcript = await whisperClient.transcribe(utterance.audio, {
--        format: 'pcm',
--        sampleRate: 16000
--      });
+-      // THINKING FEEDBACK
+-      const thinkingPhrase = getRandomThinkingPhrase();
+-      console.log('[' + new Date().toISOString() + '] THINKING: "' + thinkingPhrase + '"');
+-      const thinkingUrl = await ttsService.generateSpeech(thinkingPhrase, voiceId);
+-      await endpoint.play(thinkingUrl);
 +      // Parche 20: lo que contestas a «¿lo hago?» lo decide la voice-app, no Claude.
 +      if (pendienteConfirmar) {
 +        const pendiente = pendienteConfirmar;
@@ -2628,21 +2735,28 @@ index 3fd7e7b..5f8d6d8 100644
 +        avisoLectura = rc.aviso + avisoLectura;
 +      }
  
--      console.log('[' + new Date().toISOString() + '] WHISPER: "' + transcript + '"');
+-      // Hold music in background
+-      let musicPlaying = false;
+-      endpoint.play(HOLD_MUSIC_URL).catch(function(e) {
+-        console.log('[' + new Date().toISOString() + '] MUSIC: Hold music failed, continuing');
 +      // Parche 24: «sigue», «siguiente», «ve a la de economía»… los cumple la llamada.
 +      const ordenLectura = await control.atender(transcript, {
 +        endpoint: endpoint, session: session, ttsService: ttsService, voiceId: voiceId,
 +        log: logTurno, sigueActiva: function () { return viva; }
-+      });
+       });
+-      musicPlaying = true;
 +      if (ordenLectura) {
 +        interrumpio = ordenLectura.interrumpio;
 +        avisoLectura = ordenLectura.aviso;
 +        continue;
 +      }
  
--      if (!transcript || transcript.trim().length < 2) {
--        const clarifyUrl = await ttsService.generateSpeech("Sorry, I didn't catch that. Could you repeat?", voiceId);
--        await endpoint.play(clarifyUrl);
+-      // Query Claude with device-specific prompt
+-      console.log('[' + new Date().toISOString() + '] CLAUDE Querying (device: ' + deviceName + ')...');
+-      const claudeResponse = await claudeBridge.query(
+-        transcript,
+-        { callId: callUuid, devicePrompt: devicePrompt }
+-      );
 +      // Parche 47: «apunta eso»: lo oído en el último minuto y medio, al backend.
 +      if (await apunte.atender(transcript, {
 +        pasiva: pasiva, endpoint: endpoint, ttsService: ttsService, voiceId: voiceId,
@@ -2650,13 +2764,14 @@ index 3fd7e7b..5f8d6d8 100644
 +      })) {
 +        crono.cerrar('reflejo', logTurno);
 +        pasiva.dormir();
-         continue;
-       }
++        continue;
++      }
  
--      if (isGoodbye(transcript)) {
--        const byeUrl = await ttsService.generateSpeech("Goodbye! Call again anytime.", voiceId);
--        await endpoint.play(byeUrl);
--        break;
+-      // Stop hold music
+-      if (musicPlaying) {
+-        try {
+-          await endpoint.api('uuid_break', endpoint.uuid);
+-        } catch (e) {}
 +      // Parche 34: la tele y lo que no hace falta pensar, sin pasar por Claude.
 +      const reflejo = await reflejos.atender(transcript, {
 +        endpoint: endpoint, session: session, ttsService: ttsService, voiceId: voiceId,
@@ -2669,38 +2784,15 @@ index 3fd7e7b..5f8d6d8 100644
 +        continue;
        }
  
--      // THINKING FEEDBACK
 +      // THINKING FEEDBACK + Claude, a la vez (parche 15)
-       const thinkingPhrase = getRandomThinkingPhrase();
-       console.log('[' + new Date().toISOString() + '] THINKING: "' + thinkingPhrase + '"');
--      const thinkingUrl = await ttsService.generateSpeech(thinkingPhrase, voiceId);
--      await endpoint.play(thinkingUrl);
--
--      // Hold music in background
--      let musicPlaying = false;
--      endpoint.play(HOLD_MUSIC_URL).catch(function(e) {
--        console.log('[' + new Date().toISOString() + '] MUSIC: Hold music failed, continuing');
--      });
--      musicPlaying = true;
--
--      // Query Claude with device-specific prompt
-       console.log('[' + new Date().toISOString() + '] CLAUDE Querying (device: ' + deviceName + ')...');
--      const claudeResponse = await claudeBridge.query(
--        transcript,
--        { callId: callUuid, devicePrompt: devicePrompt }
--      );
--
--      // Stop hold music
--      if (musicPlaying) {
--        try {
--          await endpoint.api('uuid_break', endpoint.uuid);
--        } catch (e) {}
--      }
++      const thinkingPhrase = getRandomThinkingPhrase();
++      console.log('[' + new Date().toISOString() + '] THINKING: "' + thinkingPhrase + '"');
++      console.log('[' + new Date().toISOString() + '] CLAUDE Querying (device: ' + deviceName + ')...');
 +      crono.marca('consulta');
 +      const claudeResponse = await pensar({
 +        consultar: function () {
 +          return claudeBridge.query(
-+            (llamado ? AVISO_PASIVA : '') +
++            (tres && tres.activa ? tres.aviso() : (llamado ? AVISO_PASIVA : '')) +
 +            (avisoLectura || (fueInterrupcion ? AVISO_INTERRUPCION : '')) + transcript,
 +            { callId: callUuid, devicePrompt: devicePrompt }
 +          );
@@ -2713,7 +2805,7 @@ index 3fd7e7b..5f8d6d8 100644
 +        extraer: extractVoiceLine,
 +        alContestar: function () { crono.marca('claudeListo'); }
 +      });
- 
++
 +      crono.marca('respuesta');
        console.log('[' + new Date().toISOString() + '] CLAUDE Response received');
 +      control.turnoDeClaude();
@@ -2721,6 +2813,7 @@ index 3fd7e7b..5f8d6d8 100644
        // Extract and play voice line with device voice
        const voiceLine = extractVoiceLine(claudeResponse);
        console.log('[' + new Date().toISOString() + '] VOICE: "' + voiceLine + '"');
++      if (tres && tres.activa) tres.anotar('jarvis', voiceLine);
  
        const responseUrl = await ttsService.generateSpeech(voiceLine, voiceId);
 -      await endpoint.play(responseUrl);
@@ -2747,6 +2840,14 @@ index 3fd7e7b..5f8d6d8 100644
 +        pendienteConfirmar = pc.pendiente;
 +        interrumpio = pc.interrumpio;
 +      }
++      // Parche 53: «📞 A TRES: Erik» → marca y, si descuelga, los mete en conferencia.
++      if (viva && !interrumpio && !tres) {
++        tres = await aTres.empezarSiLoPide(claudeResponse, transcript, {
++          salida: endpoint, endpoint: endpointReal, callUuid: callUuid, ttsService: ttsService,
++          voiceId: voiceId, whisperClient: whisperClient, audioForkServer: audioForkServer,
++          wsPort: wsPort, pasiva: pasiva, log: logTurno, sigueActiva: function () { return viva; }
++        });
++      }
  
        console.log('[' + new Date().toISOString() + '] CONVERSATION Turn ' + turnCount + ' complete');
      }
@@ -2757,7 +2858,7 @@ index 3fd7e7b..5f8d6d8 100644
        await endpoint.play(maxUrl);
      }
  
-@@ -252,7 +416,7 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
+@@ -252,12 +449,17 @@ async function conversationLoop(endpoint, dialog, callUuid, options, deviceConfi
      console.error('[' + new Date().toISOString() + '] CONVERSATION Error:', error.message);
      try {
        if (session) session.setCaptureEnabled(false);
@@ -2766,6 +2867,16 @@ index 3fd7e7b..5f8d6d8 100644
        await endpoint.play(errUrl);
      } catch (e) {}
    } finally {
+     console.log('[' + new Date().toISOString() + '] CONVERSATION Cleanup...');
+ 
++    // Parche 53: si había llamada a tres, se cuelga al otro y se suelta la línea.
++    if (tres) {
++      try { await tres.terminar(); } catch (e) { /* la limpieza no puede fallar */ }
++    }
++
+     try {
+       await claudeBridge.endSession(callUuid);
+     } catch (e) {}
 diff --git a/voice-app/lib/tts-service.js b/voice-app/lib/tts-service.js
 index 234b7b5..9aa64a3 100644
 --- a/voice-app/lib/tts-service.js
