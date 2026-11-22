@@ -7,3 +7,4 @@
 Dockerfile      text eol=lf
 */Dockerfile    text eol=lf
 addon/**        text eol=lf
+jacobo-noche/**  text eol=lf

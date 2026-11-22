@@ -1,0 +1,11 @@
+[Unit]
+Description=jacobo de noche: cada cuarto de hora de 00:30 a 02:45
+
+[Timer]
+OnCalendar=*-*-* 00:30,45:00
+OnCalendar=*-*-* 01,02:00/15:00
+# Sin Persistent: al encenderse por la mañana no hay nada pendiente que recuperar.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

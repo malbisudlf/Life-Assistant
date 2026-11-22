@@ -18575,7 +18575,8 @@ def _servicios_caidos() -> list:
             r = http.get(f"{TELEFONO_URL.rstrip('/')}/api/salud",
                          headers={"X-Auth-Token": TELEFONO_TERCEROS_TOKEN}, timeout=VIGIA_MIRAR_S)
             oido = (r.json() or {}).get("oido") or {} if r.status_code == 200 else {}
-            if oido.get("configurado") and oido.get("disponible") is False:
+            # Apagado a propósito de madrugada (ver «JACOBO DE NOCHE»): no es una caída.
+            if oido.get("configurado") and oido.get("disponible") is False and not _jacobo_durmiendo():
                 caidos.append("jacobo")
         except (requests.RequestException, ValueError) as e:
             logger.info("Servicios: la centralita no contesta (%s)", type(e).__name__)
@@ -18687,6 +18688,213 @@ def _vigilar_servicios_seguro() -> dict:
     except Exception:
         logger.exception("Servicios: fallo inesperado en el tick")
         return {}
+
+
+# ── JACOBO DE NOCHE ───────────────────────────────────────────────────────────────────────
+# Pedido el 2026-11-21: «que jacobo se apague de 00:30 hasta que me despierte». jacobo (la
+# RX 580: el oído, la voz, Frigate, las pelis y vida) no hace falta de madrugada y hace
+# ruido. Desde las 00:30 jacobo pregunta aquí si se apaga y hasta cuándo; aquí se decide
+# y se acuerda, para que nadie avise de una caída que es a propósito: ni el vigilante de servicios,
+# ni las alertas de Grafana (`programado_roto`), ni los latidos de Uptime Kuma (el script de
+# caja pregunta `GET /jacobo/noche/estado` cuando jacobo no contesta).
+#
+# Quien apaga es el propio jacobo (`jacobo-noche/`, un temporizador de systemd como root, con
+# su llave `JACOBO_NOCHE_TOKEN`): caja no entra en jacobo sin la aprobación de Tailscale.
+#
+# Por qué se enciende con el reloj de la placa (`rtcwake`) y no al oír el despertar: jacobo
+# está detrás del Archer, en otra subred que caja, y un paquete de Wake-on-LAN no cruza un
+# router. La hora es una estimación de cuándo se levanta, hecha para llegar antes que él:
+# la próxima alarma de Jarvis o, si no hay, la hora a la que suele dar la primera señal de
+# despertar (`despertares`, el cuartil bajo de los días del mismo tipo), menos
+# JACOBO_MARGEN_MIN. Sin historia, JACOBO_DESPIERTA_DEFECTO.
+#
+# No se apaga si hay una llamada en curso (el oído está en jacobo) o algo puesto en Jellyfin:
+# jacobo lo vuelve a intentar cada cuarto de hora hasta las 03:00. Mientras dura la
+# ventana (hasta la hora de despertar y JACOBO_GRACIA_MIN más), el vigilante de servicios no
+# cuenta a jacobo como caído; pasada, sí: si el reloj no lo enciende, el aviso llega como el
+# de cualquier caída.
+JACOBO_NOCHE             = _flag("JACOBO_NOCHE", "1")
+# La llave con que jacobo pregunta. Solo sirve para esto: apagarse y saber hasta cuándo.
+JACOBO_NOCHE_TOKEN       = os.getenv("JACOBO_NOCHE_TOKEN", "")
+JACOBO_DESPIERTA_DEFECTO = os.getenv("JACOBO_DESPIERTA_DEFECTO", "08:00")
+JACOBO_MARGEN_MIN        = int(os.getenv("JACOBO_MARGEN_MIN", "15"))
+JACOBO_GRACIA_MIN        = int(os.getenv("JACOBO_GRACIA_MIN", "30"))
+# Ni antes de esto ni después, pase lo que pase con la historia o las alarmas.
+JACOBO_DESPIERTA_MIN     = (5, 0)
+JACOBO_DESPIERTA_MAX     = (11, 0)
+_JACOBO_CLAVE            = "plan:jacobo-dormido"
+_jacobo_hasta: dict      = {"cargado": False, "hasta": None}
+_jacobo_lock             = threading.Lock()
+
+
+def _jacobo_hm(texto: str, defecto: tuple) -> tuple:
+    m = _HORA_RE.match(str(texto or "").strip())
+    return (int(texto[:2]), int(texto[3:5])) if m else defecto
+
+
+def _jacobo_dia_objetivo(ahora: datetime):
+    """El día en que se despierta: hoy si es de madrugada, mañana si aún es de noche."""
+    return ahora.date() if ahora.hour < 12 else ahora.date() + timedelta(days=1)
+
+
+def _jacobo_costumbre(dia, ahora: datetime) -> Optional[tuple]:
+    """(hora, minuto) a la que suele levantarse los días como `dia` (laborable o fin de
+    semana): el cuartil bajo de las primeras señales de los últimos 28 días, o None si hay
+    menos de tres. El cuartil bajo y no la media: llegar tarde cuesta más que llegar antes."""
+    desde = (ahora.date() - timedelta(days=28)).isoformat()
+    r = http.get(f"{DESPERTARES_URL}?fecha=gte.{desde}&select=fecha,primera_senal_at",
+                 headers=supabase_headers())
+    if r.status_code >= 300:
+        return None
+    finde = dia.isoweekday() >= 6
+    minutos = []
+    for fila in r.json() or []:
+        try:
+            f = datetime.strptime(str(fila["fecha"]), "%Y-%m-%d").date()
+            t = datetime.fromisoformat(str(fila["primera_senal_at"]).replace("Z", "+00:00"))
+        except (KeyError, ValueError, TypeError):
+            continue
+        if (f.isoweekday() >= 6) != finde:
+            continue
+        t = (t if t.tzinfo else t.replace(tzinfo=timezone.utc)).astimezone(LOCAL_TZ)
+        minutos.append(t.hour * 60 + t.minute)
+    if len(minutos) < 3:
+        return None
+    minutos.sort()
+    m = minutos[(len(minutos) - 1) // 4]
+    return (m // 60, m % 60)
+
+
+def _jacobo_hora_despertar(ahora: datetime) -> tuple:
+    """(cuándo encender jacobo, por qué). Nunca lanza: sin datos, la hora por defecto."""
+    dia = _jacobo_dia_objetivo(ahora)
+    margen = timedelta(minutes=JACOBO_MARGEN_MIN)
+    candidatas = []
+    try:
+        for a in _alarma_leer_vivas():
+            if a.get("saltar"):
+                continue
+            c = datetime.fromisoformat(str(a["cuando"]).replace("Z", "+00:00")).astimezone(LOCAL_TZ)
+            if ahora < c <= ahora + timedelta(hours=16):
+                candidatas.append((c - margen, f"la alarma de las {c:%H:%M}"))
+    except Exception as e:   # noqa: BLE001
+        logger.warning("Jacobo de noche: no se han podido leer las alarmas (%s)", _causa(e))
+    try:
+        hm = _jacobo_costumbre(dia, ahora)
+    except Exception as e:   # noqa: BLE001
+        logger.warning("Jacobo de noche: no se ha podido leer cuándo se levanta (%s)", _causa(e))
+        hm = None
+    if hm:
+        c = datetime.combine(dia, datetime.min.time()).replace(hour=hm[0], minute=hm[1], tzinfo=LOCAL_TZ)
+        candidatas.append((c - margen, f"suele levantarse a las {c:%H:%M}"))
+    if candidatas:
+        cuando, porque = min(candidatas)
+    else:
+        hm = _jacobo_hm(JACOBO_DESPIERTA_DEFECTO, (8, 0))
+        cuando = datetime.combine(dia, datetime.min.time()).replace(hour=hm[0], minute=hm[1],
+                                                                     tzinfo=LOCAL_TZ)
+        porque = "la hora por defecto"
+    tope_bajo = datetime.combine(dia, datetime.min.time()).replace(
+        hour=JACOBO_DESPIERTA_MIN[0], minute=JACOBO_DESPIERTA_MIN[1], tzinfo=LOCAL_TZ)
+    tope_alto = tope_bajo.replace(hour=JACOBO_DESPIERTA_MAX[0], minute=JACOBO_DESPIERTA_MAX[1])
+    cuando = min(max(cuando, tope_bajo, ahora + timedelta(minutes=30)), max(tope_alto, ahora + timedelta(minutes=30)))
+    return cuando, porque
+
+
+def _jacobo_ocupado() -> str:
+    """Por qué no conviene apagarlo ahora, o "". Si algo no contesta, no cuenta."""
+    if TELEFONO_URL:
+        try:
+            r = http.get(f"{TELEFONO_URL.rstrip('/')}/api/calls", timeout=5)
+            if r.status_code == 200 and int((r.json() or {}).get("count") or 0) > 0:
+                return "hay una llamada en curso"
+        except (requests.RequestException, ValueError, TypeError):
+            pass
+    if _jellyfin_configurado():
+        try:
+            sesiones = _jellyfin("GET", "/Sessions", {"activeWithinSeconds": 300})
+            if any(s.get("NowPlayingItem") for s in (sesiones or []) if isinstance(s, dict)):
+                return "hay algo puesto en Jellyfin"
+        except JellyfinNoContesta:
+            pass
+    return ""
+
+
+def _jacobo_dormido_hasta() -> Optional[datetime]:
+    """Hasta cuándo se ha apagado a propósito (la hora de despertar), o None. En memoria, y
+    tras un reinicio del backend se recupera de `vigilante_estado` una vez."""
+    with _jacobo_lock:
+        if _jacobo_hasta["cargado"]:
+            return _jacobo_hasta["hasta"]
+    hasta = None
+    try:
+        r = http.get(f"{VIGILANTE_ESTADO_URL}?clave=eq.{quote(_JACOBO_CLAVE, safe='')}&select=ultima_vez",
+                     headers=supabase_headers())
+        filas = r.json() if r.status_code < 300 else None
+        if filas:
+            hasta = datetime.fromisoformat(str(filas[0]["ultima_vez"]).replace("Z", "+00:00"))
+    except Exception as e:   # noqa: BLE001
+        logger.warning("Jacobo de noche: no se ha podido leer la ventana (%s)", _causa(e))
+        return None          # sin apuntar «cargado»: se vuelve a mirar en el siguiente tick
+    with _jacobo_lock:
+        _jacobo_hasta.update(cargado=True, hasta=hasta)
+    return hasta
+
+
+def _jacobo_durmiendo(ahora: Optional[datetime] = None) -> bool:
+    """Si ahora mismo jacobo está apagado a propósito (hasta despertar + JACOBO_GRACIA_MIN)."""
+    hasta = _jacobo_dormido_hasta()
+    if not hasta:
+        return False
+    ahora = ahora or datetime.now(timezone.utc)
+    return ahora < hasta + timedelta(minutes=JACOBO_GRACIA_MIN)
+
+
+def _jacobo_apuntar(desde: datetime, hasta: datetime) -> None:
+    with _jacobo_lock:
+        _jacobo_hasta.update(cargado=True, hasta=hasta)
+    try:
+        http.delete(f"{VIGILANTE_ESTADO_URL}?clave=eq.{quote(_JACOBO_CLAVE, safe='')}",
+                    headers=supabase_headers())
+        http.post(VIGILANTE_ESTADO_URL, headers={**supabase_headers(), "Prefer": "return=minimal"},
+                  json={"clave": _JACOBO_CLAVE, "primera_vez": desde.astimezone(timezone.utc).isoformat(),
+                        "ultima_vez": hasta.astimezone(timezone.utc).isoformat(), "veces": 1})
+    except Exception as e:   # noqa: BLE001
+        # Vale la memoria: solo se pierde si el backend se reinicia esta misma noche.
+        logger.warning("Jacobo de noche: no se ha podido guardar la ventana (%s)", _causa(e))
+
+
+@app.post("/jacobo/noche")
+def jacobo_noche(request: Request):
+    """jacobo pregunta si se apaga y hasta cuándo: {dormir, despertar, epoch, motivo}. Con
+    `dormir` a true, la ventana ya queda apuntada. Su llave, `JACOBO_NOCHE_TOKEN`."""
+    if not _token_ok(_extract_service_token(request), JACOBO_NOCHE_TOKEN):
+        raise HTTPException(status_code=401, detail="Token inválido")
+    if not JACOBO_NOCHE:
+        return {"dormir": False, "motivo": "apagado con JACOBO_NOCHE=0"}
+    ocupado = _jacobo_ocupado()
+    if ocupado:
+        logger.info("Jacobo de noche: no se apaga todavía (%s)", ocupado)
+        return {"dormir": False, "motivo": ocupado}
+    ahora = datetime.now(LOCAL_TZ)
+    despertar, porque = _jacobo_hora_despertar(ahora)
+    _jacobo_apuntar(ahora, despertar)
+    logger.info("Jacobo de noche: se apaga hasta las %s (%s)", despertar.strftime("%H:%M"), porque)
+    return {"dormir": True, "despertar": despertar.isoformat(), "epoch": int(despertar.timestamp()),
+            "motivo": porque}
+
+
+@app.get("/jacobo/noche/estado")
+def jacobo_noche_estado(request: Request):
+    """Si jacobo está apagado a propósito ahora: {durmiendo, hasta}. Lo pregunta el latido de
+    Uptime Kuma en caja (`REVISION_TOKEN`, la llave de los scripts de caja) cuando jacobo no
+    contesta, para mandar «dormido» en vez de dejar que avise de una caída."""
+    token = _extract_service_token(request)
+    if not (_token_ok(token, REVISION_TOKEN) or _token_ok(token, JACOBO_NOCHE_TOKEN)):
+        raise HTTPException(status_code=401, detail="Token inválido")
+    hasta = _jacobo_dormido_hasta()
+    return {"durmiendo": _jacobo_durmiendo(),
+            "hasta": hasta.astimezone(LOCAL_TZ).isoformat() if hasta else None}
 
 
 # ── Vigilante del sistema ────────────────────────────────────────────────────
@@ -27793,6 +28001,11 @@ def programado_roto(request: Request, body: ProgramadoRotoIn, token: str = ""):
 
     workflow = str(body.workflow or "").strip()[:80] or "un workflow programado"
     detalle  = str(body.detalle or "").strip()[:200]
+    # Lo que dice de jacobo mientras está apagado a propósito (ver «JACOBO DE NOCHE»): las
+    # alertas de Grafana llegan por aquí, y «no llego a jacobo» a las 3:00 es lo esperado.
+    if body.aviso and "jacobo" in f"{workflow} {detalle}".lower() and _jacobo_durmiendo():
+        logger.info("Workflow programado: aviso sobre jacobo callado (duerme a propósito)")
+        return {"ok": True, "avisado": False, "callado": "jacobo duerme a propósito"}
     # Solo https y solo por si acaso: este texto acaba en una notificación con enlace.
     url      = str(body.url or "").strip()[:300]
     if not url.startswith("https://"):

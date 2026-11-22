@@ -1,0 +1,70 @@
+#!/bin/bash
+# jacobo de noche: se apaga de madrugada y el reloj de la placa lo enciende antes de que
+# Mikel se levante. Ver jacobo-noche/README.md y «JACOBO DE NOCHE» en backend/main.py.
+#
+# Lo lanza jacobo-noche.timer (como root) cada cuarto de hora de 00:30 a 02:45. Pregunta al
+# backend si se apaga y hasta cuándo (`POST /jacobo/noche`); el backend dice que no si hay
+# una llamada en curso o algo puesto en Jellyfin, y entonces se reintenta en el siguiente
+# cuarto de hora. Una sola vez por noche.
+#
+#   jacobo-noche                  lo normal (lo que hace el temporizador)
+#   jacobo-noche --prueba <min>   sin backend: apaga ya y vuelve en <min> minutos (3-30),
+#                                 para comprobar que la placa se enciende sola
+#
+# Configuración en /etc/jacobo-noche.env (chmod 600, fuera del repositorio):
+#   JACOBO_NOCHE_URL=https://…     la URL del backend
+#   JACOBO_NOCHE_TOKEN=…           la llave (la misma que JACOBO_NOCHE_TOKEN del backend)
+#   JACOBO_NOCHE_IFACE=enp3s0      opcional: la tarjeta a la que dejar el Wake-on-LAN puesto
+set -uo pipefail
+
+ESTADO=/var/lib/jacobo-noche
+log() { logger -t jacobo-noche -- "$*"; echo "$*"; }
+
+[ "$(id -u)" = 0 ] || { echo "jacobo-noche: tiene que correr como root" >&2; exit 1; }
+mkdir -p "$ESTADO"
+
+ahora=$(date +%s)
+if [ "${1:-}" = "--prueba" ]; then
+  min=${2:-}
+  [[ "$min" =~ ^[0-9]+$ ]] && [ "$min" -ge 3 ] && [ "$min" -le 30 ] \
+    || { echo "uso: jacobo-noche --prueba <minutos, de 3 a 30>" >&2; exit 2; }
+  epoch=$((ahora + min * 60))
+  motivo="prueba de $min minutos"
+else
+  # shellcheck disable=SC1091
+  . /etc/jacobo-noche.env || { log "falta /etc/jacobo-noche.env"; exit 1; }
+  hoy=$(date +%F)
+  [ "$(cat "$ESTADO/ultima" 2>/dev/null)" = "$hoy" ] && exit 0
+  hm=$((10#$(date +%H%M)))
+  if [ "$hm" -lt 30 ] || [ "$hm" -ge 300 ]; then exit 0; fi
+  # La llave no pasa por la línea de órdenes (la vería cualquiera con `ps`).
+  resp=$(curl -fsS -m 30 -X POST -H @<(printf 'X-Auth-Token: %s\n' "$JACOBO_NOCHE_TOKEN") \
+         "${JACOBO_NOCHE_URL%/}/jacobo/noche") || { log "el backend no contesta; lo intento luego"; exit 0; }
+  leido=$(python3 -c 'import json,sys
+d = json.loads(sys.argv[1])
+print("1" if d.get("dormir") is True else "0", int(d.get("epoch") or 0), (d.get("motivo") or "").replace("\n", " ")[:120])' "$resp") \
+    || { log "no entiendo lo que contesta el backend"; exit 0; }
+  read -r dormir epoch motivo <<< "$leido"
+  if [ "$dormir" != 1 ]; then log "no me apago todavía: $motivo"; exit 0; fi
+  # La hora tiene que tener sentido: de media hora a catorce desde ahora.
+  if [ "$epoch" -lt $((ahora + 1800)) ] || [ "$epoch" -gt $((ahora + 50400)) ]; then
+    log "hora de despertar sin sentido ($epoch); no me apago"; exit 0
+  fi
+  echo "$hoy" > "$ESTADO/ultima"
+fi
+
+# El Wake-on-LAN queda puesto por si algún día se puede despertar por red. No es lo que
+# lo enciende (eso es el reloj): si falla, se sigue.
+if [ -n "${JACOBO_NOCHE_IFACE:-}" ]; then
+  ethtool -s "$JACOBO_NOCHE_IFACE" wol g 2>/dev/null || log "no he podido dejar el Wake-on-LAN"
+fi
+
+# El reloj de la placa va en UTC (timedatectl: «RTC in local TZ: no»).
+if ! rtcwake -m no -u -t "$epoch" >/dev/null; then
+  log "no he podido programar el reloj; no me apago"; exit 1
+fi
+if [ "$(cat /sys/class/rtc/rtc0/wakealarm 2>/dev/null)" != "$epoch" ]; then
+  log "el reloj no ha guardado la hora; no me apago"; exit 1
+fi
+log "me apago hasta las $(date -d "@$epoch" +%H:%M) ($motivo)"
+systemctl poweroff
