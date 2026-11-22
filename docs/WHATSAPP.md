@@ -197,7 +197,7 @@ nadie lo ha pedido. Por eso no pasa por un turno de conversación:
 - **Solo tus contactos.** Chats individuales con quien está en tu agenda; los grupos, solo los de
   `WHATSAPP_VIGILAR_GRUPOS`. De los demás, el texto no llega al modelo.
 - **Topes:** 3 avisos por chat y día, 10 en total, y una urgencia por chat y día. Nunca llama,
-  nunca suena con el móvil en silencio y nunca crea nada en el calendario sin el botón.
+  nunca suena con el móvil en silencio y nunca crea nada en el calendario sin el botón (salvo el preparador, más abajo).
 
 **Lo que enseñó el ensayo.** Antes de encenderla se pasó una semana de mensajes reales por el
 clasificador. Tres cosas salieron de ahí: el modelo ponía la hora del mensaje si nadie decía
@@ -244,6 +244,55 @@ durante la clase se puede perder, porque así se pidió. «No útil» tres veces
 **Lo que cuesta.** Esos mensajes van a OpenAI (`gpt-4o-mini`), de forma continua y sin que quien
 los escribe lo sepa. Se decidió así para empezar, y pasa a local cuando llegue la P100. Son
 céntimos al mes: unas 16 ráfagas al día de chats individuales.
+
+## El preparador: los entrenos que te asigna, al calendario (2026-11-22)
+
+«Quiero que Jarvis analice los mensajes de audio y de texto que me llegan del preparador del
+gimnasio: me dice a quién entreno y cuándo. Tenlo en cuenta para añadirlo al calendario. También
+los que manda a los grupos: ahí a veces dice quién entrena conmigo (me llama Mikel o Mike).»
+
+| Lo que pasa | Calendario | Aviso |
+|---|---|---|
+| Te asigna una sesión, o te la pide y dices que sí | Crea «Entrenamiento gente (Ane)» | «Iker: entrenamiento con Ane el jueves 26/11 a las 07:15. Apuntado en el calendario.» · Quitarlo / Dejarlo |
+| Ya está en el calendario (un entreno ese día a ±30 min) | Nada | Ninguno |
+| Se anula una que creó él (no puede venir, la cubre el preparador, cambia de hora) | La borra | «… Lo he quitado del calendario.» |
+| Se anula una que apuntaste tú | Nada | «… Sigue en el calendario.» · Quitarlo / Dejarlo |
+
+**Es la excepción a «el calendario va con botón»**, y lo es por quién escribe: un contacto
+concreto, elegido por su id (`WHATSAPP_PREPARADOR`), cuyo trabajo es justo decirte a quién
+entrenas. Lo que no cambia es todo lo demás de la vigilancia:
+
+- **Modelo sin herramientas y ficha cerrada**: si se apunta o se anula, fecha, hora, con quién y
+  de qué línea sale. El título lo escribe el backend y lleva `ALARMA_ENTRENO_TITULO`, así que
+  una sesión de las 7:15 trae sola su alarma de las 6:45. El «con quién» solo pasa si son
+  palabras que están en los mensajes.
+- **La línea citada se comprueba en código.** Cada sesión dice de qué mensaje nuevo sale
+  (`linea`), y en un grupo tiene que ser uno del preparador que nombre a Mikel (`Mikel`, `Mike`,
+  `Maiki`). Sale del ensayo: en una convocatoria de quince líneas el modelo le atribuía a Mikel
+  la sesión de la línea de al lado, que llevaba el preparador.
+- **En los grupos (`WHATSAPP_PREPARADOR_GRUPOS`), solo sus mensajes y los tuyos, y solo si te
+  nombra.** Sus convocatorias llevan a veinte personas; lo de los demás no llega al modelo, y una
+  ráfaga suya que no te nombra tampoco. El autor de un grupo lo pone el puente con el nombre de tu
+  agenda; quien no está en ella sale con el de su perfil, así que alguien del grupo podría ponerse
+  ese nombre. Lo peor que conseguiría es una cita de entreno de más, con su botón para quitarla.
+  Arreglarlo del todo pide que el puente devuelva el id del autor.
+- **Solo borra lo suyo**: lo que creó él vive en `eventos` de `WA_PREP_FICHERO`. Lo tuyo se
+  pregunta. Y solo toca eventos con el título de entreno: «Entrenamiento» a secas (el tuyo) no
+  cuenta como sesión ni se anula.
+- En el privado cuentan también tus ráfagas: «¿puedes mañana?» y tu «sí, sin problema» llegan
+  separados, y la sesión es tu sí.
+- **Lo visto sobrevive al despliegue** (`visto` en el fichero, en el volumen de los pendientes):
+  la primera vez mira 24 horas atrás, y después sigue donde lo dejó. Sin calendario (Graph caído)
+  no toca nada y reintenta la ráfaga; una que falla más de una hora se da por vista.
+- Topes: 6 sesiones por ráfaga y 20 cambios al día. Va en la pasada de la vigilancia, así que
+  necesita `WHATSAPP_VIGILANCIA=1`; la vigilancia, a su vez, no avisa de quedadas de ese chat
+  (urgencias sí), para no duplicar con botón lo que ya está apuntado.
+
+**Piensa** (`WA_PREP_RAZONAR`, `low`): sin herramientas el modelo puede razonar, y aquí hace
+falta. **El ensayo** (30 días reales, ráfaga a ráfaga con su reloj y un calendario simulado):
+8 de 9 sesiones bien, con sus anulaciones y cambios, y ninguna inventada tras los dos arreglos
+(la línea citada y «las 2 Martas» son dos personas, no las 14:00). Las sesiones sin hora dicha
+ni conocida no se apuntan.
 
 ## No molestar: Jarvis contesta por ti (2026-11-08)
 
