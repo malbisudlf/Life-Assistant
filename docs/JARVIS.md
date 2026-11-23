@@ -1173,6 +1173,68 @@ Y en `backend/.env`: `JARVIS_MOTOR_CHAT=claude`, `JARVIS_CLAUDE_URL`,
 `extra_hosts: ["host.docker.internal:host-gateway"]` en el compose de HomeLab. El
 registro del servicio: `journalctl --user -u jarvis-claude`.
 
+### El respaldo con Codex (2026-11-23)
+
+Antes de caer a la API de OpenAI (de pago), el servicio prueba con **Codex CLI iniciado
+con la cuenta de ChatGPT de Mikel** (plan Go): el mismo truco que `claude -p`, sin API.
+Pedido por Mikel: «que use mi cuenta de ChatGPT, y no pagar por APIs».
+
+```
+/turno ─▶ claude -p ──✗ (502/503/504)──▶ codex exec ──▶ /mcp/chat   (mismo turno, mismo prompt)
+                                    └──✗──▶ el backend contesta con la API de OpenAI, como antes
+```
+
+- **Las mismas reglas, traducidas.** `comando_codex` en `chat/jarvis_claude.py`:
+  `shell_tool` y `unified_exec` apagados (y una docena de funciones más: navegador,
+  plugins, imágenes…), sandbox de solo lectura, `--ignore-user-config` (solo el MCP que
+  se declara en el turno), `approval_policy="never"` y `--ephemeral`. El token del MCP va
+  por variable de entorno (`bearer_token_env_var`), nunca en los argumentos.
+- **Y una red de más**: si en los eventos aparece un `command_execution` o un
+  `file_change`, el proceso se mata y el turno falla. Mejor sin respuesta que con una
+  terminal que nadie ha aprobado (`_ITEMS_PROHIBIDOS`).
+- **Solo si Claude ha fallado, no si va lento**: con menos de 30 s del tope por delante
+  no se intenta (el backend ya va a tirar de OpenAI). En el retransmitido, solo si Claude
+  falla **antes de decir nada**: cambiar de cerebro a media frase repetiría la respuesta.
+- **Se dice.** La respuesta lleva `motor: "codex"` y `aviso` («te responde ChatGPT»).
+- **La investigación de noche** también cae a Codex si Claude falla, con su búsqueda web
+  y nada más (`web_search="live"`, sin MCP). El informe guarda `motor`.
+- **Tope diario** (`JARVIS_CODEX_MAX_DIA`, 80 turnos) y cuenta en
+  `~/jarvis-chat/codex-uso.json` (turnos y tokens de los últimos 30 días); `/salud` dice
+  cuántos lleva hoy. La cuota de Go no está publicada: esto es para medirla.
+
+**Montarlo** (caja, una vez):
+
+```bash
+npm install -g --prefix ~/.local @openai/codex      # ~/.local/bin/codex
+codex login --device-auth                           # Mikel aprueba el código en su cuenta
+```
+
+Y en `~/jarvis-chat/.env`: `JARVIS_CODEX=1`, `CODEX_BIN=/home/<usuario>/.local/bin/codex`
+y, si se quiere fijar, `JARVIS_CODEX_MODELO`. `~/.codex/auth.json` es una contraseña: no
+sale de caja. Codex renueva el token solo; si caduca, el registro dice «Codex falló» y
+hay que repetir el `login`.
+
+### El diario de la bóveda (2026-11-23)
+
+Cada noche, a las 00:05 (antes de que jacobo se apague), el servicio escribe la nota del
+día anterior en la bóveda de Obsidian de caja: `~/boveda-obsidian/Diario/AAAA-MM-DD.md`,
+con su párrafo del día, la línea de lo que pasó, el cuerpo, la gente como `[[enlaces]]`
+y las ideas guardadas. La escribe Codex con la cuenta de ChatGPT. Se enciende con
+`JARVIS_DIARIO=1` (y Codex encendido). Era tarea «del Qwen»; la eligió Mikel.
+
+- **Los datos los pide el servicio, no el modelo**: llama él a `dia_reconstruir` (la
+  máquina del tiempo) y a `ideas` por el MCP, y le pasa el resultado a Codex **sin
+  ninguna herramienta**. De noche y sin nadie mirando, un modelo con las herramientas de
+  Jarvis podría abrir el garaje.
+- **Lo de WhatsApp llega como cuentas y nombres de chat**, no como texto, y marcado como
+  externo.
+- **No pisa nada**: si la nota ya existe, no se toca. Tres intentos por noche como mucho
+  (`~/jarvis-chat/diario-estado.json`).
+- A mano, para probar o rehacer un día: `POST /diario/escribir` con `{"fecha": "AAAA-MM-DD"}`.
+
+`backend/boveda.py` (el diario sin modelo, con una lista blanca de hechos) sigue escrito y
+sin enganchar: el diario de verdad es este.
+
 ## La vista a pantalla completa
 
 El botón **J.A.R.V.I.S.** de la cabecera (o «⤢ Pantalla completa» en la tarjeta) abre

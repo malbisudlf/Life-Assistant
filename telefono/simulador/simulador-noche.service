@@ -1,0 +1,17 @@
+# El simulador de cada noche con el Mikel que improvisa (docs/SIMULADOR.md). Servicio de
+# USUARIO en caja, como el repaso:
+#   cp telefono/simulador/simulador-noche.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now simulador-noche.timer
+[Unit]
+Description=Jarvis: el simulador con un Mikel improvisado por Codex
+
+[Service]
+Type=oneshot
+# Codex hace de Mikel (la cuenta de ChatGPT); quien contesta es el Jarvis real (Claude, la
+# suscripción). Seis llamadas de hasta seis turnos: lo que gasta una mañana de llamadas.
+Environment=CODEX_BIN=%h/.local/bin/codex
+ExecStart=/usr/bin/node %h/stack/Life-Assistant/telefono/simulador/simular.js --improvisa 6 --juzgar
+# Sale con 1 si alguna llamada fue mal: eso no es un fallo del servicio.
+SuccessExitStatus=1
+TimeoutStartSec=2700
+Nice=10

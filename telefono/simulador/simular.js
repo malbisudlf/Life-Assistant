@@ -36,6 +36,7 @@ const { spawn } = require('child_process');
 const { crearMundo } = require('./mundo');
 const { oir, semillaDe } = require('./oido');
 const { evaluar, herramientasQueNoExisten } = require('./juez');
+const improvisa = require('./improvisa');
 
 // Copias de respaldo de lo que la voice-app pone delante de un turno; si está su código a
 // mano se usan las suyas (ver `cargarVozApp`).
@@ -57,10 +58,12 @@ function opciones(argv) {
     voz: path.join(casa, '.claude-phone-cli', 'voice-app'),
     trabajo: path.join(casa, 'telefono-jarvis'), backend: 'http://127.0.0.1:8080',
     salida: path.join(casa, 'telefono-simulador'), modelo: '', conservar: false,
+    improvisa: 0, juzgar: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--conservar') o.conservar = true;
+    else if (a === '--juzgar') o.juzgar = true;
     else if (a.indexOf('--') === 0 && a.slice(2) in o) {
       const v = argv[++i];
       o[a.slice(2)] = (typeof o[a.slice(2)] === 'number') ? parseInt(v, 10) : v;
@@ -90,8 +93,25 @@ async function correrCaso(caso, d, repeticion) {
   let pendiente = null;
   let aviso = '';
   const lista = caso.turnos || [];
-  for (let i = 0; i < lista.length; i++) {
-    const t = typeof lista[i] === 'string' ? { dice: lista[i] } : lista[i];
+  // Un caso improvisado no trae sus frases: las dice Codex haciendo de Mikel según va la
+  // llamada (improvisa.js). La primera sí viene inventada de antes.
+  const improvisa = Boolean(caso.improvisa && d.improvisar);
+  const tope = improvisa ? d.maxTurnos || 6 : lista.length;
+  for (let i = 0; i < tope; i++) {
+    let t;
+    if (improvisa) {
+      let sig;
+      try {
+        sig = i === 0 ? { dice: caso.primera } : await d.improvisar(caso, turnos);
+      } catch (e) {
+        if (turnos.length) turnos[turnos.length - 1].aviso_mikel = 'Codex no siguió: ' + e.message;
+        break;
+      }
+      if (!sig || sig.fin || !sig.dice) break;
+      t = { dice: sig.dice };
+    } else {
+      t = typeof lista[i] === 'string' ? { dice: lista[i] } : lista[i];
+    }
     const oido = oir(t.dice, t.ruido || caso.ruido || d.ruido,
                      semillaDe((caso.id || '') + ':' + i + ':' + (repeticion || 0)));
     const turno = { dicho: t.dice, oido: oido, voz: [], llamada: [], propuso: false, segundos: 0 };
@@ -124,6 +144,15 @@ async function correrCaso(caso, d, repeticion) {
     turno.segundos = (Date.now() - t0) / 1000;
     turno.respuesta = r.response;
     turno.voz.push(extraerVoz(r.response));
+    if (improvisa) {
+      // En la llamada de verdad, lo que pide `📖 LEER` lo lee en voz alta la voice-app, no
+      // Claude. Aquí no hay voice-app: sin esto, el Mikel improvisado nunca oía la previsión
+      // del tiempo y la pedía otra vez (visto en la primera prueba, 2026-11-23).
+      String(r.response || '').split('\n').forEach(function (l) {
+        const m = l.match(/📖\s*LEER:\s*(.+)/u);
+        if (m) turno.llamada.push('[la llamada te lee aquí el resultado de: ' + m[1].trim().slice(0, 160) + ']');
+      });
+    }
     turno.propuso = Boolean(d.confirmacion.pedidoDeConfirmacion(r.response));
     pendiente = (await d.confirmacion.preguntarSiLoPide(r.response, c)).pendiente;
   }
@@ -216,11 +245,46 @@ async function esperarPuente(url, proceso) {
   throw new Error('La copia del puente no arranca');
 }
 
+/**
+ * Las improvisadas que salieron mal, convertidas en casos fijos (con las frases que dijo
+ * Mikel) para volver a pasarlas después de arreglar: `--casos ~/telefono-simulador/casos-improvisados.json`.
+ * Y un resumen de la última noche que lee el repaso de las 05:10.
+ */
+function guardarImprovisadas(dir, resultados) {
+  const ruta = path.join(dir, 'casos-improvisados.json');
+  let casos = [];
+  try { casos = JSON.parse(fs.readFileSync(ruta, 'utf8')); } catch { /* el primero */ }
+  const ya = new Set(casos.map(function (c) { return c.id; }));
+  resultados.filter(function (r) { return !r.ok; }).forEach(function (r) {
+    const id = r.id + '-' + new Date().toISOString().slice(0, 10);
+    if (ya.has(id)) return;
+    casos.push({ id: id, objetivo: r.caso.objetivo, mundo: r.caso.mundo, modo: r.caso.modo,
+                 ruido: r.caso.ruido, turnos: r.traza.turnos.map(function (t) { return t.dicho; }) });
+  });
+  fs.writeFileSync(ruta, JSON.stringify(casos.slice(-100), null, 1), { mode: 0o600 });
+  const resumen = { cuando: new Date().toISOString(), total: resultados.length,
+    bien: resultados.filter(function (r) { return r.ok; }).length,
+    mal: resultados.filter(function (r) { return !r.ok; }).map(function (r) {
+      return { id: r.id, objetivo: r.caso.objetivo, fallos: r.fallos }; }) };
+  fs.writeFileSync(path.join(dir, 'ultima-noche.json'), JSON.stringify(resumen, null, 1), { mode: 0o600 });
+}
+
 async function principal() {
   const o = opciones(process.argv.slice(2));
-  const fichero = JSON.parse(fs.readFileSync(o.casos, 'utf8'));
-  let casos = (Array.isArray(fichero) ? fichero : fichero.casos || [])
-    .filter(function (c) { return !o.filtro || String(c.id).indexOf(o.filtro) >= 0; });
+  const catalogo = await catalogoReal(o.backend, o.trabajo);
+  let casos;
+  if (o.improvisa) {
+    // Las llamadas las inventa Codex (improvisa.js) y Mikel las improvisa turno a turno.
+    if (o.improvisa * o.repeticiones > o.max) {
+      throw new Error((o.improvisa * o.repeticiones) + ' llamadas son más que el tope (' + o.max + ')');
+    }
+    casos = await improvisa.inventar(catalogo, o.improvisa);
+    console.log('Codex ha inventado ' + casos.length + ' llamadas.');
+  } else {
+    const fichero = JSON.parse(fs.readFileSync(o.casos, 'utf8'));
+    casos = (Array.isArray(fichero) ? fichero : fichero.casos || [])
+      .filter(function (c) { return !o.filtro || String(c.id).indexOf(o.filtro) >= 0; });
+  }
   const total = casos.length * o.repeticiones;
   if (!total) throw new Error('Ningún caso que correr');
   if (total > o.max) {
@@ -229,7 +293,6 @@ async function principal() {
   }
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'simulador-'));
-  const catalogo = await catalogoReal(o.backend, o.trabajo);
   casos.forEach(function (c) {
     const faltan = herramientasQueNoExisten(c, catalogo);
     if (faltan.length) console.warn('⚠ ' + c.id + ': el catálogo no tiene ' + faltan.join(', '));
@@ -257,6 +320,7 @@ async function principal() {
 
   const d = {
     mundo: mundo, confirmacion: voz.confirmacion, avisos: voz.avisos, ruido: o.ruido,
+    improvisar: o.improvisa ? improvisa.siguiente : null, maxTurnos: improvisa.MAX_TURNOS,
     preguntar: async function (prompt, callId) {
       const r = await fetch(urlPuente + '/ask', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -281,13 +345,26 @@ async function principal() {
       for (let rep = 0; rep < o.repeticiones; rep++) {
         const traza = await correrCaso(caso, d, rep);
         const veredicto = evaluar(caso, traza);
+        if (caso.improvisa && o.juzgar && traza.turnos.length) {
+          // Lo que el juez sin modelo no puede saber: si Mikel consiguió lo que quería.
+          try {
+            const juicio = await improvisa.juzgar(caso, traza.turnos);
+            traza.juicio = juicio;
+            if (!juicio.conseguido) veredicto.fallos.push('Mikel no consiguió: ' + caso.objetivo);
+            juicio.roces.forEach(function (r) { veredicto.fallos.push('roce: ' + r); });
+            veredicto.ok = veredicto.ok && juicio.conseguido && !juicio.roces.length;
+          } catch (e) {
+            console.warn('    · el juez de Codex no contestó (' + e.message + ')');
+          }
+        }
         const lento = Math.max.apply(null, [0].concat(traza.turnos.map(function (t) { return t.segundos; })));
         console.log((veredicto.ok ? '✔ ' : '✖ ') + caso.id + (o.repeticiones > 1 ? ' #' + (rep + 1) : '') +
                     '  (' + traza.turnos.length + ' turnos, el más lento ' + lento.toFixed(1) + ' s)');
         veredicto.fallos.forEach(function (f) { console.log('    · ' + f); });
         if (traza.desconocidas.length) console.log('    · pidió al backend algo que el mundo falso no tiene: ' + traza.desconocidas.join(', '));
         rojo = rojo || !veredicto.ok;
-        resultados.push({ id: caso.id, repeticion: rep, ok: veredicto.ok, fallos: veredicto.fallos, traza: traza });
+        resultados.push({ id: caso.id, repeticion: rep, ok: veredicto.ok, fallos: veredicto.fallos, traza: traza,
+                          caso: caso.improvisa ? caso : undefined });
       }
     }
   } finally {
@@ -325,6 +402,7 @@ async function principal() {
   fs.writeFileSync(donde, JSON.stringify({ cuando: new Date().toISOString(), ruido: o.ruido, casos: o.casos,
     bien: bien, total: resultados.length, turno_mediano_s: mediana, resultados: resultados }, null, 1), { mode: 0o600 });
   console.log('Detalle: ' + donde);
+  if (o.improvisa) guardarImprovisadas(o.salida, resultados);
   process.exitCode = rojo ? 1 : 0;
 }
 

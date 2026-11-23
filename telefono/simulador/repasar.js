@@ -43,7 +43,8 @@ function opciones(argv) {
   const casa = os.homedir();
   const o = { horas: 24, trabajo: path.join(casa, 'telefono-jarvis'), sesiones: '',
               salida: path.join(casa, 'telefono-repaso'), backend: 'http://127.0.0.1:8080',
-              modelo: 'claude-sonnet-5-5', pensar: false, avisar: false };
+              modelo: 'claude-sonnet-5-5', pensar: false, avisar: false,
+              simulador: path.join(casa, 'telefono-simulador') };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--pensar') o.pensar = true;
@@ -163,6 +164,27 @@ function guardarCasos(ruta, nuevos) {
   return casos.length;
 }
 
+/**
+ * Lo que dejó el simulador de la noche con el Mikel que improvisa (simular.js --improvisa):
+ * una sección del informe y media frase del aviso. Nada si no corrió en las últimas 12 h.
+ */
+function simulacionDeAnoche(dir, ahora) {
+  let r;
+  try { r = JSON.parse(fs.readFileSync(path.join(dir, 'ultima-noche.json'), 'utf8')); } catch { return null; }
+  if (!r || !r.cuando || ahora - Date.parse(r.cuando) > 12 * 3600 * 1000) return null;
+  const mal = (r.mal || []).length;
+  let informe = '## El simulador de anoche (Mikel improvisado)\n\n' + r.bien + ' de ' + r.total + ' llamadas bien.\n';
+  (r.mal || []).forEach(function (m) {
+    informe += '\n- **' + m.id + '** — ' + m.objetivo + '\n' +
+               (m.fallos || []).map(function (f) { return '  - ' + f; }).join('\n') + '\n';
+  });
+  if (mal) {
+    informe += '\nPara reproducirlas: `node telefono/simulador/simular.js --casos ' +
+               path.join(dir, 'casos-improvisados.json') + '`\n';
+  }
+  return { informe: informe, mal: mal, linea: 'Simulador: ' + r.bien + '/' + r.total + ' bien.' };
+}
+
 async function principal() {
   const o = opciones(process.argv.slice(2));
   const llamadas = mirar(o.sesiones, o.horas);
@@ -191,13 +213,16 @@ async function principal() {
     informe += '\n## Para reproducirlo\n\n`node telefono/simulador/simular.js --casos ' +
                path.join(o.salida, 'casos-reales.json') + ' --filtro real-' + dia + '`  (' + cuantos + ' casos guardados)\n';
   }
+  const noche = simulacionDeAnoche(o.simulador, Date.now());
+  if (noche) informe += '\n' + noche.informe;
   const ruta = path.join(o.salida, dia + '.md');
   fs.writeFileSync(ruta, informe, { mode: 0o600 });
   console.log('Informe: ' + ruta);
 
-  if (o.avisar && conRoces.length) {
+  if (o.avisar && (conRoces.length || (noche && noche.mal))) {
     try {
-      const ok = await avisar(o.backend, o.trabajo, '🔎 Repaso de llamadas: ' + cuentas + ' Informe en caja.');
+      const ok = await avisar(o.backend, o.trabajo, '🔎 Repaso de llamadas: ' + cuentas +
+                              (noche ? ' ' + noche.linea : '') + ' Informe en caja.');
       console.log('Aviso al móvil: ' + (ok ? 'mandado' : 'el backend no lo aceptó'));
     } catch (e) {
       console.warn('Repaso: no se pudo avisar (' + e.message + ')');
@@ -209,4 +234,4 @@ if (require.main === module) {
   principal().catch(function (e) { console.error('Repaso: ' + e.message); process.exitCode = 2; });
 }
 
-module.exports = { mirar, escribirLlamada, guardarCasos, opciones };
+module.exports = { mirar, escribirLlamada, guardarCasos, opciones, simulacionDeAnoche };

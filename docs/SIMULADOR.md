@@ -40,9 +40,37 @@ igual que el teléfono y el chat:
 - **Repaso**: mirar no gasta nada. Pensar es **una** sesión de Sonnet sin herramientas, y
   solo las noches en que hubo algún roce.
 
-Quien hace de Mikel hoy es un guion con ruido, no un modelo: un Mikel que improvise y
-«cientos de llamadas por noche» esperan a que haya un modelo local en jacobo, que es
-cuando dejan de costar.
+### El Mikel que improvisa (2026-11-23)
+
+Desde el 2026-11-23, además del guion, **un Mikel que improvisa**: Codex CLI con la cuenta
+de ChatGPT de Mikel (plan Go, sin API) inventa las llamadas, hace de él turno a turno y
+juzga si consiguió lo que quería (`improvisa.js`). Era la tarea pensada para el Qwen de la
+P100; la eligió Mikel para Codex.
+
+```bash
+node telefono/simulador/simular.js --improvisa 6 --juzgar   # lo de cada noche (simulador-noche.timer, 03:40)
+node telefono/simulador/simular.js --casos ~/telefono-simulador/casos-improvisados.json
+```
+
+- **Codex va sin nada**: ni terminal, ni web, ni MCP, ni la config del usuario (los mismos
+  `--disable` que el respaldo del chat, cruzados con `codex features list`). Solo escribe
+  JSON con forma fija (`--output-schema`). Si en sus eventos aparece un comando, se corta.
+- **Inventar**: una llamada a Codex con el catálogo real del teléfono devuelve `n` llamadas
+  (objetivo, primera frase, modo, ruido y qué contesta cada herramienta en el mundo de
+  mentira). Las herramientas que no existen se tiran.
+- **Hablar**: cada frase de Mikel después de la primera es otra llamada a Codex con la
+  conversación hasta ahí, y cuelga cuando tiene lo que quería (tope de 6 turnos).
+- **Juzgar** (`--juzgar`): además del juez sin modelo de siempre, Codex dice si Mikel
+  consiguió su objetivo y hasta cuatro roces.
+- **Lo que sale mal se queda**: cada improvisada fallida se guarda con sus frases como caso
+  fijo en `~/telefono-simulador/casos-improvisados.json` (las 100 últimas), para volver a
+  pasarla después de arreglar. Y `ultima-noche.json`, que **el repaso de las 05:10 cuenta**
+  en su informe y en su aviso (no hay aviso aparte).
+
+**Lo que cuesta de verdad es Claude, no Codex.** Las frases de Mikel son cortas; quien
+contesta cada una es el Jarvis real, con la suscripción de Claude. Seis llamadas de hasta
+seis turnos son lo de una mañana de llamadas. Por eso el tope (`--max`, 15) sigue mandando,
+y por eso «cientos de llamadas por noche» siguen esperando a un cerebro local.
 
 ### El simulador: qué es de verdad y qué no
 

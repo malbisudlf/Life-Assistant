@@ -1,0 +1,10 @@
+[Unit]
+Description=Jarvis: el simulador de la noche, antes del repaso
+
+[Timer]
+# Antes del repaso de las 05:10, que lo cuenta en su informe y en su aviso.
+OnCalendar=*-*-* 03:40:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

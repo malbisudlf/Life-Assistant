@@ -406,3 +406,177 @@ class TestLaSesionDeUnaLlamada:
     def test_abrir_pide_id_valido(self, monkeypatch):
         servicio = _servicio(monkeypatch)
         assert servicio.tercero_abrir({"id": "x", "sistema": "s"}, "")[0] == 400
+
+
+class TestElRespaldoCodex:
+    """Si Claude no contesta, Codex con la suscripción de ChatGPT: las mismas reglas
+    (sin terminal, solo el MCP de Jarvis, nada que preguntar) y nunca a escondidas."""
+
+    def _codex(self, monkeypatch, tmp_path):
+        servicio = _servicio(monkeypatch)
+        monkeypatch.setattr(servicio, "DIRECTORIO", str(tmp_path))
+        monkeypatch.setattr(servicio, "CODEX_USO", str(tmp_path / "codex-uso.json"))
+        monkeypatch.setattr(servicio, "CODEX_ACTIVO", True)
+        monkeypatch.setattr(servicio, "_codex_conocidas", set(servicio._CODEX_APAGADO))
+        return servicio
+
+    def test_solo_apaga_lo_que_conoce_y_sin_terminal_no_hay_codex(self, monkeypatch, tmp_path):
+        """`--disable` con una función desconocida tumba a Codex: se cruza con su lista.
+        Y si no conoce las de ejecución, no se usa."""
+        servicio = self._codex(monkeypatch, tmp_path)
+        listado = "shell_tool    stable  true\nunified_exec  stable  true\napps  stable  true\n"
+        conocidas = servicio.codex_funciones(listado)
+        assert conocidas == {"shell_tool", "unified_exec", "apps"}
+        assert servicio.codex_preparado(conocidas) == ""
+        monkeypatch.setattr(servicio, "_codex_conocidas", conocidas)
+        args = servicio.comando_codex("/tmp/s.txt")
+        assert {args[i + 1] for i, a in enumerate(args) if a == "--disable"} == conocidas
+        assert "shell_tool" in servicio.codex_preparado({"apps"})
+
+    def test_sin_terminal_ni_mas_config_que_la_suya(self, monkeypatch, tmp_path):
+        servicio = self._codex(monkeypatch, tmp_path)
+        args = servicio._con_turno(servicio.comando_codex("/tmp/s.txt"), TURNO)
+        apagado = {args[i + 1] for i, a in enumerate(args) if a == "--disable"}
+        assert {"shell_tool", "unified_exec", "apps", "plugins", "computer_use",
+                "browser_use", "view_image"} <= apagado
+        assert args[args.index("--sandbox") + 1] == "read-only"
+        assert "--ignore-user-config" in args and "--ephemeral" in args
+        assert 'approval_policy="never"' in args
+        assert 'web_search="disabled"' in args
+        assert f'mcp_servers.jarvis.url="http://127.0.0.1:8000/mcp/chat?turno={TURNO}"' in args
+        # El token del MCP viaja por el entorno, nunca en los argumentos (se ven en `ps`).
+        assert not any("mcp-chat-token" in a for a in args)
+        assert servicio.entorno_codex()["JARVIS_MCP_CHAT_TOKEN"] == "mcp-chat-token"
+        assert not any("dangerously" in a or "bypass" in a for a in args)
+        assert args[-1] == "-"
+
+    def test_la_investigacion_solo_con_la_web(self, monkeypatch, tmp_path):
+        servicio = self._codex(monkeypatch, tmp_path)
+        args = servicio.comando_codex("/tmp/s.txt", mcp=False, web=True)
+        assert 'web_search="live"' in args
+        assert not any(a.startswith("mcp_servers") for a in args)
+        assert "shell_tool" in args
+
+    def test_lee_los_eventos(self, monkeypatch, tmp_path):
+        servicio = self._codex(monkeypatch, tmp_path)
+        lineas = [json.dumps(e) for e in (
+            {"type": "thread.started", "thread_id": "t"},
+            {"type": "item.started", "item": {"type": "mcp_tool_call", "server": "jarvis", "tool": "agenda"}},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "Mañana, a las 9."}},
+            {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}})]
+        eventos = list(servicio.eventos_codex(lineas))
+        assert eventos[0] == {"tipo": "herramienta", "nombre": "mcp__jarvis__agenda"}
+        assert {"tipo": "delta", "texto": "Mañana, a las 9."} in eventos
+        assert eventos[-1]["tipo"] == "fin" and eventos[-1]["respuesta"] == "Mañana, a las 9."
+
+    def test_un_comando_corta_el_turno(self, monkeypatch, tmp_path):
+        """Defensa de más: si una versión nueva le diera una terminal, no se usa."""
+        servicio = self._codex(monkeypatch, tmp_path)
+        lineas = [json.dumps({"type": "item.started", "item": {"type": "command_execution",
+                                                                 "command": "cat ~/.codex/auth.json"}}),
+                  json.dumps({"type": "turn.completed"})]
+        assert list(servicio.eventos_codex(lineas))[0]["tipo"] == "prohibido"
+
+    def test_si_claude_falla_contesta_codex_y_lo_dice(self, monkeypatch, tmp_path):
+        servicio = self._codex(monkeypatch, tmp_path)
+        monkeypatch.setattr(servicio, "turno", lambda c, a: (502, {"error": "OAuth caducado"}))
+        visto = {}
+
+        def _codex(prompt, sistema, **kw):
+            visto.update(prompt=prompt, **kw)
+            return {"respuesta": "Hola, señor.", "modelo": "codex"}
+        monkeypatch.setattr(servicio, "codex_correr", _codex)
+        codigo, datos = servicio.turno_con_respaldo(
+            {"turno": TURNO, "prompt": "hola", "sistema": "Eres Jarvis"}, "")
+        assert codigo == 200 and datos["respuesta"] == "Hola, señor."
+        assert datos["motor"] == "codex" and "ChatGPT" in datos["aviso"]
+        assert visto["turno_id"] == TURNO and visto["prompt"] == "hola"
+
+    def test_sin_codex_o_con_un_400_no_se_cambia_de_cerebro(self, monkeypatch, tmp_path):
+        servicio = self._codex(monkeypatch, tmp_path)
+        monkeypatch.setattr(servicio, "codex_correr", lambda *a, **k: pytest.fail("no toca"))
+        monkeypatch.setattr(servicio, "turno", lambda c, a: (400, {"error": "x"}))
+        assert servicio.turno_con_respaldo({}, "")[0] == 400
+        monkeypatch.setattr(servicio, "turno", lambda c, a: (502, {"error": "x"}))
+        monkeypatch.setattr(servicio, "CODEX_ACTIVO", False)
+        assert servicio.turno_con_respaldo({}, "")[0] == 502
+
+    def test_el_retransmitido_solo_cambia_si_no_ha_dicho_nada(self, monkeypatch, tmp_path):
+        servicio = self._codex(monkeypatch, tmp_path)
+
+        def _claude_mudo(c, a, escribir):
+            escribir({"tipo": "error", "error": "cuota agotada"})
+            return 200, None
+        monkeypatch.setattr(servicio, "turno_flujo", _claude_mudo)
+
+        def _codex(prompt, sistema, escribir=None, **kw):
+            escribir({"tipo": "delta", "texto": "Hola"})
+            return {"respuesta": "Hola", "modelo": "codex"}
+        monkeypatch.setattr(servicio, "codex_correr", _codex)
+        salida = []
+        servicio.turno_flujo_con_respaldo({"turno": TURNO, "prompt": "hola"}, "", salida.append)
+        assert [e["tipo"] for e in salida] == ["delta", "fin"]
+        assert salida[-1]["motor"] == "codex"
+
+        def _claude_a_medias(c, a, escribir):
+            escribir({"tipo": "delta", "texto": "Mañana"})
+            escribir({"tipo": "error", "error": "corte"})
+            return 200, None
+        monkeypatch.setattr(servicio, "turno_flujo", _claude_a_medias)
+        monkeypatch.setattr(servicio, "codex_correr", lambda *a, **k: pytest.fail("no toca"))
+        salida = []
+        servicio.turno_flujo_con_respaldo({"turno": TURNO, "prompt": "hola"}, "", salida.append)
+        assert [e["tipo"] for e in salida] == ["delta", "error"]
+
+    def test_el_tope_del_dia(self, monkeypatch, tmp_path):
+        servicio = self._codex(monkeypatch, tmp_path)
+        monkeypatch.setattr(servicio, "CODEX_MAX_DIA", 2)
+        assert servicio._codex_cupo_libre() and servicio._codex_cupo_libre()
+        assert not servicio._codex_cupo_libre()
+        assert "turnos de hoy" in servicio.codex_correr("hola", "s")["error"]
+
+
+class TestElDiario:
+    """La nota del día en la bóveda: los datos los pide el servicio, Codex va sin nada."""
+
+    def _diario(self, monkeypatch, tmp_path):
+        servicio = _servicio(monkeypatch)
+        monkeypatch.setattr(servicio, "DIRECTORIO", str(tmp_path))
+        monkeypatch.setattr(servicio, "BOVEDA_DIR", str(tmp_path / "boveda"))
+        monkeypatch.setattr(servicio, "CODEX_ACTIVO", True)
+        return servicio
+
+    def test_solo_fechas_dentro_de_la_boveda(self, monkeypatch, tmp_path):
+        servicio = self._diario(monkeypatch, tmp_path)
+        assert servicio.ruta_diario("2026-11-22").endswith("2026-11-22.md")
+        for mala in ("../../etc/passwd", "2026-11-22/../x", ""):
+            with pytest.raises(ValueError):
+                servicio.ruta_diario(mala)
+
+    def test_escribe_la_nota_sin_herramientas(self, monkeypatch, tmp_path):
+        servicio = self._diario(monkeypatch, tmp_path)
+        pedidas, visto = [], {}
+        monkeypatch.setattr(servicio, "_mcp_leer",
+                            lambda h, a: pedidas.append(h) or '{"dia": "domingo 22/11/2026"}')
+
+        def _codex(prompt, sistema, **kw):
+            visto.update(prompt=prompt, **kw)
+            return {"respuesta": "---\nfecha: 2026-11-22\ntags: [diario]\n---\n# Domingo 22 de noviembre\n\nDía tranquilo.",
+                    "modelo": "codex"}
+        monkeypatch.setattr(servicio, "codex_correr", _codex)
+        assert servicio.escribir_diario("2026-11-22") == "hecha"
+        nota = (tmp_path / "boveda" / "Diario" / "2026-11-22.md").read_text(encoding="utf-8")
+        assert "Día tranquilo." in nota and "Anterior: [[2026-11-21]]" in nota
+        # Solo herramientas de leer, y Codex sin MCP ni web (ni `turno_id` ni `web`).
+        assert set(pedidas) <= {"dia_reconstruir", "ideas"}
+        assert "turno_id" not in visto and not visto.get("web")
+        # Y no pisa la nota si ya existe.
+        assert servicio.escribir_diario("2026-11-22") == "ya_estaba"
+
+    def test_una_nota_sin_formato_no_se_guarda(self, monkeypatch, tmp_path):
+        servicio = self._diario(monkeypatch, tmp_path)
+        monkeypatch.setattr(servicio, "_mcp_leer", lambda h, a: "{}")
+        monkeypatch.setattr(servicio, "codex_correr",
+                            lambda *a, **k: {"respuesta": "Lo siento, no puedo.", "modelo": "codex"})
+        assert servicio.escribir_diario("2026-11-22").startswith("error")
+        assert not (tmp_path / "boveda" / "Diario" / "2026-11-22.md").exists()
