@@ -1189,9 +1189,10 @@ Pedido por Mikel: «que use mi cuenta de ChatGPT, y no pagar por APIs».
   plugins, imágenes…), sandbox de solo lectura, `--ignore-user-config` (solo el MCP que
   se declara en el turno), `approval_policy="never"` y `--ephemeral`. El token del MCP va
   por variable de entorno (`bearer_token_env_var`), nunca en los argumentos.
-- **Y una red de más**: si en los eventos aparece un `command_execution` o un
-  `file_change`, el proceso se mata y el turno falla. Mejor sin respuesta que con una
-  terminal que nadie ha aprobado (`_ITEMS_PROHIBIDOS`).
+- **Y una red de más**: si en los eventos aparece cualquier tipo que no esté en la lista
+  blanca (`_ITEMS_PERMITIDOS`) —un `command_execution`, un `file_change` o lo que traiga
+  una versión nueva—, el proceso se mata y el turno falla. Mejor sin respuesta que con
+  una terminal que nadie ha aprobado.
 - **Solo si Claude ha fallado, no si va lento**: con menos de 30 s del tope por delante
   no se intenta (el backend ya va a tirar de OpenAI). En el retransmitido, solo si Claude
   falla **antes de decir nada**: cambiar de cerebro a media frase repetiría la respuesta.

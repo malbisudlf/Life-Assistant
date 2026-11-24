@@ -678,8 +678,8 @@ _INVESTIGAR_RUTAS = {"/investigar/encargar": investigar_encargar, "/investigar/l
 #
 # - **Sin terminal ni ficheros.** `shell_tool` y `unified_exec` apagados, y además el
 #   sandbox de solo lectura: si una versión nueva trae otra herramienta de ejecución, no
-#   escribe. Y la salida se vigila (`_ITEMS_PROHIBIDOS`): un comando o un parche en el
-#   flujo de eventos mata el proceso y el turno falla. Mejor sin respuesta que con una
+#   escribe. Y la salida se vigila (`_ITEMS_PERMITIDOS`, lista blanca): un comando, un
+#   parche o cualquier evento que no esté en ella mata el proceso y el turno falla. Mejor sin respuesta que con una
 #   terminal que nadie ha aprobado.
 # - **Solo el MCP de Jarvis.** `--ignore-user-config` deja fuera lo que haya en
 #   `~/.codex/config.toml`, y el servidor se declara por `-c` en cada turno. El token
