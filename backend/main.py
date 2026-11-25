@@ -41036,8 +41036,11 @@ _JARVIS_HERRAMIENTAS = {
                          "piden series_pedir y series_borrar) y si ya está en Sonarr: episodios "
                          "bajados por temporada, resolución, tamaño y próximo episodio. Para "
                          "series; las películas, pelis_buscar. TVDB las nombra en inglés: si "
-                         "no sale con el título de aquí, prueba con el original.",
-        "parametros":    {"texto":  {"type": "string", "description": "El título o parte."},
+                         "no sale con el título de aquí, prueba con el original. Su buscador "
+                         "no encuentra por texto muchas series pequeñas o de fuera: si tampoco "
+                         "sale, busca en internet su id de TheTVDB y pásalo como «tvdb:484042».",
+        "parametros":    {"texto":  {"type": "string",
+                                     "description": "El título o parte, o «tvdb:ID»."},
                           "limite": {"type": "integer",
                                      "description": "Cuántos resultados (por defecto 6)."}},
         "obligatorios":  ["texto"],
