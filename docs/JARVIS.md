@@ -52,7 +52,7 @@ el resto de patrones del backend en `docs/BACKEND_PATRONES.md`.
   | `whatsapp_enviar`, `whatsapp_programar` | le llega a otra persona |
   | `llamar_a_alguien` (desde el 2026-11-18, «¿Llamo a Erik?») | habla con otra persona en su nombre |
   | `editar_evento`, `borrar_evento` **solo si es una reunión suya con invitados** (`_evento_con_gente`) | les llega el cambio o la cancelación |
-  | `borrar_idea` (varias de una vez con una sola pregunta, desde el 2026-11-18), `pelis_borrar` | no hay papelera |
+  | `borrar_idea` (varias de una vez con una sola pregunta, desde el 2026-11-18), `pelis_borrar`, `series_borrar` | no hay papelera |
   | `cobrar_entrenamiento` | dinero; deshacerlo es ir a Supabase a mano |
   | `garaje`; en `casa_ordenar`, alarma, cerraduras, puertas, persianas y la privacidad o grabación de las cámaras (`_casa_pide_confirmar`) | abrir la casa |
   | `desplegar`, `arreglar_revision`, `encargar_proyecto`, `encargar_a_una_sesion`, `responder_a_la_sesion`, `encargar_al_pc` | lanzan código o tocan producción |
@@ -1065,6 +1065,9 @@ elemento real al ejecutar). Todo en `docs/JELLYFIN.md`.
 `indexadores_probar` e `indexadores_flaresolverr` (directas, no por teléfono) y
 `pelis_pedir` y `pelis_borrar` (con botón; el título se comprueba contra la película real).
 Borrar quita el fichero, no la película de Radarr. Todo en `docs/PELIS.md`.
+Las series, lo mismo con Sonarr desde el 2026-11-25 (`series_buscar`, `series_pedir`,
+`series_versiones`, `series_descargas`, `series_borrar`; se piden y se borran por
+temporadas): sección «Las series» de `docs/PELIS.md`.
 
 ## Moodle: las entregas
 

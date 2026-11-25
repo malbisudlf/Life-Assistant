@@ -98,15 +98,47 @@ Radarr la sigue esperando por RSS, y `pelis_descargas` la cuenta en `esperando_s
   indexador recortados y con `_AVISO_WEB`: los escribe quien subió el torrent o la web del
   indexador.
 
+## Las series: Sonarr (2026-11-25)
+
+Pedido por Mikel: «añade todo lo que puede hacer con las pelis pero para las series». Lo
+mismo, contra Sonarr (`jacobo:~/pelis`, dentro de gluetun, en el 8989, que caja reenvía por
+`pelis-puente` como el resto). Código en la sección «Series» de `backend/main.py`, justo
+después de las pelis; tests en `tests/backend/test_series.py`.
+
+```
+SONARR_URL=http://172.17.0.1:8989
+SONARR_API_KEY=<la de jacobo:~/pelis/sonarr/config.xml>
+SONARR_PERFIL=4K o 1080p     # sin valor por defecto, como RADARR_PERFIL
+SONARR_PERFIL_4K=Solo 4K     # el de «en 4K»; ese es el valor por defecto
+```
+
+| Herramienta | Confirma | Qué hace |
+|---|---|---|
+| `series_buscar` | No | `GET /series/lookup` (TVDB a través de Sonarr): título, año, temporadas, en emisión o terminada, cadena, idioma original y `tvdb_id`. Si ya está en Sonarr: episodios bajados frente a pedidos, por temporada, tamaño, próximo episodio y, si hay ficheros, cuántos hay por resolución y si son HDR (`GET /episodefile`) |
+| `series_pedir` | No | Nueva: `POST /series` con las temporadas marcadas (solo la pedida, o todas menos los especiales y las que salgan), el perfil, la carpeta y `searchForMissingEpisodes`. Ya en Sonarr: marca la temporada (`PUT /series/{id}`, que vigila sus episodios) y la busca (`SeasonSearch` o `SeriesSearch`). Si lo pedido ya está entero, no toca nada salvo `en_4k` |
+| `series_versiones` | No | `GET /release?seriesId=&seasonNumber=`: las versiones de una temporada por resolución, cuántas son la temporada entera y las semillas de la mejor. **Descarta lo que no es de esa serie** (`Unknown Series`, `Wrong series`, `Unable to parse`): Torrentio contesta a todo con lo suyo |
+| `series_descargas` | No | `GET /queue` agrupada por `downloadId` (un pack sale una vez, con «1x01-1x10»), lo pedido sin encontrar (episodios que faltan y de qué temporadas), los episodios de las próximas dos semanas y el espacio libre |
+| `series_borrar` | **Sí** | Una temporada o la serie entera: cancela lo que tenga a medias (`DELETE /queue/bulk`, de una vez, porque los episodios de un pack comparten torrent), borra los episodios (`DELETE /episodefile/bulk`) y deja de vigilar lo borrado. **La serie se queda en Sonarr**, como la película en Radarr. El torrent lo suelta `notar-borrados.py` en jacobo, que ya mira la categoría de Sonarr |
+
+Lo que cambia respecto a las pelis:
+
+- **Por temporadas.** Juego de tronos entero en 4K son ~550 GB. Sin temporada se pide
+  entera; la descripción le dice al modelo que pregunte cuál si la serie es larga.
+- **El 4K de una serie no se marca como «esperando su 4K»** en `series_descargas`: haría
+  falta mirar los ficheros de cada serie. `series_buscar` sí dice en qué resolución están.
+- Sin `SONARR_URL` y `SONARR_API_KEY` no se anuncian (`requiere_sonarr`) y
+  `mis_capacidades` lo dice.
+
 ## El teléfono
 
-Las de mirar (`pelis_buscar`, `pelis_descargas`, `pelis_versiones`, `indexadores_estado`) **entran** en
+Las de mirar (`pelis_buscar`, `pelis_descargas`, `pelis_versiones`, `indexadores_estado`, y las
+mismas de series) **entran** en
 `_MCP_SERVIDOR_SOLO_LECTURA`, con el criterio de Jellyfin: poco texto ajeno, recortado y
 marcado como dato.
 
 Desde el 2026-10-27 («los mismos permisos que el Jarvis de Telegram») también lo demás:
 
-- **Pedir y borrar** van al móvil con el botón «Sí, hazlo» (`PREGUNTAS_ACCIONES`, el
+- **Pedir y borrar** (pelis y series) van al móvil con el botón «Sí, hazlo» (`PREGUNTAS_ACCIONES`, el
   mismo camino que el calendario: «Lo que se confirma en el móvil» en `docs/JARVIS.md`).
   La frase la escribe `describir` con los datos de Radarr, igual que el botón de
   Telegram, y el «sí» ejecuta lo guardado. Las dos se pueden confirmar además hablando

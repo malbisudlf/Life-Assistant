@@ -442,6 +442,9 @@ class TestJarvisDespachador:
         monkeypatch.setattr(main, "RADARR_API_KEY", "radarr-clave")
         monkeypatch.setattr(main, "PROWLARR_URL", "http://prowlarr.test:9696")
         monkeypatch.setattr(main, "PROWLARR_API_KEY", "prowlarr-clave")
+        # Y Sonarr (las series), igual.
+        monkeypatch.setattr(main, "SONARR_URL", "http://sonarr.test:8989")
+        monkeypatch.setattr(main, "SONARR_API_KEY", "sonarr-clave")
         # Y el programador, que sin su puente no tiene a quién encargar nada.
         monkeypatch.setattr(main, "PROGRAMADOR_URL", "http://172.17.0.1:3341")
         monkeypatch.setattr(main, "PROGRAMADOR_TOKEN", "programador-token")

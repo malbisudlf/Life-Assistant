@@ -26339,11 +26339,13 @@ def _responder_pregunta(pid: str, n: int) -> dict:
 PREGUNTAS_ACCIONES           = {"crear_evento", "editar_evento", "borrar_evento",
                                 "reservar_bloques", "crear_tarea", "borrar_idea",
                                 "pelis_pedir", "pelis_borrar", "jellyfin_reproducir",
+                                "series_pedir", "series_borrar",
                                 "whatsapp_enviar", "whatsapp_programar", "poner_alarma",
                                 "garaje", "recado_seguir", "llamar_a_alguien"}
 # Lo que no es del calendario lleva su propio dibujo en el móvil: «📅 ¿Lo hago?» encima
 # de «Borrar El padrino» despista.
 PREGUNTAS_EMOJI              = {"poner_alarma": "⏰", "pelis_pedir": "🎬", "pelis_borrar": "🎬",
+                                "series_pedir": "📺", "series_borrar": "📺",
                                 "jellyfin_reproducir": "🎬", "whatsapp_enviar": "💬",
                                 "whatsapp_programar": "💬", "garaje": "🚗", "recado_seguir": "🗂",
                                 "llamar_a_alguien": "📞"}
@@ -26744,6 +26746,11 @@ def _lo_hecho(herramienta: str, args: dict, resultado: Optional[dict] = None) ->
         return f"{nombre}: {r.get('nota') or 'pedida a Radarr.'}"
     if herramienta == "pelis_borrar":
         return f"Borrada {r.get('borrada') or 'la película'}."
+    if herramienta == "series_pedir":
+        nombre = r.get("pedida") or r.get("buscando") or r.get("ya_estaba") or "La serie"
+        return f"{nombre}: {r.get('nota') or 'pedida a Sonarr.'}"
+    if herramienta == "series_borrar":
+        return f"Borrada {r.get('borrada') or 'la serie'}."
     if herramienta == "jellyfin_reproducir":
         return f"Poniendo {r.get('reproduciendo') or 'lo pedido'} en {r.get('en') or 'Jellyfin'}."
     # Sin el nombre: lo que contesta el puente es el de perfil, que puede escribirlo otro,
@@ -26876,7 +26883,8 @@ def _se_confirma_hablando(fila: dict) -> str:
 _PREGUNTA_VERBOS = {"Crear": "Creo", "Borrar": "Borro", "Abrir": "Abro", "Cerrar": "Cierro",
                     "Reservar": "Reservo", "Apuntar": "Apunto", "Poner": "Pongo",
                     "Mandar": "Mando", "Pedir": "Pido"}
-_PREGUNTA_SIN_PARENTESIS = {"garaje", "pelis_pedir", "pelis_borrar"}
+_PREGUNTA_SIN_PARENTESIS = {"garaje", "pelis_pedir", "pelis_borrar", "series_pedir",
+                            "series_borrar"}
 _PREGUNTA_COLA = re.compile(r"\.\s+(Les? llegará [^.]*\.)$")
 
 
@@ -35703,6 +35711,12 @@ RADARR_PERFIL      = os.getenv("RADARR_PERFIL", "").strip()
 # El de «bájamela en 4K» (2026-11-09): solo 2160p y con mejoras, para que cambie la de
 # 1080p que ya tenga por la 4K en cuanto la encuentre. Lo crea `configurar-arr.py`.
 RADARR_PERFIL_4K   = os.getenv("RADARR_PERFIL_4K", "Solo 4K").strip()
+# Las series (2026-11-25): Sonarr, junto a Radarr en la red de la VPN de jacobo (puerto 8989,
+# que caja reenvía por el puente como el resto). Mismos perfiles que las pelis, por nombre.
+SONARR_URL         = os.getenv("SONARR_URL", "").strip().rstrip("/")
+SONARR_API_KEY     = os.getenv("SONARR_API_KEY", "")
+SONARR_PERFIL      = os.getenv("SONARR_PERFIL", "").strip()
+SONARR_PERFIL_4K   = os.getenv("SONARR_PERFIL_4K", "Solo 4K").strip()
 PROWLARR_URL      = os.getenv("PROWLARR_URL", "").strip().rstrip("/")
 PROWLARR_API_KEY   = os.getenv("PROWLARR_API_KEY", "")
 ARR_TIMEOUT        = float(os.getenv("ARR_TIMEOUT", "15"))
@@ -35735,23 +35749,26 @@ def _prowlarr_configurado() -> bool:
 
 def _arr(servicio: str, metodo: str, ruta: str, params: Optional[dict] = None, cuerpo=None,
          timeout: Optional[float] = None, validacion: bool = False):
-    """Una llamada a Radarr (`servicio="radarr"`, API v3) o a Prowlarr (v1). Lanza
+    """Una llamada a Radarr (`servicio="radarr"`, API v3), a Sonarr (`"sonarr"`, v3, desde el
+    2026-11-25) o a Prowlarr (v1). Lanza
     `ArrNoContesta` con un motivo que se puede decir; del error solo se registra el tipo o el
     código, como en `_jellyfin`.
 
     `validacion`: las pruebas de indexadores contestan 400 con la lista de fallos cuando el
     indexador no funciona. Ahí el 400 es la respuesta, no un error.
     """
-    radarr = servicio == "radarr"
-    nombre = "Radarr" if radarr else "Prowlarr"
-    base, clave = (RADARR_URL, RADARR_API_KEY) if radarr else (PROWLARR_URL, PROWLARR_API_KEY)
+    nombre, base, clave, version = {
+        "radarr":   ("Radarr", RADARR_URL, RADARR_API_KEY, "v3"),
+        "sonarr":   ("Sonarr", SONARR_URL, SONARR_API_KEY, "v3"),
+        "prowlarr": ("Prowlarr", PROWLARR_URL, PROWLARR_API_KEY, "v1"),
+    }[servicio]
     if not (base and clave):
         raise ArrNoContesta(f"{nombre} no está configurado (faltan {nombre.upper()}_URL o "
                             f"{nombre.upper()}_API_KEY).")
     extra = {"json": cuerpo} if cuerpo is not None else {}
     try:
         r = getattr(http, metodo.lower())(
-            f"{base}/api/{'v3' if radarr else 'v1'}{ruta}", params=params or {},
+            f"{base}/api/{version}{ruta}", params=params or {},
             headers={"X-Api-Key": clave, "Accept": "application/json"},
             timeout=timeout or ARR_TIMEOUT, **extra)
     except Exception as e:   # noqa: BLE001
@@ -35852,24 +35869,29 @@ def _peli_a_borrar(tmdb_id, titulo: str) -> dict:
     return m
 
 
-def _radarr_perfil_id(en_4k: bool = False) -> int:
-    nombre, variable = ((RADARR_PERFIL_4K, "RADARR_PERFIL_4K") if en_4k
-                        else (RADARR_PERFIL, "RADARR_PERFIL"))
+def _radarr_perfil_id(en_4k: bool = False, servicio: str = "radarr") -> int:
+    """El id del perfil con el que se pide, por su nombre. Sirve también para Sonarr."""
+    sonarr = servicio == "sonarr"
+    nombre, variable = (
+        ((SONARR_PERFIL_4K, "SONARR_PERFIL_4K") if en_4k else (SONARR_PERFIL, "SONARR_PERFIL"))
+        if sonarr else
+        ((RADARR_PERFIL_4K, "RADARR_PERFIL_4K") if en_4k else (RADARR_PERFIL, "RADARR_PERFIL")))
     if not nombre:
         raise ArrNoContesta(f"Falta {variable}, el perfil de calidad con el que se piden: "
                             "sin él no pido nada.")
-    perfil = next((p for p in _arr_lista(_arr("radarr", "GET", "/qualityprofile"))
+    perfil = next((p for p in _arr_lista(_arr(servicio, "GET", "/qualityprofile"))
                    if str(p.get("name") or "").casefold() == nombre.casefold()), None)
     if not perfil or not perfil.get("id"):
-        raise ArrNoContesta(f"Radarr no tiene ningún perfil «{nombre}» ({variable}).")
+        raise ArrNoContesta(f"{'Sonarr' if sonarr else 'Radarr'} no tiene ningún perfil "
+                            f"«{nombre}» ({variable}).")
     return int(perfil["id"])
 
 
-def _radarr_perfil_4k_o_nada() -> Optional[int]:
+def _radarr_perfil_4k_o_nada(servicio: str = "radarr") -> Optional[int]:
     """El id del perfil 4K para mirar, no para pedir: sin él, nada se da por «esperando la
     4K», y mirar no falla por eso."""
     try:
-        return _radarr_perfil_id(en_4k=True)
+        return _radarr_perfil_id(en_4k=True, servicio=servicio)
     except ArrNoContesta:
         return None
 
@@ -36113,6 +36135,32 @@ _RECHAZO_DE_PERFIL = re.compile(r"cutoff|upgrade|not wanted in profile|existing 
 _RESOLUCIONES_ORDEN = ("4K", "1080p", "720p", "576p", "480p")
 
 
+def _arr_versiones(versiones: list, packs: bool = False) -> dict:
+    """Las versiones de una búsqueda manual, por resolución, de mejor a peor: cuántas, cuántas
+    se pueden bajar, y las semillas y el tamaño de la mejor. `packs` (series): cuántas de las
+    que se pueden bajar son la temporada entera."""
+    grupos: dict = {}
+    for v in versiones:
+        px = ((v.get("quality") or {}).get("quality") or {}).get("resolution")
+        clave = _resolucion_dicha(px) or "sin saber"
+        g = grupos.setdefault(clave, {"cuantas": 0, "se_pueden_bajar": 0})
+        g["cuantas"] += 1
+        motivos = [str(x) for x in v.get("rejections") or []
+                   if not _RECHAZO_DE_PERFIL.search(str(x))]
+        if motivos:
+            continue
+        g["se_pueden_bajar"] += 1
+        if packs and v.get("fullSeason"):
+            g["temporada_entera"] = g.get("temporada_entera", 0) + 1
+        semillas = int(v.get("seeders") or 0)
+        if semillas >= g.get("mas_semillas", -1):
+            g["mas_semillas"] = semillas
+            g["su_tamano_gb"] = round(float(v.get("size") or 0) / 1e9, 1)
+    orden = lambda k: (_RESOLUCIONES_ORDEN.index(k) if k in _RESOLUCIONES_ORDEN
+                       else len(_RESOLUCIONES_ORDEN))
+    return {k: grupos[k] for k in sorted(grupos, key=orden)}
+
+
 def _j_pelis_versiones(tmdb_id, titulo: str) -> dict:
     """Qué versiones hay ahora en los indexadores, por resolución (2026-11-09: «¿la hay en
     4K?»). Busca de verdad, como la búsqueda manual de Radarr, pero no baja nada. Solo
@@ -36127,25 +36175,8 @@ def _j_pelis_versiones(tmdb_id, titulo: str) -> dict:
                                     timeout=ARR_PRUEBA_TIMEOUT))
     except ArrNoContesta as e:
         return {"ok": False, "error": str(e)}
-    grupos: dict = {}
-    for v in versiones:
-        px = ((v.get("quality") or {}).get("quality") or {}).get("resolution")
-        clave = _resolucion_dicha(px) or "sin saber"
-        g = grupos.setdefault(clave, {"cuantas": 0, "se_pueden_bajar": 0})
-        g["cuantas"] += 1
-        motivos = [str(x) for x in v.get("rejections") or []
-                   if not _RECHAZO_DE_PERFIL.search(str(x))]
-        if motivos:
-            continue
-        g["se_pueden_bajar"] += 1
-        semillas = int(v.get("seeders") or 0)
-        if semillas >= g.get("mas_semillas", -1):
-            g["mas_semillas"] = semillas
-            g["su_tamano_gb"] = round(float(v.get("size") or 0) / 1e9, 1)
-    orden = lambda k: (_RESOLUCIONES_ORDEN.index(k) if k in _RESOLUCIONES_ORDEN
-                       else len(_RESOLUCIONES_ORDEN))
-    r = {"ok": True, "pelicula": _peli_nombre(m), **_peli_fichero(m),
-         "versiones": {k: grupos[k] for k in sorted(grupos, key=orden)}}
+    grupos = _arr_versiones(versiones)
+    r = {"ok": True, "pelicula": _peli_nombre(m), **_peli_fichero(m), "versiones": grupos}
     if not grupos.get("4K", {}).get("se_pueden_bajar"):
         r["nota"] = ("No hay ninguna versión 4K que se pueda bajar ahora mismo."
                      if not grupos.get("4K") else
@@ -36191,6 +36222,486 @@ def _j_pelis_borrar(tmdb_id, titulo: str) -> dict:
             "descargas_canceladas": canceladas,
             "nota": "Radarr ya no la busca. Si se compartía por torrent, en 10 minutos como "
                     "mucho la quita de qBittorrent el vigía de caja, y el sitio queda libre."}
+
+
+# ── Series: lo mismo que las pelis, con Sonarr (2026-11-25) ──────────────────────
+# Pedido por Mikel: «añade todo lo que puede hacer con las pelis pero para las series».
+# Mismas reglas que arriba (la clave en la cabecera, solo títulos y años, mirar directo,
+# borrar con botón) y dos diferencias que lo cambian casi todo:
+#   - **Una serie se pide por temporadas.** Sin temporada, todas (y las que salgan); con
+#     ella, solo esa. Juego de tronos entero en 4K son ~550 GB: que «bájame la temporada 3»
+#     no vigile las otras siete.
+#   - **Borrar puede ser una temporada.** La serie se queda en Sonarr, como la película en
+#     Radarr; lo borrado deja de vigilarse. El torrent lo suelta `notar-borrados.py` en
+#     jacobo, que ya mira la categoría de Sonarr.
+# Los episodios de un pack salen en la cola de Sonarr uno por uno con la misma descarga
+# (`downloadId`): aquí se cuentan como una sola, como la ve qBittorrent.
+_SONARR_EMISION = {"continuing": "en emisión", "ended": "terminada", "upcoming": "por estrenar"}
+# Lo que Sonarr encuentra y no es de esta serie: Torrentio contesta a todo con lo suyo (a
+# «Paga o muere», packs de Juego de tronos, 2026-11-25). No son versiones de nada.
+_RECHAZO_DE_OTRA_SERIE = re.compile(r"unknown series|wrong series|unable to parse|"
+                                    r"wrong season|not the right season", re.I)
+
+
+def _sonarr_configurado() -> bool:
+    return bool(SONARR_URL and SONARR_API_KEY)
+
+
+def _serie_nombre(s: dict) -> str:
+    return _peli_nombre(s)
+
+
+def _serie_cuadra(titulo: str, s: dict) -> bool:
+    """¿El título del botón es esta serie? Con sus títulos alternativos: Sonarr las nombra
+    como TVDB (a menudo en inglés) y Mikel la pide por la de aquí."""
+    otros = [a.get("title") for a in s.get("alternateTitles") or [] if isinstance(a, dict)]
+    return any(_peli_cuadra(titulo, {"title": n}) for n in [s.get("title"), *otros] if n)
+
+
+def _tvdb_id(valor) -> int:
+    try:
+        tvdb = int(str(valor).strip())
+    except (TypeError, ValueError):
+        tvdb = 0
+    if not 0 < tvdb < 100_000_000:
+        raise ArrNoContesta("Ese id no es de TVDB: sácalo de series_buscar.")
+    return tvdb
+
+
+def _temporada_pedida(valor) -> Optional[int]:
+    """La temporada del modelo: nada (vacío, 0 no: los especiales son la 0) o un número."""
+    if valor is None or (isinstance(valor, str) and not valor.strip()):
+        return None
+    try:
+        t = int(str(valor).strip())
+    except (TypeError, ValueError):
+        raise ArrNoContesta("La temporada tiene que ser un número.")
+    if not 0 <= t < 200:
+        raise ArrNoContesta("Esa temporada no existe.")
+    return t
+
+
+def _serie_en_sonarr(tvdb: int) -> Optional[dict]:
+    return next((s for s in _arr_lista(_arr("sonarr", "GET", "/series", {"tvdbId": tvdb}))
+                 if s.get("tvdbId") == tvdb), None)
+
+
+def _serie_a_pedir(tvdb_id, titulo: str) -> dict:
+    """La serie de Sonarr si ya la tiene (con su `id`), o la ficha de TVDB si no."""
+    tvdb = _tvdb_id(tvdb_id)
+    s = _serie_en_sonarr(tvdb)
+    if s is None:
+        s = next((x for x in _arr_lista(_arr("sonarr", "GET", "/series/lookup",
+                                             {"term": f"tvdb:{tvdb}"}))
+                  if x.get("tvdbId") == tvdb), None)
+        if not s:
+            raise ArrNoContesta("TVDB no tiene ninguna serie con ese id.")
+    if not _serie_cuadra(titulo, s):
+        raise ArrNoContesta(f"El título «{str(titulo)[:80]}» no es el de ese id "
+                            f"({_serie_nombre(s)}): búscala otra vez.")
+    return s
+
+
+def _serie_a_borrar(tvdb_id, titulo: str) -> dict:
+    s = _serie_en_sonarr(_tvdb_id(tvdb_id))
+    if not s or not s.get("id"):
+        raise ArrNoContesta("Esa serie no está en Sonarr: no hay nada que borrar.")
+    if not _serie_cuadra(titulo, s):
+        raise ArrNoContesta(f"El título «{str(titulo)[:80]}» no es el de ese id "
+                            f"({_serie_nombre(s)}): búscala otra vez.")
+    return s
+
+
+def _serie_temporadas(s: dict) -> list:
+    """Las temporadas de verdad (sin la 0, los especiales), en orden."""
+    return sorted((t for t in s.get("seasons") or []
+                   if isinstance(t, dict) and int(t.get("seasonNumber") or 0) > 0),
+                  key=lambda t: int(t["seasonNumber"]))
+
+
+def _temporada_existe(s: dict, t: Optional[int]) -> None:
+    numeros = [int(x["seasonNumber"]) for x in _serie_temporadas(s)]
+    if t is not None and numeros and t not in numeros:
+        raise ArrNoContesta(f"{_serie_nombre(s)} no tiene temporada {t}: tiene de la "
+                            f"{numeros[0]} a la {numeros[-1]}.")
+
+
+def _est(x: dict) -> dict:
+    return x.get("statistics") if isinstance(x.get("statistics"), dict) else {}
+
+
+def _temporada_completa(t: dict) -> bool:
+    """Vigilada y con todo lo emitido bajado. Una no vigilada no cuenta lo que falta."""
+    e = _est(t)
+    return bool(t.get("monitored") and int(e.get("episodeFileCount") or 0) > 0
+                and int(e.get("episodeFileCount") or 0) >= int(e.get("episodeCount") or 0))
+
+
+def _serie_estado(s: dict) -> dict:
+    """Cómo la tiene Sonarr: lo bajado frente a lo pedido, por temporada, y lo próximo."""
+    e = _est(s)
+    tiene, pedidos = int(e.get("episodeFileCount") or 0), int(e.get("episodeCount") or 0)
+    d = {"en_sonarr": ("borrada" if not s.get("monitored") and not tiene else
+                       "pedida, sin bajar aún" if not tiene else
+                       "descargada" if tiene >= pedidos else "a medias"),
+         "episodios_bajados": tiene, "episodios_pedidos": max(pedidos, tiene)}
+    temporadas = []
+    for t in _serie_temporadas(s)[:30]:
+        et = _est(t)
+        temporadas.append({"temporada": int(t["seasonNumber"]), "pedida": bool(t.get("monitored")),
+                           "bajados": int(et.get("episodeFileCount") or 0),
+                           "episodios": int(et.get("totalEpisodeCount") or 0)})
+    if temporadas:
+        d["por_temporada"] = temporadas
+    if e.get("sizeOnDisk"):
+        d["tamano_gb"] = round(float(e["sizeOnDisk"]) / 1e9, 1)
+    if s.get("nextAiring"):
+        d["proximo_episodio"] = str(s["nextAiring"])[:10]
+    return d
+
+
+def _serie_ficheros(sid: int) -> dict:
+    """Cómo son los episodios bajados: cuántos por resolución, y si hay HDR."""
+    por: dict = {}
+    hdr = set()
+    for f in _arr_lista(_arr("sonarr", "GET", "/episodefile", {"seriesId": sid})):
+        calidad = ((f.get("quality") or {}).get("quality") or {})
+        r = _resolucion_dicha(calidad.get("resolution")) or "sin saber"
+        por[r] = por.get(r, 0) + 1
+        info = f.get("mediaInfo") if isinstance(f.get("mediaInfo"), dict) else {}
+        h = str(info.get("videoDynamicRangeType") or info.get("videoDynamicRange") or "")
+        if h and h.upper() != "SDR":
+            hdr.add(h[:30])
+    d = {"resoluciones": por} if por else {}
+    if hdr:
+        d["hdr"] = ", ".join(sorted(hdr))
+    return d
+
+
+def _j_series_buscar(texto: str, limite: int = 6) -> dict:
+    texto = str(texto or "").strip()[:100]
+    if not texto:
+        return {"ok": False, "error": "Dime qué serie busco."}
+    try:
+        encontradas = [s for s in _arr_lista(_arr("sonarr", "GET", "/series/lookup",
+                                                  {"term": texto})) if s.get("tvdbId")]
+        # La más vista primero, como con las pelis: TVDB pone delante cualquiera que se llame igual.
+        encontradas.sort(key=lambda s: -int(((s.get("ratings") or {}).get("votes")) or 0))
+        encontradas = encontradas[:_arr_limite(limite, 6)]
+        biblioteca = ({s.get("id"): s for s in _arr_lista(_arr("sonarr", "GET", "/series"))}
+                      if any(s.get("id") for s in encontradas) else {})
+        resultados = []
+        for s in encontradas:
+            d = {"tvdb_id": int(s["tvdbId"]), "titulo": str(s.get("title") or "")[:120]}
+            if s.get("year"):
+                d["anio"] = s["year"]
+            n = len(_serie_temporadas(s))
+            if n:
+                d["temporadas"] = n
+            if s.get("status") in _SONARR_EMISION:
+                d["emision"] = _SONARR_EMISION[s["status"]]
+            if s.get("network"):
+                d["cadena"] = str(s["network"])[:40]
+            idioma = (s.get("originalLanguage") or {}).get("name")
+            if idioma:
+                d["idioma_original"] = str(idioma)[:30]
+            suya = biblioteca.get(s.get("id")) if s.get("id") else None
+            if suya:
+                d.update(_serie_estado(suya))
+                if _est(suya).get("episodeFileCount"):
+                    d.update(_serie_ficheros(int(suya["id"])))
+            resultados.append(d)
+    except ArrNoContesta as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "aviso": _AVISO_WEB, "resultados": resultados,
+            **({} if resultados else {"nota": f"No encuentro ninguna serie «{texto}»."})}
+
+
+def _serie_que_se_pide(s: dict, t: Optional[int], en_4k: bool) -> Optional[str]:
+    """Si lo pedido ya está entero (y no se pide en 4K), lo que se le dice; si no, nada."""
+    if en_4k or not s.get("id"):
+        return None
+    alcance = [x for x in _serie_temporadas(s) if t is None or int(x["seasonNumber"]) == t]
+    if alcance and all(_temporada_completa(x) for x in alcance):
+        return (f"{_serie_nombre(s)}" + (f", temporada {t}," if t is not None else "")
+                + " ya está descargada: está en Jellyfin.")
+    return None
+
+
+def _describir_series_pedir(args: dict) -> dict:
+    en_4k = _si_o_no(args.get("en_4k"))
+    try:
+        s = _serie_a_pedir(args.get("tvdb_id"), args.get("titulo"))
+        t = _temporada_pedida(args.get("temporada"))
+        _temporada_existe(s, t)
+    except ArrNoContesta as e:
+        return {"error": str(e)}
+    ya = _serie_que_se_pide(s, t, en_4k)
+    if ya:
+        return {"error": ya}
+    return {"texto": f"Pedir a Sonarr {_serie_nombre(s)}"
+                     + (f", temporada {t}" if t is not None else ", entera")
+                     + (" en 4K" if en_4k else "")
+                     + (" (ya la tenía: la vuelve a buscar)" if s.get("id") else "")}
+
+
+def _j_series_pedir(tvdb_id, titulo: str, temporada=None, en_4k=False) -> dict:
+    """Pide una serie, o una temporada suya. `en_4k`, como en las pelis: el perfil de solo
+    4K, que además cambia lo que haya de menos por la 4K cuando la encuentra."""
+    en_4k = _si_o_no(en_4k)
+    try:
+        s = _serie_a_pedir(tvdb_id, titulo)
+        t = _temporada_pedida(temporada)
+        _temporada_existe(s, t)
+        nombre = _serie_nombre(s) + (f", temporada {t}" if t is not None else "") \
+            + (" en 4K" if en_4k else "")
+        ya = _serie_que_se_pide(s, t, en_4k)
+        if ya:
+            return {"ok": True, "ya_estaba": nombre, **_serie_estado(s), "nota": ya}
+        dentro = lambda n: (t is None and n > 0) or n == t
+        if s.get("id"):
+            sid = int(s["id"])
+            perfil = s.get("qualityProfileId")
+            if en_4k:
+                perfil = _radarr_perfil_id(en_4k=True, servicio="sonarr")
+            elif perfil and perfil == _radarr_perfil_4k_o_nada("sonarr"):
+                perfil = _radarr_perfil_id(servicio="sonarr")
+            temporadas = [dict(x, monitored=bool(x.get("monitored"))
+                               or dentro(int(x.get("seasonNumber") or 0)))
+                          for x in s.get("seasons") or [] if isinstance(x, dict)]
+            # Sonarr vigila los episodios de una temporada al marcarla aquí.
+            _arr("sonarr", "PUT", f"/series/{sid}",
+                 cuerpo=dict(s, monitored=True, qualityProfileId=perfil, seasons=temporadas))
+            _arr("sonarr", "POST", "/command",
+                 cuerpo=({"name": "SeasonSearch", "seriesId": sid, "seasonNumber": t}
+                         if t is not None else {"name": "SeriesSearch", "seriesId": sid}))
+            return {"ok": True, "buscando": nombre,
+                    "nota": "Ya estaba en Sonarr: la está buscando otra vez."
+                            + (" Lo que tenga de menos se queda hasta que encuentre la 4K."
+                               if en_4k and _est(s).get("episodeFileCount") else "")}
+        nueva = {k: v for k, v in s.items() if k != "id"}
+        # Sin `monitor` en addOptions, Sonarr vigila según las temporadas marcadas: como Seerr.
+        nueva.update(
+            qualityProfileId=_radarr_perfil_id(en_4k, servicio="sonarr"),
+            rootFolderPath=_arr_raiz("sonarr"), monitored=True, seasonFolder=True,
+            monitorNewItems="all" if t is None else "none",
+            seasons=[dict(x, monitored=dentro(int(x.get("seasonNumber") or 0)))
+                     for x in s.get("seasons") or [] if isinstance(x, dict)],
+            addOptions={"searchForMissingEpisodes": True, "ignoreEpisodesWithFiles": True})
+        _arr("sonarr", "POST", "/series", cuerpo=nueva)
+    except ArrNoContesta as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "pedida": nombre,
+            "nota": "Sonarr la está buscando; en cuanto encuentre una buena empieza a bajar "
+                    "(series_descargas), y cada episodio aparece solo en Jellyfin al terminar."
+                    + ("" if t is not None else " Las temporadas nuevas también se bajarán.")
+                    + (" Solo vale 4K: si no hay, se queda esperando a que salga."
+                       if en_4k else "")}
+
+
+def _arr_raiz(servicio: str) -> str:
+    raices = [r for r in _arr_lista(_arr(servicio, "GET", "/rootfolder")) if r.get("path")]
+    if not raices:
+        raise ArrNoContesta(f"{servicio.capitalize()} no tiene carpeta de destino.")
+    return str(raices[0]["path"])
+
+
+def _j_series_versiones(tvdb_id, titulo: str, temporada=None) -> dict:
+    """Qué hay ahora en los indexadores de una temporada, por resolución. Como
+    pelis_versiones: busca de verdad, no baja nada y no da nombres de torrent."""
+    try:
+        s = _serie_a_pedir(tvdb_id, titulo)
+        t = _temporada_pedida(temporada)
+        _temporada_existe(s, t)
+        if not s.get("id"):
+            return {"ok": False, "serie": _serie_nombre(s),
+                    "error": "Aún no está en Sonarr, y Sonarr solo busca versiones de las "
+                             "suyas. Pídela (la temporada que quiera) y luego mira."}
+        if t is None:
+            # La primera pedida a la que le falta algo; si no, la última.
+            temporadas = _serie_temporadas(s)
+            falta = [x for x in temporadas if x.get("monitored") and not _temporada_completa(x)]
+            t = int((falta or temporadas or [{"seasonNumber": 1}])[0 if falta else -1]
+                    ["seasonNumber"])
+        versiones = _arr_lista(_arr("sonarr", "GET", "/release",
+                                    {"seriesId": int(s["id"]), "seasonNumber": t},
+                                    timeout=ARR_PRUEBA_TIMEOUT))
+    except ArrNoContesta as e:
+        return {"ok": False, "error": str(e)}
+    suyas = [v for v in versiones
+             if not any(_RECHAZO_DE_OTRA_SERIE.search(str(x)) for x in v.get("rejections") or [])]
+    grupos = _arr_versiones(suyas, packs=True)
+    r = {"ok": True, "serie": _serie_nombre(s), "temporada": t, "versiones": grupos}
+    if len(suyas) < len(versiones):
+        r["de_otras_series"] = len(versiones) - len(suyas)
+    if not any(g.get("se_pueden_bajar") for g in grupos.values()):
+        r["nota"] = (f"No hay ninguna versión de la temporada {t} que se pueda bajar ahora "
+                     "mismo. Sonarr la sigue vigilando y la cogerá sola si aparece.")
+    elif not grupos.get("4K", {}).get("se_pueden_bajar"):
+        r["nota"] = "No hay ninguna versión 4K que se pueda bajar ahora mismo."
+    return r
+
+
+def _episodios_dichos(numeros: list) -> str:
+    """[(1, 1), (1, 2), (1, 3)] → «1x01-1x03»; sueltos, separados por comas."""
+    numeros = sorted(set(numeros))
+    if not numeros:
+        return ""
+    tramos, ini, fin = [], numeros[0], numeros[0]
+    for t, e in numeros[1:]:
+        if t == fin[0] and e == fin[1] + 1:
+            fin = (t, e)
+            continue
+        tramos.append((ini, fin))
+        ini = fin = (t, e)
+    tramos.append((ini, fin))
+    dicho = lambda x: f"{x[0]}x{x[1]:02d}"
+    return ", ".join(dicho(a) if a == b else f"{dicho(a)}-{dicho(b)}" for a, b in tramos)[:120]
+
+
+def _j_series_descargas() -> dict:
+    try:
+        cola = _arr("sonarr", "GET", "/queue", {"includeSeries": "true", "includeEpisode": "true",
+                                                "pageSize": 200})
+        series = _arr_lista(_arr("sonarr", "GET", "/series"))
+        raices = _arr_lista(_arr("sonarr", "GET", "/rootfolder"))
+    except ArrNoContesta as e:
+        return {"ok": False, "error": str(e)}
+    descargas: dict = {}
+    en_cola: dict = {}
+    for q in _arr_lista((cola or {}).get("records") if isinstance(cola, dict) else []):
+        clave = q.get("downloadId") or f"id{q.get('id')}"
+        ep = q.get("episode") if isinstance(q.get("episode"), dict) else {}
+        d = descargas.get(clave)
+        if d is None:
+            s = q.get("series") if isinstance(q.get("series"), dict) else {}
+            total, falta = float(q.get("size") or 0), float(q.get("sizeleft") or 0)
+            estado = str((q.get("trackedDownloadState")
+                          if q.get("trackedDownloadState") in ("importPending", "importing",
+                                                                "failedPending", "failed")
+                          else q.get("status")) or "")
+            d = {"serie": _serie_nombre(s) if s else str(q.get("title") or "")[:120],
+                 "estado": _ARR_ESTADOS.get(estado, estado[:40]),
+                 "porcentaje": round(100 * (1 - falta / total)) if total else 0,
+                 "tamano_gb": round(total / 1e9, 1), "_eps": []}
+            if s.get("tvdbId"):
+                d["tvdb_id"] = s["tvdbId"]
+            if _arr_minutos(q.get("timeleft")) is not None:
+                d["quedan_min"] = _arr_minutos(q.get("timeleft"))
+            calidad = ((q.get("quality") or {}).get("quality") or {}).get("name")
+            if calidad:
+                d["calidad"] = str(calidad)[:40]
+            avisos = [str(x)[:160] for m in q.get("statusMessages") or [] if isinstance(m, dict)
+                      for x in m.get("messages") or []]
+            if q.get("errorMessage"):
+                avisos.insert(0, str(q["errorMessage"])[:160])
+            if avisos:
+                d["avisos"] = avisos[:3]
+            descargas[clave] = d
+        if ep.get("seasonNumber") is not None and ep.get("episodeNumber") is not None:
+            d["_eps"].append((int(ep["seasonNumber"]), int(ep["episodeNumber"])))
+        en_cola[q.get("seriesId")] = en_cola.get(q.get("seriesId"), 0) + 1
+    bajando = []
+    for d in descargas.values():
+        eps = d.pop("_eps")
+        if eps:
+            d["episodios"] = _episodios_dichos(eps)
+        bajando.append(d)
+    sin_encontrar, proximos = [], []
+    hoy = datetime.now(timezone.utc).date()
+    for s in series:
+        if not s.get("monitored"):
+            continue
+        e = _est(s)
+        faltan = (int(e.get("episodeCount") or 0) - int(e.get("episodeFileCount") or 0)
+                  - en_cola.get(s.get("id"), 0))
+        if faltan > 0:
+            temps = [int(t["seasonNumber"]) for t in _serie_temporadas(s)
+                     if t.get("monitored") and not _temporada_completa(t)
+                     and int(_est(t).get("episodeCount") or 0)]
+            sin_encontrar.append({"serie": _serie_nombre(s), "tvdb_id": s.get("tvdbId"),
+                                  "faltan_episodios": faltan,
+                                  **({"temporadas": temps} if temps else {}),
+                                  "pedida": str(s.get("added") or "")[:10]})
+        try:
+            cuando = datetime.fromisoformat(str(s.get("nextAiring") or "")
+                                            .replace("Z", "+00:00")).date()
+        except ValueError:
+            cuando = None
+        if cuando and 0 <= (cuando - hoy).days <= 14:
+            proximos.append({"serie": _serie_nombre(s), "fecha": cuando.isoformat()})
+    r = {"ok": True, "aviso": _AVISO_WEB, "bajando": bajando[:_PELIS_MAX],
+         "pedidas_sin_encontrar": sin_encontrar[:_PELIS_MAX]}
+    if proximos:
+        r["proximos_episodios"] = sorted(proximos, key=lambda x: x["fecha"])[:_PELIS_MAX]
+    if raices and raices[0].get("freeSpace") is not None:
+        r["libre_gb"] = round(float(raices[0]["freeSpace"]) / 1e9)
+    if not bajando and not sin_encontrar:
+        r["nota"] = "No se está bajando ninguna serie, ni hay nada pedido sin encontrar."
+    return r
+
+
+def _serie_alcance(s: dict, t: Optional[int]) -> tuple:
+    """(episodios bajados, ¿algo vigilado?) de la serie entera o de una temporada."""
+    if t is None:
+        return int(_est(s).get("episodeFileCount") or 0), bool(s.get("monitored"))
+    x = next((x for x in s.get("seasons") or [] if int(x.get("seasonNumber") or -1) == t), {})
+    return int(_est(x).get("episodeFileCount") or 0), bool(x.get("monitored"))
+
+
+def _describir_series_borrar(args: dict) -> dict:
+    try:
+        s = _serie_a_borrar(args.get("tvdb_id"), args.get("titulo"))
+        t = _temporada_pedida(args.get("temporada"))
+        _temporada_existe(s, t)
+    except ArrNoContesta as e:
+        return {"error": str(e)}
+    bajados, vigilada = _serie_alcance(s, t)
+    que = _serie_nombre(s) + (f", temporada {t}" if t is not None else "")
+    if not bajados and not vigilada:
+        return {"error": f"{que} ya está borrada."}
+    return {"texto": f"Borrar {que}"
+                     + (f" con sus {bajados} episodios (no hay papelera)" if bajados > 1 else
+                        " con su episodio (no hay papelera)" if bajados else
+                        ": dejar de buscarla y quitar lo que tenga a medias")}
+
+
+def _j_series_borrar(tvdb_id, titulo: str, temporada=None) -> dict:
+    try:
+        s = _serie_a_borrar(tvdb_id, titulo)
+        t = _temporada_pedida(temporada)
+        _temporada_existe(s, t)
+        sid = int(s["id"])
+        de_aqui = lambda n: t is None or n == t
+        # Lo que tenga a medias: de una vez, porque los episodios de un pack comparten
+        # descarga y Sonarr la quita de qBittorrent una sola vez.
+        cola = [q for q in _arr_lista(_arr("sonarr", "GET", "/queue/details", {"seriesId": sid}))
+                if q.get("id") and de_aqui(int((q.get("episode") or {}).get("seasonNumber")
+                                               or q.get("seasonNumber") or 0))]
+        if cola:
+            _arr("sonarr", "DELETE", "/queue/bulk",
+                 {"removeFromClient": "true", "blocklist": "false"},
+                 cuerpo={"ids": [int(q["id"]) for q in cola]})
+        ficheros = [int(f["id"]) for f in _arr_lista(_arr("sonarr", "GET", "/episodefile",
+                                                          {"seriesId": sid}))
+                    if f.get("id") and de_aqui(int(f.get("seasonNumber") or 0))]
+        if ficheros:
+            _arr("sonarr", "DELETE", "/episodefile/bulk", cuerpo={"episodeFileIds": ficheros})
+        actual = _arr("sonarr", "GET", f"/series/{sid}")
+        if isinstance(actual, dict) and actual.get("id"):
+            temporadas = [dict(x, monitored=False if de_aqui(int(x.get("seasonNumber") or 0))
+                               else bool(x.get("monitored")))
+                          for x in actual.get("seasons") or [] if isinstance(x, dict)]
+            _arr("sonarr", "PUT", f"/series/{sid}",
+                 cuerpo=dict(actual, seasons=temporadas,
+                             monitored=bool(actual.get("monitored")) and t is not None))
+    except ArrNoContesta as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "borrada": _serie_nombre(s) + (f", temporada {t}" if t is not None else ""),
+            "episodios_borrados": len(ficheros),
+            "descargas_canceladas": len({q.get("downloadId") or q["id"] for q in cola}),
+            "nota": "Sonarr ya no la busca. Si se compartía por torrent, en 10 minutos como "
+                    "mucho la quita de qBittorrent el vigía de jacobo, y el sitio queda libre."}
 
 
 def _prowlarr_indexador(nombre: str, indexadores: list) -> dict:
@@ -39933,6 +40444,9 @@ def _j_mis_capacidades() -> dict:
     if not _radarr_configurado():
         apagado.append("Radarr no está conectado (faltan RADARR_URL y RADARR_API_KEY), así que "
                        "no puedo pedir películas, ni decir cómo van, ni borrarlas.")
+    if not _sonarr_configurado():
+        apagado.append("Sonarr no está conectado (faltan SONARR_URL y SONARR_API_KEY), así que "
+                       "no puedo pedir series, ni decir cómo van, ni borrarlas.")
     if not _prowlarr_configurado():
         apagado.append("Prowlarr no está conectado (faltan PROWLARR_URL y PROWLARR_API_KEY), así "
                        "que no puedo mirar ni arreglar los indexadores.")
@@ -40513,6 +41027,88 @@ _JARVIS_HERRAMIENTAS = {
                                                      "(se comprueba que casan)."}},
         "obligatorios":  ["tmdb_id", "titulo"],
         "requiere_radarr": True,
+    },
+    "series_buscar": {
+        "confirmar":     False,
+        "fn":            _j_series_buscar,
+        "descripcion":   "Busca una serie para pedirla (en TVDB, a través de Sonarr): título, año, "
+                         "temporadas, si sigue en emisión, idioma original, su tvdb_id (lo que "
+                         "piden series_pedir y series_borrar) y si ya está en Sonarr: episodios "
+                         "bajados por temporada, resolución, tamaño y próximo episodio. Para "
+                         "series; las películas, pelis_buscar. TVDB las nombra en inglés: si "
+                         "no sale con el título de aquí, prueba con el original.",
+        "parametros":    {"texto":  {"type": "string", "description": "El título o parte."},
+                          "limite": {"type": "integer",
+                                     "description": "Cuántos resultados (por defecto 6)."}},
+        "obligatorios":  ["texto"],
+        "requiere_sonarr": True,
+    },
+    "series_pedir": {
+        "confirmar":     False,
+        "fn":            _j_series_pedir,
+        "describir":     _describir_series_pedir,
+        "descripcion":   "Pide una serie a Sonarr para que la baje (cada episodio aparece solo en "
+                         "Jellyfin). Con temporada, solo esa; sin ella, todas y las que salgan. "
+                         "Saca antes el tvdb_id con series_buscar; si ya estaba, la vuelve a "
+                         "buscar. Sin en_4k baja 4K si la encuentra y si no 1080p; con en_4k, "
+                         "solo 4K. Una serie larga en 4K ocupa cientos de GB: si no dice "
+                         "temporada y tiene muchas, pregúntale cuál.",
+        "parametros":    {"tvdb_id":   {"type": "integer",
+                                        "description": "El tvdb_id que dio series_buscar."},
+                          "titulo":    {"type": "string",
+                                        "description": "El título tal cual vino con ese id "
+                                                       "(se comprueba que casan)."},
+                          "temporada": {"type": "integer",
+                                        "description": "Solo esta temporada; vacío = todas."},
+                          "en_4k":     {"type": "boolean",
+                                        "description": "true si la pide en 4K (solo 4K)."}},
+        "obligatorios":  ["tvdb_id", "titulo"],
+        "requiere_sonarr": True,
+    },
+    "series_versiones": {
+        "confirmar":     False,
+        "fn":            _j_series_versiones,
+        "descripcion":   "Qué versiones de una temporada hay ahora en los indexadores, por "
+                         "resolución: cuántas, cuántas se pueden bajar (y cuántas son la "
+                         "temporada entera), semillas y tamaño de la mejor. Para «¿la hay en "
+                         "4K?» o «¿por qué no baja?». Solo de series que ya están en Sonarr. No "
+                         "baja nada. Tarda hasta un minuto: avisa antes.",
+        "parametros":    {"tvdb_id":   {"type": "integer",
+                                        "description": "El tvdb_id que dio series_buscar."},
+                          "titulo":    {"type": "string",
+                                        "description": "El título tal cual vino con ese id."},
+                          "temporada": {"type": "integer",
+                                        "description": "La temporada; vacío = la primera "
+                                                       "pedida que no está entera."}},
+        "obligatorios":  ["tvdb_id", "titulo"],
+        "requiere_sonarr": True,
+    },
+    "series_descargas": {
+        "confirmar":     False,
+        "fn":            _j_series_descargas,
+        "descripcion":   "Cómo van las series pedidas: lo que se está bajando (qué episodios, "
+                         "porcentaje, minutos que quedan, avisos), lo pedido que Sonarr aún no "
+                         "encuentra, los episodios que salen en las próximas dos semanas y el "
+                         "espacio libre.",
+        "parametros":    {},
+        "requiere_sonarr": True,
+    },
+    "series_borrar": {
+        "confirmar":     True,
+        "fn":            _j_series_borrar,
+        "describir":     _describir_series_borrar,
+        "descripcion":   "Borra una serie o una temporada suya: sus episodios (desaparecen de "
+                         "Jellyfin; no hay papelera), lo que tenga a medias, y Sonarr deja de "
+                         "buscarla. Saca el tvdb_id de series_buscar o series_descargas. NO la "
+                         "borra al momento: lo aprueba el usuario.",
+        "parametros":    {"tvdb_id":   {"type": "integer", "description": "Su tvdb_id."},
+                          "titulo":    {"type": "string",
+                                        "description": "El título tal cual vino con ese id "
+                                                       "(se comprueba que casan)."},
+                          "temporada": {"type": "integer",
+                                        "description": "Solo esta temporada; vacío = entera."}},
+        "obligatorios":  ["tvdb_id", "titulo"],
+        "requiere_sonarr": True,
     },
     "indexadores_estado": {
         "confirmar":     False,
@@ -41975,6 +42571,7 @@ _TRAS_AJENO_SE_PUEDE = frozenset({
     "pc_elementos", "pc_dibujar", "pc_tutorial",
     "musica_que_suena", "musica_mis_listas", "jellyfin_seguir", "jellyfin_novedades",
     "jellyfin_buscar", "cine_proponer", "pelis_buscar", "pelis_descargas", "pelis_versiones",
+    "series_buscar", "series_descargas", "series_versiones",
     "indexadores_estado", "whatsapp_chats", "whatsapp_leer", "whatsapp_programados", "llamadas_a_otros", "recados",
     "llamada_grabacion",
     "whatsapp_pendientes", "vida_buscar", "dia_reconstruir", "simular_finanzas", "investigaciones",
@@ -42031,6 +42628,9 @@ _AJENO_SI_LO_PIDES = {
     "borrar_evento":          re.compile(r"\b(borra|borrala|borralo|quita|quitala|quitalo|anula|"
                                          r"anulala|cancela|cancelala)\b"),
     "pelis_pedir":            re.compile(r"\b(pide|pideme|pidela|pidemela|descarga|descargala|"
+                                         r"descargame|descargamela|baja|bajala|bajame|"
+                                         r"bajamela)\b"),
+    "series_pedir":           re.compile(r"\b(pide|pideme|pidela|pidemela|descarga|descargala|"
                                          r"descargame|descargamela|baja|bajala|bajame|"
                                          r"bajamela)\b"),
     "jellyfin_reproducir":    re.compile(r"\b(pon|ponme|ponla|ponlo|reproduce|echa|echame)\b"),
@@ -42143,7 +42743,7 @@ _PRESCINDIBLES_OPENAI = (
     "relanzar_agente", "lanzar_streaming", "jobs", "contar_revision", "arreglar_revision",
     "responder_a_la_sesion", "encargar_a_una_sesion", "configurar_resumen_diario",
     "estado_resumen_diario", "borrar_anticipacion", "olvidar_patron", "indexadores_estado",
-    "pelis_versiones", "errores", "github_prs", "desplegar", "hablar_con_el_programador",
+    "pelis_versiones", "series_versiones", "errores", "github_prs", "desplegar", "hablar_con_el_programador",
     "ver_proyectos", "encargar_proyecto", "anular_noche", "whatsapp_cancelar_programado",
 )
 
@@ -42198,6 +42798,7 @@ def _jarvis_esquema() -> list:
     # Y Radarr y Prowlarr, cada uno con su URL y su clave.
     con_radarr   = _radarr_configurado()
     con_prowlarr = _prowlarr_configurado()
+    con_sonarr   = _sonarr_configurado()
     # Y el programador, sin su puente no tiene a quién encargar nada.
     con_programador = _programador_configurado()
     # Y el PC en directo, sin la URL y el token de su MCP.
@@ -42233,6 +42834,7 @@ def _jarvis_esquema() -> list:
         and (con_jellyfin or not h.get("requiere_jellyfin"))
         and (con_radarr or not h.get("requiere_radarr"))
         and (con_prowlarr or not h.get("requiere_prowlarr"))
+        and (con_sonarr or not h.get("requiere_sonarr"))
         and (con_programador or not h.get("requiere_programador"))
         and (con_pc_mcp or not h.get("requiere_pc_mcp"))
         and (con_spotify or not h.get("requiere_spotify"))
@@ -42345,6 +42947,8 @@ _MCP_SERVIDOR_SOLO_LECTURA = {
     # 2026-10-27, con el botón del móvil (`PREGUNTAS_ACCIONES`); probar y arreglar los
     # indexadores, en `_MCP_SERVIDOR_ACCIONES`. Las versiones (2026-11-09), solo cifras.
     "pelis_buscar", "pelis_descargas", "pelis_versiones", "indexadores_estado",
+    # 2026-11-25: las series, lo mismo que las pelis (pedir y borrar, con el botón).
+    "series_buscar", "series_descargas", "series_versiones",
     # 2026-10-25: las ventanas del PC (títulos cortos, como los de Jellyfin). La pantalla
     # NO: su descripción trae lo que diga una web o un correo abiertos, y al otro lado de
     # esta llamada hay una shell.

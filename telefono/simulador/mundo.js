@@ -23,7 +23,7 @@ const crypto = require('crypto');
 
 // Las que el backend no hace sin un sí (ver «Qué pide permiso» en docs/JARVIS.md y el
 // final de telefono/RUNBOOK.md). Un caso puede cambiarlas con `se_confirma`.
-const SE_CONFIRMAN = ['whatsapp_enviar', 'whatsapp_programar', 'borrar_idea', 'pelis_borrar', 'garaje'];
+const SE_CONFIRMAN = ['whatsapp_enviar', 'whatsapp_programar', 'borrar_idea', 'pelis_borrar', 'series_borrar', 'garaje'];
 
 // La misma nota que `_proponer_en_movil` en backend/main.py: es parte de lo que Claude
 // lee, así que es parte de lo que se prueba. Si cambia allí, cambia aquí.
