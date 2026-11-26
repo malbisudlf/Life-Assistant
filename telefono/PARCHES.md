@@ -2362,6 +2362,9 @@ prueba que falta: una llamada de verdad con alguien al otro lado.
 ## El parche 54: las llamadas a otros oyen como las de Mikel
 
 Del 2026-11-26, solo `lib/conversacion-tercero.js` (`oidoDeTerceros`) y `parche32.test.js`.
+**Aplicado en caja ese día** (imagen `claude-phone-voice-app:antes-p54` y copias `*.bak-p54`;
+registrada en el 3CX; RUNBOOK copiado, con su `.bak-p54`; foto coincidente). Falta oírla en
+una llamada real.
 Mikel, tras una llamada a un amigo mal transcrita: «quiero que use el mismo modelo de STT que
 uso yo, que es rápido». Las llamadas a otros forzaban `small` en todo (`conModeloRapido`);
 ahora usan el cliente del oído tal cual, así que el anticipo hace lo del parche 51: `small`

@@ -15,3 +15,7 @@ websockets==15.0.1
 # Para leer el texto de los PDF de OneDrive (pólizas, contratos), que es lo que más se
 # le va a preguntar a Jarvis de esos documentos. Python puro, sin nada del sistema.
 pypdf==6.19.0
+# Windows no trae la base de zonas horarias que usa zoneinfo: sin esto, los tests y el
+# backend local mueren al arrancar con «TIMEZONE inválida: 'Europe/Madrid'». En Linux
+# (caja, CI) la trae el sistema y no se instala.
+tzdata; sys_platform == "win32"
