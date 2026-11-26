@@ -9409,9 +9409,16 @@ def _jarvis_contexto_lugar() -> str:
         desde = f"las {desde}"
     texto = f"\nAhora mismo el usuario está {_texto_lugar(lugar['lugar'])} (desde {desde})."
     clase = _en_clase()
-    if clase:
+    if clase and lugar["lugar"] == LUGAR_UNI:
         texto += (f" Según su calendario tiene clase («{clase['titulo']}») hasta las "
                   f"{clase['fin'].strftime('%H:%M')}.")
+    elif clase:
+        # Manda el sitio, no el horario (2026-11-26): con la clase a secas, Jarvis le dijo a
+        # un amigo que Mikel estaba en clase hasta las 19 mientras Mikel le hablaba desde
+        # casa. Lo mismo que el no molestar de WhatsApp (`_wa_no_molestar_texto`).
+        texto += (f" Su calendario dice clase («{clase['titulo']}») hasta las "
+                  f"{clase['fin'].strftime('%H:%M')}, pero NO está en la uni: no ha ido. No "
+                  "cuentes con esa clase al planificar ni digas a nadie que está en clase.")
     if lugar["lugar"] in (LUGAR_GIMNASIO, LUGAR_UNI):
         texto += (" Contesta todavía más corto de lo normal, y no le propongas cosas que "
                   "solo tienen sentido en casa (encender el PC, la casa) si no las pide.")
@@ -23360,7 +23367,7 @@ _TERCERO_SISTEMA = """{quien_eres} \
 Estás en una llamada de teléfono con {nombre}, a quien has llamado de parte de Mikel. {como_empezaste}: «{apertura}».
 
 Lo que tienes que conseguir: {objetivo}
-Lo que sabes y puedes contar: {contexto}
+Lo que sabes para decidir (es para ti, no para contarlo): {contexto}
 
 Reglas:
 - Hablas por teléfono: una o dos frases cortas y naturales por turno, en español de España, sin \
@@ -23373,14 +23380,22 @@ haces: ofreces trasladárselo a Mikel.
 - No cuentes de Mikel nada que no esté arriba (ni dónde está, ni su agenda, ni datos personales), \
 no inventes y no te comprometas a nada en su nombre fuera de tu encargo: lo nuevo, «se lo digo a \
 Mikel».
+- Ni siquiera lo de arriba lo recites: da la conclusión, no las razones. «Puede a partir de las \
+siete y media», no «tiene clase hasta las siete y luego gimnasio». Solo si te preguntan por qué, \
+una razón breve y sin detalles de su agenda («mañana madruga»).
+- Decides tú, como lo haría Mikel, dentro del margen de arriba. Si te preguntan a qué hora o qué \
+día, propón tú uno concreto que encaje; si te proponen algo que encaja, acéptalo; si no encaja, \
+ofrece tú la alternativa más cercana que sí encaje. No le consultes a Mikel lo que se deduce de \
+tu encargo y de su margen.
 {identidad}
 - Si ha saltado un contestador o un buzón de voz («deje su mensaje», «tras la señal»), deja un \
 recado breve con el motivo de la llamada y cuelga. Si contesta otra persona, pregunta por \
 {nombre} o deja el recado.
 - En cuanto tengas lo que necesitas, o si la otra persona no puede hablar, despídete en una frase \
 y cuelga.
-- Si para seguir hace falta que Mikel decida algo que tu encargo no cubre (otra hora, otro \
-precio, una condición), puedes consultárselo SIN colgar: pon la pregunta para él en \
+- Solo si para seguir hace falta que Mikel decida algo que ni tu encargo ni su margen cubren \
+(un precio, una condición nueva, cambiar el plan, una hora fuera de su margen), puedes \
+consultárselo SIN colgar: pon la pregunta para él en \
 "consultar" (una frase, con lo que ha dicho la otra persona) y hasta tres respuestas cortas \
 en "opciones"; en "decir", algo como «Un segundo, que se lo consulto a Mikel». Cuando te \
 llegue «[Mikel contesta: …]», sigue la llamada con eso. Como mucho dos consultas por llamada.
@@ -41472,12 +41487,18 @@ _JARVIS_HERRAMIENTAS = {
                                                       "llamada, para saber cuándo colgar: «saber si "
                                                       "come con Mikel hoy y, si sí, a qué hora»."},
                           "contexto": {"type": "string",
-                                       "description": "Lo que puede contar si le preguntan "
-                                                      "(«Mikel puede de 14:00 a 15:30, por el "
-                                                      "centro»). Solo lo necesario: nada más de "
-                                                      "Mikel sale en la llamada. Si él ha dado "
+                                       "description": "El margen para que la llamada decida "
+                                                      "sola, ya calculado por ti: «Mikel puede "
+                                                      "desde las 19:30 y tiene que estar de vuelta "
+                                                      "antes de las 22:30». Sácalo tú de su "
+                                                      "agenda, de dónde está de verdad (si el "
+                                                      "calendario dice clase y está en casa, no ha "
+                                                      "ido) y de lo que te haya dicho; no le "
+                                                      "preguntes lo que puedes deducir. La "
+                                                      "conclusión, no la agenda: nada de «tiene "
+                                                      "clase y luego gimnasio». Si él ha dado "
                                                       "margen («si no hay a las nueve, a las nueve "
-                                                      "y media vale»), ponlo aquí: sin él, la "
+                                                      "y media vale»), ponlo aquí: sin margen, la "
                                                       "llamada tiene que parar a preguntárselo."}},
         "obligatorios":  ["nombre", "mensaje", "objetivo"],
         "requiere_terceros": True,

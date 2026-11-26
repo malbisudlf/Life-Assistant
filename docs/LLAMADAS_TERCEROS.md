@@ -84,8 +84,11 @@ Dos herramientas de Jarvis, que solo existen con `TERCEROS_LLAMADAS=1`:
    (`GET /telefono/tercero/{id}/guion`) y genera la voz de esas frases mientras el otro
    habla; en cada turno Claude solo dice qué rama toca (`{"rama": "B2"}`) y la frase
    suena al instante. Lo que no encaja se contesta entero, como siempre; el resultado lo
-   saca al colgar `_resumir_tercero` de la transcripción. Y la transcripción, con el modelo
-   pequeño del oído (`small`, ~0,3 s en vez de ~1,1). Medido antes de esto: ~4,5 s desde que
+   saca al colgar `_resumir_tercero` de la transcripción. La transcripción, desde el parche 54
+   (2026-11-26), **como en las llamadas de Mikel**: `small` decide en el silencio si la frase
+   ha acabado y `turbo` da el texto. Hasta entonces era solo `small` (~0,3 s en vez de ~1,1),
+   y entendía mal («en el mine»; el 2026-11-26, una llamada entera a un amigo). Cuesta ~0,8 s
+   más por turno; `TERCEROS_STT_RAPIDO=1` en la voice-app vuelve a solo `small`. Medido antes de esto: ~4,5 s desde que
    el otro calla hasta oír a Jarvis (0,9 de silencio, 0,7 de transcripción, 2,1-2,6 de
    Claude, 0,65 de voz). Por debajo de ~2,5 s no se baja con Claude por la suscripción: el
    silencio que cierra la frase y lo que tarda en empezar a contestar ya suman eso.
@@ -131,6 +134,16 @@ Dos herramientas de Jarvis, que solo existen con `TERCEROS_LLAMADAS=1`:
    artificial. No cuenta de ti nada que no le hayas dado en `contexto` y no se compromete a
    nada fuera del encargo («se lo digo a Mikel»). Con `TERCEROS_SE_PRESENTA=1`, la
    presentación de antes. A ti («llámame») te sigue diciendo que es Jarvis.
+   **Decide él, y no recita** (2026-11-26). Mikel pidió «pregúntale a qué hora puedo ir a su
+   casa; mañana viajo, que no sea tarde», y la llamada le contó al amigo, sin que lo
+   preguntara, su clase, su gimnasio y el viaje, con horas; y
+   después le mandó a Mikel la pregunta de la hora. Ahora: el `contexto` es el margen ya
+   calculado («puede desde las 19:30 y tiene que volver antes de las 22:30»), que lo saca el
+   Jarvis que encarga la llamada de la agenda y de dónde está de verdad, sin preguntar; en el
+   prompt de la llamada es «lo que sabes para decidir (es para ti, no para contarlo)»; da la
+   conclusión y no las razones; propone él una hora que encaje o acepta la que encaje, y solo
+   consulta lo que el margen no cubre. Y el lugar manda sobre el horario
+   (`_jarvis_contexto_lugar`): clase en el calendario estando en casa es que no ha ido.
 5. **No se graba.** El audio no se guarda en ningún sitio, y la transcripción vive en la
    memoria del backend (las últimas 20 llamadas). Lo que queda es el aviso con el resumen.
 6. **Frenos**: nace apagado; entre las 9:00 y las 22:00 (`TERCEROS_DESDE/HASTA`); una a la

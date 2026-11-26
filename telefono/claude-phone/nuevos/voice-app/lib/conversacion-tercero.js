@@ -16,8 +16,8 @@
  *     descolgar y oír algo (~4,8 s el 2026-11-01).
  *   - **Lo que se puede, por adelantado.** El backend (Claude) prepara un guion con las
  *     respuestas probables y aquí se genera su voz (`prepararGuion`): si la respuesta es
- *     del guion, suena al instante. Y se transcribe con el modelo pequeño del oído
- *     (`conModeloRapido`).
+ *     del guion, suena al instante. Se transcribe como en las llamadas de Mikel
+ *     (`oidoDeTerceros`, parche 54; antes, solo con el modelo pequeño).
  *   - **Preparado antes de marcar (parche 43).** La presentación entera y el guion con su
  *     voz, antes de que suene el teléfono del otro (`prepararLlamada`, en
  *     outbound-routes.js): al descolgar no queda nada por generar.
@@ -219,6 +219,17 @@ function conModeloRapido(whisperClient) {
 }
 
 /**
+ * Parche 54 (2026-11-26): el oído de estas llamadas es el de las de Mikel. Con solo `small`
+ * se entendía mal a la otra persona («en el mine», y el 2026-11-26 una llamada entera a un
+ * amigo), y Mikel lo pidió: «que use el mismo modelo que uso yo». Así va como las suyas
+ * (parche 51): `small` decide en el silencio si la frase ha acabado y `turbo` da el texto.
+ * Cuesta ~0,8 s más por turno. TERCEROS_STT_RAPIDO=1 vuelve a solo `small`.
+ */
+function oidoDeTerceros(whisperClient) {
+  return process.env.TERCEROS_STT_RAPIDO === '1' ? conModeloRapido(whisperClient) : whisperClient;
+}
+
+/**
  * Pide al backend las frases del guion y genera su voz ya, en `cache` (texto → promesa de
  * URL). Pregunta hasta que esté (`listo`) o pasen `esperaMs` (GUION_ESPERA_MS). Nunca
  * lanza. Vuelve con true si ya no hay nada más que esperar del backend, false si se cansó.
@@ -413,7 +424,7 @@ async function runConversacionTercero(endpoint, dialog, callId, o) {
   let fork = false;
   let desarmar = function () {};
   let fin = 'max_turns';
-  const oido = conModeloRapido(o.whisperClient);
+  const oido = oidoDeTerceros(o.whisperClient);
   // Parche 43: el guion ya viene preparado de antes de marcar (`prepararLlamada`); si no
   // llegó a tiempo, se sigue pidiendo ahora, como antes.
   const guion = o.guion instanceof Map ? o.guion : new Map();
@@ -588,4 +599,4 @@ async function runConversacionTercero(endpoint, dialog, callId, o) {
 }
 
 module.exports = { runConversacionTercero, preguntarAlBackend, esperarConsulta, esperarSaludo, esperarLocucion,
-                   esperarSilencio, prepararGuion, prepararLlamada, conModeloRapido, FRASES };
+                   esperarSilencio, prepararGuion, prepararLlamada, conModeloRapido, oidoDeTerceros, FRASES };

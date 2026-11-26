@@ -534,3 +534,21 @@ class TestJarvisSabeDondeEstas:
 
     def test_sin_saberlo_no_dice_nada(self, mock_requests):
         assert main._jarvis_contexto_lugar() == ""
+
+    CLASE = {"titulo": "Clase de prueba", "fin": datetime(2026, 11, 26, 19, 0, tzinfo=main.LOCAL_TZ)}
+
+    def test_clase_en_el_calendario_y_en_casa_es_que_no_ha_ido(self, monkeypatch):
+        # 2026-11-26: le dijo a un amigo que Mikel estaba en clase hasta las 19, y estaba en casa.
+        monkeypatch.setattr(main, "_lugar_actual_seguro",
+                            lambda: {"lugar": main.LUGAR_CASA, "desde": datetime.now(main.LOCAL_TZ)})
+        monkeypatch.setattr(main, "_en_clase", lambda: self.CLASE)
+        texto = main._jarvis_contexto_lugar()
+        assert "no ha ido" in texto and "ni digas a nadie que está en clase" in texto
+        assert "tiene clase" not in texto
+
+    def test_en_la_uni_la_clase_cuenta(self, monkeypatch):
+        monkeypatch.setattr(main, "_lugar_actual_seguro",
+                            lambda: {"lugar": main.LUGAR_UNI, "desde": datetime.now(main.LOCAL_TZ)})
+        monkeypatch.setattr(main, "_en_clase", lambda: self.CLASE)
+        texto = main._jarvis_contexto_lugar()
+        assert "tiene clase («Clase de prueba») hasta las 19:00" in texto and "no ha ido" not in texto

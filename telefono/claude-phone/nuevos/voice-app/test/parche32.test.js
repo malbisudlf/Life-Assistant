@@ -14,7 +14,7 @@ for (const nivel of ['log', 'warn', 'error', 'info']) console[nivel] = function 
 
 const { LineaO2 } = require('../lib/linea-o2');
 const { runConversacionTercero, esperarSaludo, esperarLocucion, esperarSilencio, prepararGuion,
-        conModeloRapido, FRASES } = require('../lib/conversacion-tercero');
+        conModeloRapido, oidoDeTerceros, FRASES } = require('../lib/conversacion-tercero');
 
 const USUARIO = 'usuario-de-prueba';
 const TID = '11111111-2222-3333-4444-555555555555';
@@ -320,7 +320,20 @@ test('guion: con 404 (sin llamada) deja de preguntar', async () => {
   assert.strictEqual(veces, 1);
 });
 
-test('el oído de estas llamadas pide el modelo pequeño', async () => {
+test('parche 54: el oído de estas llamadas es el de Mikel (small cierra, turbo transcribe)', async () => {
+  const cliente = { oidoDisponible: () => true, transcribe: async () => 'x' };
+  const antes = process.env.TERCEROS_STT_RAPIDO;
+  try {
+    delete process.env.TERCEROS_STT_RAPIDO;
+    assert.strictEqual(oidoDeTerceros(cliente), cliente);
+    process.env.TERCEROS_STT_RAPIDO = '1';
+    assert.notStrictEqual(oidoDeTerceros(cliente), cliente);
+  } finally {
+    if (antes === undefined) delete process.env.TERCEROS_STT_RAPIDO; else process.env.TERCEROS_STT_RAPIDO = antes;
+  }
+});
+
+test('con TERCEROS_STT_RAPIDO=1, el oído pide el modelo pequeño', async () => {
   const pedidas = [];
   const cliente = { oidoDisponible: () => true, transcribe: async (a, op) => { pedidas.push(op); return 'x'; } };
   const rapido = conModeloRapido(cliente);

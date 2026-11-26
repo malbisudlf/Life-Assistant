@@ -2359,6 +2359,21 @@ compose up -d --build voice-app` **sin llamadas en curso**; comprobar que se reg
 3CX; copiar el RUNBOOK a `~/telefono-jarvis/CLAUDE.md`; `exportar.sh` de la foto. Y la
 prueba que falta: una llamada de verdad con alguien al otro lado.
 
+## El parche 54: las llamadas a otros oyen como las de Mikel
+
+Del 2026-11-26, solo `lib/conversacion-tercero.js` (`oidoDeTerceros`) y `parche32.test.js`.
+Mikel, tras una llamada a un amigo mal transcrita: «quiero que use el mismo modelo de STT que
+uso yo, que es rápido». Las llamadas a otros forzaban `small` en todo (`conModeloRapido`);
+ahora usan el cliente del oído tal cual, así que el anticipo hace lo del parche 51: `small`
+decide el cierre y `turbo` da el texto. ~0,8 s más por turno a cambio de entender.
+`TERCEROS_STT_RAPIDO=1` en `~/.claude-phone/.env` y `up -d voice-app` lo deja como antes.
+
+En la copia `/tmp/p54` de caja: `parche32.test.js` 34/34, y en el conjunto los mismos 18
+fallos de entorno que la voice-app viva, ninguno nuevo. Aplicarlo: imagen `antes-p54`, copias
+`*.bak-p54`, `patch -p2 < telefono/parche-54.diff` en `~/.claude-phone-cli/voice-app`, `docker
+compose up -d --build voice-app` **sin llamadas en curso**, registro en el 3CX, RUNBOOK a
+`~/telefono-jarvis/CLAUDE.md` y `exportar.sh` de la foto.
+
 ## Avería del 2026-11-18: FreeSWITCH sin perfil SIP, y nadie se enteró
 
 De las 15:19 a las 16:13 (hora de Madrid) **todas las llamadas fallaron con 503**, las de Mikel

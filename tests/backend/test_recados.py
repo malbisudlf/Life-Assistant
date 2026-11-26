@@ -439,6 +439,14 @@ class TestSinPresentarse:
         assert "di la verdad sin rodeos: eres su asistente, una inteligencia artificial" in sistema
         assert "Has empezado la llamada con esta frase: «Hola, buenas tardes. Quería reservar.»" in sistema
 
+    def test_decide_el_y_no_recita_la_agenda(self):
+        # 2026-11-26: contó a un amigo la agenda entera sin que se la pidiera y luego le
+        # preguntó a Mikel la hora. El contexto es para decidir, no para contarlo.
+        sistema = main._tercero_sistema({**self.MISION, "contexto": "Puede desde las 19:30."})
+        assert "Lo que sabes para decidir (es para ti, no para contarlo): Puede desde las 19:30." in sistema
+        assert "da la conclusión, no las razones" in sistema
+        assert "No le consultes a Mikel lo que se deduce" in sistema
+
     def test_a_el_mismo_y_con_el_interruptor_se_presenta_como_antes(self, monkeypatch):
         assert main._apertura_tercero("Mikel", "Prueba.", propio=True).startswith("Hola, señor. Soy Jarvis")
         assert "Eres Jarvis" in main._tercero_sistema({**self.MISION, "propio": True})
