@@ -50,7 +50,9 @@ print("1" if d.get("dormir") is True else "0", int(d.get("epoch") or 0), (d.get(
   if [ "$epoch" -lt $((ahora + 1800)) ] || [ "$epoch" -gt $((ahora + 50400)) ]; then
     log "hora de despertar sin sentido ($epoch); no me apago"; exit 0
   fi
-  echo "$hoy" > "$ESTADO/ultima"
+  # «ultima» se escribe justo antes de apagar, no aquí: el 2026-11-27 el reloj falló
+  # después de apuntarla y los reintentos de cada cuarto de hora salieron sin probar.
+  apuntar_noche() { echo "$hoy" > "$ESTADO/ultima"; }
 fi
 
 # El Wake-on-LAN queda puesto por si algún día se puede despertar por red. No es lo que
@@ -63,8 +65,12 @@ fi
 if ! rtcwake -m no -u -t "$epoch" >/dev/null; then
   log "no he podido programar el reloj; no me apago"; exit 1
 fi
-if [ "$(cat /sys/class/rtc/rtc0/wakealarm 2>/dev/null)" != "$epoch" ]; then
-  log "el reloj no ha guardado la hora; no me apago"; exit 1
+# rtcwake traduce la hora con la diferencia entre el reloj del sistema y el de la placa,
+# así que lo guardado puede bailar un par de segundos: se admite ±5 s, no la igualdad.
+guardado=$(cat /sys/class/rtc/rtc0/wakealarm 2>/dev/null)
+if ! [[ "$guardado" =~ ^[0-9]+$ ]] || [ $((guardado - epoch)) -gt 5 ] || [ $((epoch - guardado)) -gt 5 ]; then
+  log "el reloj no ha guardado la hora (pedí $epoch, guardó ${guardado:-nada}); no me apago"; exit 1
 fi
+declare -F apuntar_noche >/dev/null && apuntar_noche
 log "me apago hasta las $(date -d "@$epoch" +%H:%M) ($motivo)"
 systemctl poweroff
